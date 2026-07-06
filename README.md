@@ -1,0 +1,110 @@
+# HaderaPay Ledger Architecture
+
+This starter implements the core of a multi-tier payment routing and settlement system around an immutable double-entry ledger.
+
+The design has one non-negotiable rule: financial truth lives in `journal_entries` and `ledger_lines`. Actor balances are derived by summing ledger lines. There is no mutable `balance` column on users, wallets, orders, or transfers.
+
+## Files
+
+- `sql/schema.sql` contains the PostgreSQL schema, constraints, balance view, immutable-ledger triggers, and deferred journal balancing trigger.
+- `src/domain.ts` contains shared money, FX, commission, and validation helpers.
+- `src/ledger.ts` contains balanced journal posting and perfect journal reversal logic.
+- `src/orders.ts` contains the order lifecycle and order payment/void posting logic.
+- `src/transfers.ts` contains approval/receive flows for internal transfers and top-ups.
+- `src/settlements.ts` contains net settlement clearing for Brokers, Agents, and Special Brokers.
+
+## Actors And Accounts
+
+Actors are stored in `users` with one of these roles:
+
+- `MASTER`: central clearinghouse and administrator.
+- `BROKER`: initiates outward payment orders.
+- `AGENT`: fulfills and pays out orders.
+- `SPECIAL_BROKER`: can initiate orders like a broker and pay routed orders like an agent.
+
+Each actor has one `ACTOR_CLEARING` ledger account per currency. Platform accounts are ownerless ledger accounts:
+
+- `MASTER_CASH`: money actually held or received by Master.
+- `MASTER_FX_CLEARING`: balancing account for cross-currency journals.
+- `MASTER_FEE_REVENUE`: commission revenue.
+
+The schema stores currencies as three-letter ISO-style codes. The local preview app currently exposes `USD`, `ETB`, `EUR`, and `ERN`.
+
+Special Broker netting requires no special balance table. The same actor can be debited for broker activity and credited for agent activity. Settlement simply sums that Special Broker's ledger lines by currency and nets the result.
+
+## Order State Machine
+
+Allowed states:
+
+- `DRAFT`: broker is preparing the order.
+- `PENDING_FORWARD`: order is submitted to Master for routing.
+- `ASSIGNED`: Master routed the order to an Agent or Special Broker.
+- `PAID`: paying actor completed payout and the journal was posted.
+- `CANCELLED`: Master cancelled before payment; no final payment journal exists.
+- `VOIDED`: paid order was reversed during the void window with Master consent.
+
+Main transitions:
+
+```text
+DRAFT -> PENDING_FORWARD -> ASSIGNED -> PAID -> VOIDED
+                         \-> CANCELLED
+PENDING_FORWARD ---------> CANCELLED
+```
+
+Validation rule: `sender_name` is optional, but at least one of `receiver_name`, `receiver_account_number`, `receiver_phone_number`, or `remarks` is required. This is enforced in both SQL and TypeScript.
+
+## Transfer State Machine
+
+Required states:
+
+- `PENDING_APPROVAL`: Agent-to-Agent and Broker-to-Master transfers wait for Master approval.
+- `APPROVED`: Master approved and the ledger journal was posted.
+- `REJECTED`: Master rejected; no journal is posted.
+
+Top-up states:
+
+- `PENDING_RECEIVE`: Master initiated a top-up and waits for the receiver.
+- `RECEIVED`: receiver accepted and the ledger journal was posted.
+
+## Order Payment Journal
+
+For a same-currency order without FX:
+
+```text
+Debit  Broker ACTOR_CLEARING      source amount + commission
+Credit Agent ACTOR_CLEARING       payout amount
+Credit MASTER_FEE_REVENUE         commission, when present
+```
+
+For a cross-currency order, the journal is balanced independently per currency:
+
+```text
+Debit  Broker ACTOR_CLEARING      source amount + commission, source currency
+Credit MASTER_FX_CLEARING         source amount, source currency
+Credit MASTER_FEE_REVENUE         commission, source currency
+
+Debit  MASTER_FX_CLEARING         payout amount, payout currency
+Credit Agent ACTOR_CLEARING       payout amount, payout currency
+```
+
+Voiding never edits the original lines. It posts a reversal journal with every debit and credit flipped.
+
+## Settlement
+
+Settlement is another journal source type. It clears outstanding actor positions against `MASTER_CASH`.
+
+For a broker owing Master:
+
+```text
+Debit  MASTER_CASH
+Credit Broker ACTOR_CLEARING
+```
+
+For Master owing an agent:
+
+```text
+Debit  Agent ACTOR_CLEARING
+Credit MASTER_CASH
+```
+
+For Special Brokers, compute the actor account balance by currency and settle only the net position.
