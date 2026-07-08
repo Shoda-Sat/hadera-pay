@@ -6,12 +6,12 @@ import crypto from "node:crypto";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const port = Number(process.env.PORT ?? 4173);
-const host = process.env.HOST ?? "127.0.0.1";
-const dataDir = path.join(root, "data");
+const host = process.env.HOST ?? "0.0.0.0";
+const dataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(root, "data");
 const dbPath = path.join(dataDir, "auth-db.json");
 const inviteTtlMs = 1000 * 60 * 60;
-const ownerUser = "Owner";
-const ownerPassword = "1453@Siem#";
+const ownerUser = process.env.OWNER_USER ?? "Owner";
+const ownerPassword = process.env.OWNER_PASSWORD ?? "1453@Siem#";
 const subscriptionPlans = new Map([
   ["one_day", { label: "1 day", days: 1 }],
   ["three_days", { label: "3 days", days: 3 }],
