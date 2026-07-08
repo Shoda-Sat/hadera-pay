@@ -1398,7 +1398,7 @@
       <div class="auth-head">
         <div>
           <h1>HaderaPay Accounts</h1>
-          <span class="muted">Sign in as Master or join a Master workspace as an Actor.</span>
+          <span class="muted">Sign in as Owner, Master, or join a Master workspace as an Actor.</span>
         </div>
         <span class="state-pill">Local</span>
       </div>
@@ -1410,8 +1410,8 @@
         <form class="auth-form" id="loginForm">
           <div class="form-grid">
             <div class="field">
-              <label for="loginEmail">Email</label>
-              <input id="loginEmail" type="email" autocomplete="email">
+              <label for="loginEmail">Username or email</label>
+              <input id="loginEmail" autocomplete="username">
             </div>
             <div class="field">
               <label for="loginPassword">Password</label>
@@ -1440,7 +1440,6 @@
             <div class="field">
               <label for="signupRole">Account type</label>
               <select id="signupRole">
-                <option>Master</option>
                 <option>Actor</option>
               </select>
             </div>
@@ -1503,6 +1502,10 @@
         <button data-view="settings" type="button" aria-label="Settings">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5Z"/><path d="M19.4 15a1.8 1.8 0 0 0 .36 1.98l.06.06a2.1 2.1 0 1 1-2.97 2.97l-.06-.06a1.8 1.8 0 0 0-1.98-.36 1.8 1.8 0 0 0-1.08 1.65V21a2.1 2.1 0 1 1-4.2 0v-.09A1.8 1.8 0 0 0 8.45 19.3a1.8 1.8 0 0 0-1.98.36l-.06.06a2.1 2.1 0 1 1-2.97-2.97l.06-.06A1.8 1.8 0 0 0 3.86 15a1.8 1.8 0 0 0-1.65-1.08H2.1a2.1 2.1 0 1 1 0-4.2h.09a1.8 1.8 0 0 0 1.65-1.08 1.8 1.8 0 0 0-.36-1.98l-.06-.06A2.1 2.1 0 1 1 6.39 3.6l.06.06a1.8 1.8 0 0 0 1.98.36h.02A1.8 1.8 0 0 0 9.53 2.4V2.1a2.1 2.1 0 1 1 4.2 0v.09A1.8 1.8 0 0 0 14.81 3.84a1.8 1.8 0 0 0 1.98-.36l.06-.06a2.1 2.1 0 1 1 2.97 2.97l-.06.06a1.8 1.8 0 0 0-.36 1.98v.02a1.8 1.8 0 0 0 1.65 1.08h.09a2.1 2.1 0 1 1 0 4.2h-.09A1.8 1.8 0 0 0 19.4 15Z"/></svg>
           Settings
+        </button>
+        <button data-view="owner" type="button" aria-label="Owner">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 3 4 7v6c0 5 3.4 7.5 8 8 4.6-.5 8-3 8-8V7l-8-4Z"/><path d="M9 12l2 2 4-5"/></svg>
+          Owner
         </button>
       </nav>
 
@@ -2014,6 +2017,58 @@
           </div>
         </section>
 
+        <section class="view" id="owner">
+          <div class="grid">
+            <div class="panel span-5">
+              <div class="panel-header">
+                <h2>Create Master</h2>
+                <span class="state-pill">Owner</span>
+              </div>
+              <div class="panel-body">
+                <form id="ownerMasterForm">
+                  <div class="form-grid">
+                    <div class="field full">
+                      <label for="ownerMasterName">Master name</label>
+                      <input id="ownerMasterName" autocomplete="name">
+                    </div>
+                    <div class="field">
+                      <label for="ownerMasterEmail">Email</label>
+                      <input id="ownerMasterEmail" type="email" autocomplete="email">
+                    </div>
+                    <div class="field">
+                      <label for="ownerMasterPassword">Password</label>
+                      <input id="ownerMasterPassword" type="password" autocomplete="new-password">
+                    </div>
+                    <div class="field full">
+                      <label for="ownerMasterPlan">Subscription</label>
+                      <select id="ownerMasterPlan"></select>
+                    </div>
+                  </div>
+                  <span class="field-error" id="ownerMasterError"></span>
+                  <div class="actions">
+                    <button class="btn primary" type="submit">Create Master</button>
+                  </div>
+                </form>
+              </div>
+            </div>
+            <div class="panel span-7">
+              <div class="panel-header">
+                <h2>User Subscriptions</h2>
+                <span class="state-pill">Master Access</span>
+              </div>
+              <div class="panel-body table-wrap">
+                <table>
+                  <thead>
+                    <tr><th>User</th><th>Workspace</th><th>Active</th><th>Expires</th><th>Status</th><th>Duration</th><th>Action</th></tr>
+                  </thead>
+                  <tbody id="subscriptionRows"></tbody>
+                </table>
+                <span class="field-error" id="subscriptionError"></span>
+              </div>
+            </div>
+          </div>
+        </section>
+
         <section class="view" id="settings">
           <div class="panel">
             <div class="panel-header">
@@ -2027,21 +2082,6 @@
                 </thead>
                 <tbody id="permissionRows"></tbody>
               </table>
-            </div>
-          </div>
-          <div class="panel">
-            <div class="panel-header">
-              <h2>User Subscriptions</h2>
-              <span class="state-pill">Master Access</span>
-            </div>
-            <div class="panel-body table-wrap">
-              <table>
-                <thead>
-                  <tr><th>User</th><th>Workspace</th><th>Expires</th><th>Status</th><th>Duration</th><th>Action</th></tr>
-                </thead>
-                <tbody id="subscriptionRows"></tbody>
-              </table>
-              <span class="field-error" id="subscriptionError"></span>
             </div>
           </div>
           <div class="panel">
@@ -2298,8 +2338,17 @@
       } catch {
         throw new Error("Could not reach the local server. Open the app at http://127.0.0.1:4173/preview.html after running npm start.");
       }
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.error || "Request failed.");
+      const raw = await response.text().catch(() => "");
+      let data = {};
+      try {
+        data = raw ? JSON.parse(raw) : {};
+      } catch {
+        data = {};
+      }
+      if (!response.ok) {
+        const message = data.error || raw.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() || `${response.status} ${response.statusText}`;
+        throw new Error(message || "Request failed.");
+      }
       return data;
     }
 
@@ -2427,7 +2476,8 @@
       settlement: ["Settlement", "Net actor positions against Master cash."],
       archive: ["Archive", "Closed transactions locked after balance closing."],
       actors: ["Actors", "Master can create and remove ledger actors."],
-      settings: ["Settings", "Master controls actor permissions."]
+      settings: ["Settings", "Master controls actor permissions."],
+      owner: ["Owner", "Create Masters and manage subscription access."]
     };
 
     const icons = {
@@ -2494,6 +2544,12 @@
       inviteCurrency: document.getElementById("inviteCurrency"),
       inviteWorkingCurrencies: document.getElementById("inviteWorkingCurrencies"),
       inviteError: document.getElementById("inviteError"),
+      ownerMasterForm: document.getElementById("ownerMasterForm"),
+      ownerMasterName: document.getElementById("ownerMasterName"),
+      ownerMasterEmail: document.getElementById("ownerMasterEmail"),
+      ownerMasterPassword: document.getElementById("ownerMasterPassword"),
+      ownerMasterPlan: document.getElementById("ownerMasterPlan"),
+      ownerMasterError: document.getElementById("ownerMasterError"),
       fixedRateRows: document.getElementById("fixedRateRows"),
       masterRateDivisorRows: document.getElementById("masterRateDivisorRows"),
       actorCount: document.getElementById("actorCount"),
@@ -2934,6 +2990,7 @@
     }
 
     function privilegeViews(role, actor = selectedActor()) {
+      if (role === "Owner") return ["owner"];
       if (role === "Master") return ["dashboard", "orders", "transfers", "chat", "ledger", "settlement", "archive", "actors", "settings"];
       const views = ["dashboard", "orders", "chat", "ledger", "settlement", "archive"];
       if (actor?.transferEnabled !== false) views.splice(2, 0, "transfers");
@@ -3758,22 +3815,35 @@
     }
 
     async function renderSubscriptions() {
-      if (!currentAuth || currentAuth.membership?.role !== "Master") {
-        els.subscriptionRows.innerHTML = '<tr><td colspan="6">Only Master can manage subscriptions.</td></tr>';
+      if (!currentAuth || currentAuth.membership?.role !== "Owner") {
+        if (els.subscriptionRows) els.subscriptionRows.innerHTML = '<tr><td colspan="7">Only Owner can manage subscriptions.</td></tr>';
         return;
       }
       try {
-        const { users, plans, currentUserId } = await api("/api/subscriptions");
+        const { users, plans } = await api("/api/owner/masters");
         els.subscriptionError.classList.remove("visible");
+        if (els.ownerMasterPlan) {
+          const current = els.ownerMasterPlan.value || "one_month";
+          els.ownerMasterPlan.innerHTML = plans.map((plan) => `<option value="${escapeHtml(plan.id)}">${escapeHtml(plan.label)}</option>`).join("");
+          if (plans.some((plan) => plan.id === current)) els.ownerMasterPlan.value = current;
+        }
         els.subscriptionRows.innerHTML = users.length ? users.map((user) => {
           const planOptions = plans.map((plan) => `<option value="${escapeHtml(plan.id)}" ${plan.id === user.plan ? "selected" : ""}>${escapeHtml(plan.label)}</option>`).join("");
-          const currentUserNote = user.userId === currentUserId ? '<br><span class="muted">Current user can extend before expiry.</span>' : "";
+          const isActive = user.active !== false;
+          const statusLabel = isActive ? (user.expired ? "Expired" : "Active") : "Inactive";
+          const statusClass = isActive && !user.expired ? "good" : "danger";
           return `
             <tr>
-              <td><strong>${escapeHtml(user.name)}</strong><br><span class="muted">${escapeHtml(user.email)}</span>${currentUserNote}</td>
+              <td><strong>${escapeHtml(user.name)}</strong><br><span class="muted">${escapeHtml(user.email)}</span></td>
               <td>${escapeHtml(user.workspace || "Workspace")}</td>
+              <td>
+                <label class="currency-check">
+                  <input class="master-active-toggle" type="checkbox" data-user-id="${escapeHtml(user.userId)}" ${isActive ? "checked" : ""}>
+                  Active
+                </label>
+              </td>
               <td>${escapeHtml(displayDate(user.expiresAt))}</td>
-              <td><span class="state-pill ${user.expired ? "danger" : "good"}">${user.expired ? "Expired" : "Active"}</span></td>
+              <td><span class="state-pill ${statusClass}">${statusLabel}</span></td>
               <td>
                 <select class="subscription-plan" data-user-id="${escapeHtml(user.userId)}">
                   ${planOptions}
@@ -3781,15 +3851,15 @@
               </td>
               <td>
                 <div class="setting-inline">
-                  <button class="btn primary extend-subscription" data-mode="extend" data-user-id="${escapeHtml(user.userId)}" type="button" ${user.expired ? "disabled" : ""}>Add Time</button>
+                  <button class="btn primary extend-subscription" data-mode="extend" data-user-id="${escapeHtml(user.userId)}" type="button">Add Time</button>
                   <button class="btn secondary extend-subscription" data-mode="reset" data-user-id="${escapeHtml(user.userId)}" type="button">Set From Now</button>
                 </div>
               </td>
             </tr>
           `;
-        }).join("") : '<tr><td colspan="6">No Master users found.</td></tr>';
+        }).join("") : '<tr><td colspan="7">No Master users found.</td></tr>';
       } catch (error) {
-        els.subscriptionRows.innerHTML = `<tr><td colspan="6">${escapeHtml(error.message)}</td></tr>`;
+        els.subscriptionRows.innerHTML = `<tr><td colspan="7">${escapeHtml(error.message)}</td></tr>`;
       }
     }
 
@@ -4984,6 +5054,8 @@
       els.signupForm.classList.toggle("hidden", !signup);
       els.showLogin.className = `btn ${signup ? "secondary" : "primary active"}`;
       els.showSignup.className = `btn ${signup ? "primary active" : "secondary"}`;
+      els.loginError.classList.remove("visible");
+      els.signupError.classList.remove("visible");
     }
 
     els.showLogin.addEventListener("click", () => setAuthMode("login"));
@@ -5039,6 +5111,31 @@
       els.accountBadge.textContent = "Not logged in";
     });
 
+    els.ownerMasterForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (selectedActor()?.role !== "Owner") return;
+      els.ownerMasterError.classList.remove("visible");
+      try {
+        await api("/api/owner/masters", {
+          method: "POST",
+          body: {
+            name: els.ownerMasterName.value,
+            email: els.ownerMasterEmail.value,
+            password: els.ownerMasterPassword.value,
+            plan: els.ownerMasterPlan.value || "one_month"
+          }
+        });
+        els.ownerMasterName.value = "";
+        els.ownerMasterEmail.value = "";
+        els.ownerMasterPassword.value = "";
+        notifyEvent("Master created", "The new Master can now log in.");
+        await renderSubscriptions();
+      } catch (error) {
+        els.ownerMasterError.textContent = error.message;
+        els.ownerMasterError.classList.add("visible");
+      }
+    });
+
     els.inviteForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       els.inviteError.classList.remove("visible");
@@ -5073,21 +5170,37 @@
 
     els.subscriptionRows.addEventListener("click", async (event) => {
       const button = event.target.closest(".extend-subscription");
-      if (!button || selectedActor()?.role !== "Master") return;
+      if (!button || selectedActor()?.role !== "Owner") return;
       const userId = button.dataset.userId;
       const row = button.closest("tr");
       const plan = row?.querySelector(".subscription-plan")?.value || "one_month";
       try {
-        await api("/api/subscriptions/extend", {
+        await api("/api/owner/subscriptions/extend", {
           method: "POST",
           body: { userId, plan, mode: button.dataset.mode || "extend" }
         });
         notifyEvent("Subscription updated", button.dataset.mode === "reset" ? "Access starts again from today." : "Time was added before expiry.");
         await renderSubscriptions();
-        const { session } = await api("/api/session").catch(() => ({ session: currentAuth }));
-        currentAuth = session || currentAuth;
-        renderProfiles();
       } catch (error) {
+        els.subscriptionError.textContent = error.message;
+        els.subscriptionError.classList.add("visible");
+      }
+    });
+
+    els.subscriptionRows.addEventListener("change", async (event) => {
+      const checkbox = event.target.closest(".master-active-toggle");
+      if (!checkbox || selectedActor()?.role !== "Owner") return;
+      const userId = checkbox.dataset.userId;
+      const active = checkbox.checked;
+      try {
+        await api("/api/owner/masters/active", {
+          method: "POST",
+          body: { userId, active }
+        });
+        notifyEvent(active ? "Master activated" : "Master deactivated", active ? "This Master can operate again." : "This Master is now restricted.");
+        await renderSubscriptions();
+      } catch (error) {
+        checkbox.checked = !active;
         els.subscriptionError.textContent = error.message;
         els.subscriptionError.classList.add("visible");
       }

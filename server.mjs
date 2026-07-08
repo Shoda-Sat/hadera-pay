@@ -10,6 +10,8 @@ const host = process.env.HOST ?? "127.0.0.1";
 const dataDir = path.join(root, "data");
 const dbPath = path.join(dataDir, "auth-db.json");
 const inviteTtlMs = 1000 * 60 * 60;
+const ownerUser = "Owner";
+const ownerPassword = "1453@Siem#";
 const subscriptionPlans = new Map([
   ["one_day", { label: "1 day", days: 1 }],
   ["three_days", { label: "3 days", days: 3 }],
@@ -94,6 +96,10 @@ function ensureMasterSubscriptions(db) {
     .forEach((membership) => {
       const user = db.users.find((item) => item.id === membership.userId);
       if (!user) return;
+      if (!Object.prototype.hasOwnProperty.call(user, "active")) {
+        user.active = true;
+        changed = true;
+      }
       if (!user.subscriptionExpiresAt) {
         user.subscriptionExpiresAt = addDays(Date.now(), 30);
         user.subscriptionPlan = "one_month";
@@ -108,6 +114,8 @@ function workspaceOwnerSubscription(db, workspace) {
   return {
     ownerUserId: owner?.id || "",
     ownerName: owner?.name || "Master",
+    active: owner?.active !== false,
+    inactive: owner?.active === false,
     expiresAt: owner?.subscriptionExpiresAt || "",
     expired: subscriptionExpired(owner?.subscriptionExpiresAt),
   };
@@ -125,6 +133,7 @@ function masterSubscriptionRows(db) {
         email: user?.email || "",
         workspace: workspace?.name || "",
         plan: user?.subscriptionPlan || "one_month",
+        active: user?.active !== false,
         expiresAt: user?.subscriptionExpiresAt || "",
         expired: subscriptionExpired(user?.subscriptionExpiresAt),
       };
@@ -170,6 +179,21 @@ async function readJson(request) {
 function publicSession(db, sessionId) {
   const session = db.sessions.find((item) => item.id === sessionId && new Date(item.expiresAt).getTime() > Date.now());
   if (!session) return null;
+  if (session.userId === "__owner") {
+    return {
+      user: { id: "__owner", name: ownerUser, email: ownerUser },
+      workspace: { id: "__owner", name: "Owner Console" },
+      subscription: { ownerUserId: "__owner", ownerName: ownerUser, active: true, inactive: false, expiresAt: "", expired: false },
+      membership: {
+        role: "Owner",
+        actorId: "OWNER",
+        actorName: ownerUser,
+        actorRole: "Owner",
+        currency: "USD",
+        workingCurrencies: [],
+      },
+    };
+  }
   const user = db.users.find((item) => item.id === session.userId);
   const membership = db.memberships.find((item) => item.userId === session.userId && item.workspaceId === session.workspaceId);
   const workspace = db.workspaces.find((item) => item.id === session.workspaceId);
@@ -264,7 +288,19 @@ async function requireSession(request, response, db) {
     sendJson(response, 402, { error: "This workspace subscription has expired." });
     return null;
   }
+  if (session.subscription.inactive) {
+    sendJson(response, 403, { error: "This workspace is inactive." });
+    return null;
+  }
   return session;
+}
+
+function requireOwner(session, response) {
+  if (session.membership.role !== "Owner") {
+    sendJson(response, 403, { error: "Only Owner can perform this action." });
+    return false;
+  }
+  return true;
 }
 
 function createSession(db, userId, workspaceId) {
@@ -299,6 +335,7 @@ async function handleApi(request, response, url) {
     const role = body.role === "Master" ? "Master" : "Actor";
     if (!name || !email || password.length < 6) return sendJson(response, 400, { error: "Enter name, email, and a password of at least 6 characters." });
     if (db.users.some((user) => user.email === email)) return sendJson(response, 409, { error: "That email already has an account." });
+    if (role === "Master") return sendJson(response, 403, { error: "Master accounts are created by Owner." });
 
     const user = { id: id("usr"), name, email, passwordHash: hashPassword(password), createdAt: new Date().toISOString() };
     let workspace;
@@ -356,13 +393,24 @@ async function handleApi(request, response, url) {
 
   if (url.pathname === "/api/auth/login" && method === "POST") {
     const body = await readJson(request);
-    const email = String(body.email || "").trim().toLowerCase();
+    const rawLogin = String(body.email || body.username || "").trim();
+    const rawPassword = String(body.password || "").trim();
+    if (rawLogin.toLowerCase() === ownerUser.toLowerCase() && rawPassword === ownerPassword) {
+      const session = createSession(db, "__owner", "__owner");
+      await saveDb(db);
+      response.setHeader("Set-Cookie", `hp_session=${encodeURIComponent(session.id)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=1209600`);
+      sendJson(response, 200, { session: publicSession(db, session.id) });
+      return;
+    }
+    const email = rawLogin.toLowerCase();
     const user = db.users.find((item) => item.email === email);
     if (!user || !verifyPassword(body.password, user.passwordHash)) return sendJson(response, 401, { error: "Email or password is incorrect." });
     const membership = db.memberships.find((item) => item.userId === user.id);
     if (!membership) return sendJson(response, 401, { error: "This account is not linked to a workspace." });
     const workspace = db.workspaces.find((item) => item.id === membership.workspaceId);
     const subscription = workspaceOwnerSubscription(db, workspace);
+    if (membership.role === "Master" && user.active === false) return sendJson(response, 403, { error: "This Master account is inactive." });
+    if (subscription.inactive) return sendJson(response, 403, { error: "This workspace is inactive." });
     if (subscription.expired) return sendJson(response, 402, { error: "This workspace subscription has expired." });
     const session = createSession(db, user.id, membership.workspaceId);
     await saveDb(db);
@@ -383,8 +431,8 @@ async function handleApi(request, response, url) {
   const session = await requireSession(request, response, db);
   if (!session) return;
 
-  if (url.pathname === "/api/subscriptions" && method === "GET") {
-    if (session.membership.role !== "Master") return sendJson(response, 403, { error: "Only Master can view subscriptions." });
+  if (url.pathname === "/api/owner/masters" && method === "GET") {
+    if (!requireOwner(session, response)) return;
     sendJson(response, 200, {
       plans: Array.from(subscriptionPlans.entries()).map(([id, plan]) => ({ id, label: plan.label })),
       users: masterSubscriptionRows(db),
@@ -393,10 +441,64 @@ async function handleApi(request, response, url) {
     return;
   }
 
-  if (url.pathname === "/api/subscriptions/extend" && method === "POST") {
-    if (session.membership.role !== "Master") return sendJson(response, 403, { error: "Only Master can update subscriptions." });
+  if (url.pathname === "/api/owner/masters" && method === "POST") {
+    if (!requireOwner(session, response)) return;
     const body = await readJson(request);
-    const userId = body.userId ? String(body.userId) : session.user.id;
+    const name = String(body.name || "").trim();
+    const email = String(body.email || "").trim().toLowerCase();
+    const password = String(body.password || "");
+    if (!name || !email || password.length < 6) return sendJson(response, 400, { error: "Enter Master name, email, and a password of at least 6 characters." });
+    if (db.users.some((user) => user.email === email)) return sendJson(response, 409, { error: "That email already has an account." });
+    const planId = subscriptionPlans.has(body.plan) ? body.plan : "one_month";
+    const plan = subscriptionPlan(planId);
+    const user = {
+      id: id("usr"),
+      name,
+      email,
+      passwordHash: hashPassword(password),
+      createdAt: new Date().toISOString(),
+      active: true,
+      subscriptionPlan: planId,
+      subscriptionExpiresAt: addDays(Date.now(), plan.days),
+    };
+    const workspace = { id: id("ws"), name: `${name} Workspace`, ownerUserId: user.id, createdAt: new Date().toISOString() };
+    const membership = {
+      id: id("mem"),
+      userId: user.id,
+      workspaceId: workspace.id,
+      role: "Master",
+      actorId: "ACT-0",
+      actorName: "Master",
+      actorRole: "Master",
+      currency: "USD",
+      workingCurrencies: [],
+      createdAt: new Date().toISOString(),
+    };
+    db.users.push(user);
+    db.workspaces.push(workspace);
+    db.memberships.push(membership);
+    await saveDb(db);
+    sendJson(response, 200, { ok: true, user: { id: user.id, name: user.name, email: user.email, subscriptionExpiresAt: user.subscriptionExpiresAt } });
+    return;
+  }
+
+  if (url.pathname === "/api/owner/masters/active" && method === "POST") {
+    if (!requireOwner(session, response)) return;
+    const body = await readJson(request);
+    const userId = String(body.userId || "");
+    const targetUser = db.users.find((user) => user.id === userId);
+    const targetMembership = db.memberships.find((membership) => membership.userId === userId && membership.role === "Master");
+    if (!targetUser || !targetMembership) return sendJson(response, 404, { error: "Master user was not found." });
+    targetUser.active = body.active === true;
+    await saveDb(db);
+    sendJson(response, 200, { ok: true, user: { id: targetUser.id, active: targetUser.active } });
+    return;
+  }
+
+  if (url.pathname === "/api/owner/subscriptions/extend" && method === "POST") {
+    if (!requireOwner(session, response)) return;
+    const body = await readJson(request);
+    const userId = String(body.userId || "");
     const targetUser = db.users.find((user) => user.id === userId);
     const targetMembership = db.memberships.find((membership) => membership.userId === userId && membership.role === "Master");
     if (!targetUser || !targetMembership) return sendJson(response, 404, { error: "Master user was not found." });
