@@ -10,6 +10,14 @@ const host = process.env.HOST ?? "127.0.0.1";
 const dataDir = path.join(root, "data");
 const dbPath = path.join(dataDir, "auth-db.json");
 const inviteTtlMs = 1000 * 60 * 60;
+const subscriptionPlans = new Map([
+  ["one_day", { label: "1 day", days: 1 }],
+  ["three_days", { label: "3 days", days: 3 }],
+  ["one_week", { label: "1 week", days: 7 }],
+  ["one_month", { label: "1 month", days: 30 }],
+  ["three_months", { label: "3 months", days: 90 }],
+  ["one_year", { label: "1 year", days: 365 }],
+]);
 
 const contentTypes = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -67,6 +75,63 @@ function purgeExpiredInvites(db) {
   return true;
 }
 
+function addDays(dateMs, days) {
+  return new Date(dateMs + days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function subscriptionPlan(planId) {
+  return subscriptionPlans.get(planId) || subscriptionPlans.get("one_month");
+}
+
+function subscriptionExpired(expiresAt) {
+  return new Date(expiresAt || 0).getTime() <= Date.now();
+}
+
+function ensureMasterSubscriptions(db) {
+  let changed = false;
+  db.memberships
+    .filter((membership) => membership.role === "Master")
+    .forEach((membership) => {
+      const user = db.users.find((item) => item.id === membership.userId);
+      if (!user) return;
+      if (!user.subscriptionExpiresAt) {
+        user.subscriptionExpiresAt = addDays(Date.now(), 30);
+        user.subscriptionPlan = "one_month";
+        changed = true;
+      }
+    });
+  return changed;
+}
+
+function workspaceOwnerSubscription(db, workspace) {
+  const owner = db.users.find((user) => user.id === workspace?.ownerUserId);
+  return {
+    ownerUserId: owner?.id || "",
+    ownerName: owner?.name || "Master",
+    expiresAt: owner?.subscriptionExpiresAt || "",
+    expired: subscriptionExpired(owner?.subscriptionExpiresAt),
+  };
+}
+
+function masterSubscriptionRows(db) {
+  return db.memberships
+    .filter((membership) => membership.role === "Master")
+    .map((membership) => {
+      const user = db.users.find((item) => item.id === membership.userId);
+      const workspace = db.workspaces.find((item) => item.id === membership.workspaceId);
+      return {
+        userId: user?.id || "",
+        name: user?.name || "Unknown",
+        email: user?.email || "",
+        workspace: workspace?.name || "",
+        plan: user?.subscriptionPlan || "one_month",
+        expiresAt: user?.subscriptionExpiresAt || "",
+        expired: subscriptionExpired(user?.subscriptionExpiresAt),
+      };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
 function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
   const hash = crypto.pbkdf2Sync(String(password), salt, 120000, 32, "sha256").toString("hex");
   return `${salt}:${hash}`;
@@ -109,9 +174,11 @@ function publicSession(db, sessionId) {
   const membership = db.memberships.find((item) => item.userId === session.userId && item.workspaceId === session.workspaceId);
   const workspace = db.workspaces.find((item) => item.id === session.workspaceId);
   if (!user || !membership || !workspace) return null;
+  const subscription = workspaceOwnerSubscription(db, workspace);
   return {
     user: { id: user.id, name: user.name, email: user.email },
     workspace: { id: workspace.id, name: workspace.name },
+    subscription,
     membership: {
       role: membership.role,
       actorId: membership.actorId,
@@ -193,6 +260,10 @@ async function requireSession(request, response, db) {
     sendJson(response, 401, { error: "Please log in." });
     return null;
   }
+  if (session.subscription.expired) {
+    sendJson(response, 402, { error: "This workspace subscription has expired." });
+    return null;
+  }
   return session;
 }
 
@@ -212,7 +283,8 @@ async function handleApi(request, response, url) {
   const db = await loadDb();
   const method = request.method || "GET";
   const removedExpiredInvites = purgeExpiredInvites(db);
-  if (removedExpiredInvites) await saveDb(db);
+  const addedMissingSubscriptions = ensureMasterSubscriptions(db);
+  if (removedExpiredInvites || addedMissingSubscriptions) await saveDb(db);
 
   if (url.pathname === "/api/session" && method === "GET") {
     sendJson(response, 200, { session: publicSession(db, parseCookies(request).hp_session) });
@@ -233,6 +305,10 @@ async function handleApi(request, response, url) {
     let membership;
 
     if (role === "Master") {
+      const planId = subscriptionPlans.has(body.subscriptionPlan) ? body.subscriptionPlan : "one_month";
+      const plan = subscriptionPlan(planId);
+      user.subscriptionPlan = planId;
+      user.subscriptionExpiresAt = addDays(Date.now(), plan.days);
       workspace = { id: id("ws"), name: `${name} Workspace`, ownerUserId: user.id, createdAt: new Date().toISOString() };
       membership = {
         id: id("mem"),
@@ -285,6 +361,9 @@ async function handleApi(request, response, url) {
     if (!user || !verifyPassword(body.password, user.passwordHash)) return sendJson(response, 401, { error: "Email or password is incorrect." });
     const membership = db.memberships.find((item) => item.userId === user.id);
     if (!membership) return sendJson(response, 401, { error: "This account is not linked to a workspace." });
+    const workspace = db.workspaces.find((item) => item.id === membership.workspaceId);
+    const subscription = workspaceOwnerSubscription(db, workspace);
+    if (subscription.expired) return sendJson(response, 402, { error: "This workspace subscription has expired." });
     const session = createSession(db, user.id, membership.workspaceId);
     await saveDb(db);
     response.setHeader("Set-Cookie", `hp_session=${encodeURIComponent(session.id)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=1209600`);
@@ -303,6 +382,34 @@ async function handleApi(request, response, url) {
 
   const session = await requireSession(request, response, db);
   if (!session) return;
+
+  if (url.pathname === "/api/subscriptions" && method === "GET") {
+    if (session.membership.role !== "Master") return sendJson(response, 403, { error: "Only Master can view subscriptions." });
+    sendJson(response, 200, {
+      plans: Array.from(subscriptionPlans.entries()).map(([id, plan]) => ({ id, label: plan.label })),
+      users: masterSubscriptionRows(db),
+      currentUserId: session.user.id,
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/subscriptions/extend" && method === "POST") {
+    if (session.membership.role !== "Master") return sendJson(response, 403, { error: "Only Master can update subscriptions." });
+    const body = await readJson(request);
+    const userId = body.userId ? String(body.userId) : session.user.id;
+    const targetUser = db.users.find((user) => user.id === userId);
+    const targetMembership = db.memberships.find((membership) => membership.userId === userId && membership.role === "Master");
+    if (!targetUser || !targetMembership) return sendJson(response, 404, { error: "Master user was not found." });
+    const planId = subscriptionPlans.has(body.plan) ? body.plan : "one_month";
+    const plan = subscriptionPlan(planId);
+    const currentExpiry = new Date(targetUser.subscriptionExpiresAt || 0).getTime();
+    const startsAt = body.mode === "reset" ? Date.now() : Math.max(Date.now(), Number.isFinite(currentExpiry) ? currentExpiry : 0);
+    targetUser.subscriptionPlan = planId;
+    targetUser.subscriptionExpiresAt = addDays(startsAt, plan.days);
+    await saveDb(db);
+    sendJson(response, 200, { ok: true, user: { id: targetUser.id, subscriptionExpiresAt: targetUser.subscriptionExpiresAt } });
+    return;
+  }
 
   if (url.pathname === "/api/invites" && method === "GET") {
     if (session.membership.role !== "Master") return sendJson(response, 403, { error: "Only Master can view invites." });

@@ -2031,6 +2031,21 @@
           </div>
           <div class="panel">
             <div class="panel-header">
+              <h2>User Subscriptions</h2>
+              <span class="state-pill">Master Access</span>
+            </div>
+            <div class="panel-body table-wrap">
+              <table>
+                <thead>
+                  <tr><th>User</th><th>Workspace</th><th>Expires</th><th>Status</th><th>Duration</th><th>Action</th></tr>
+                </thead>
+                <tbody id="subscriptionRows"></tbody>
+              </table>
+              <span class="field-error" id="subscriptionError"></span>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-header">
               <h2>Invite Codes</h2>
               <span class="state-pill">Actor Linking</span>
             </div>
@@ -2471,6 +2486,8 @@
       profileBadge: document.getElementById("profileBadge"),
       actorRows: document.getElementById("actorRows"),
       permissionRows: document.getElementById("permissionRows"),
+      subscriptionRows: document.getElementById("subscriptionRows"),
+      subscriptionError: document.getElementById("subscriptionError"),
       inviteRows: document.getElementById("inviteRows"),
       inviteForm: document.getElementById("inviteForm"),
       inviteRole: document.getElementById("inviteRole"),
@@ -3123,7 +3140,10 @@
     }
 
     function renderProfiles() {
-      els.accountBadge.textContent = currentAuth ? `${currentAuth.user.name} / ${currentAuth.membership.role}` : "Not logged in";
+      const subscriptionText = currentAuth?.subscription?.expiresAt
+        ? ` / until ${displayDate(currentAuth.subscription.expiresAt)}`
+        : "";
+      els.accountBadge.textContent = currentAuth ? `${currentAuth.user.name} / ${currentAuth.membership.role}${subscriptionText}` : "Not logged in";
       const actors = availableProfiles();
       if (!actors.some((actor) => actor.id === state.selectedActorId)) {
         state.selectedActorId = actors[0]?.id || "ACT-0";
@@ -3735,6 +3755,42 @@
           <td><span class="muted">Controls Income Statement ${escapeHtml(masterBaseCurrency())} column</span></td>
         </tr>
       `;
+    }
+
+    async function renderSubscriptions() {
+      if (!currentAuth || currentAuth.membership?.role !== "Master") {
+        els.subscriptionRows.innerHTML = '<tr><td colspan="6">Only Master can manage subscriptions.</td></tr>';
+        return;
+      }
+      try {
+        const { users, plans, currentUserId } = await api("/api/subscriptions");
+        els.subscriptionError.classList.remove("visible");
+        els.subscriptionRows.innerHTML = users.length ? users.map((user) => {
+          const planOptions = plans.map((plan) => `<option value="${escapeHtml(plan.id)}" ${plan.id === user.plan ? "selected" : ""}>${escapeHtml(plan.label)}</option>`).join("");
+          const currentUserNote = user.userId === currentUserId ? '<br><span class="muted">Current user can extend before expiry.</span>' : "";
+          return `
+            <tr>
+              <td><strong>${escapeHtml(user.name)}</strong><br><span class="muted">${escapeHtml(user.email)}</span>${currentUserNote}</td>
+              <td>${escapeHtml(user.workspace || "Workspace")}</td>
+              <td>${escapeHtml(displayDate(user.expiresAt))}</td>
+              <td><span class="state-pill ${user.expired ? "danger" : "good"}">${user.expired ? "Expired" : "Active"}</span></td>
+              <td>
+                <select class="subscription-plan" data-user-id="${escapeHtml(user.userId)}">
+                  ${planOptions}
+                </select>
+              </td>
+              <td>
+                <div class="setting-inline">
+                  <button class="btn primary extend-subscription" data-mode="extend" data-user-id="${escapeHtml(user.userId)}" type="button" ${user.expired ? "disabled" : ""}>Add Time</button>
+                  <button class="btn secondary extend-subscription" data-mode="reset" data-user-id="${escapeHtml(user.userId)}" type="button">Set From Now</button>
+                </div>
+              </td>
+            </tr>
+          `;
+        }).join("") : '<tr><td colspan="6">No Master users found.</td></tr>';
+      } catch (error) {
+        els.subscriptionRows.innerHTML = `<tr><td colspan="6">${escapeHtml(error.message)}</td></tr>`;
+      }
     }
 
     async function renderInviteCodes() {
@@ -5015,6 +5071,28 @@
       renderAll();
     });
 
+    els.subscriptionRows.addEventListener("click", async (event) => {
+      const button = event.target.closest(".extend-subscription");
+      if (!button || selectedActor()?.role !== "Master") return;
+      const userId = button.dataset.userId;
+      const row = button.closest("tr");
+      const plan = row?.querySelector(".subscription-plan")?.value || "one_month";
+      try {
+        await api("/api/subscriptions/extend", {
+          method: "POST",
+          body: { userId, plan, mode: button.dataset.mode || "extend" }
+        });
+        notifyEvent("Subscription updated", button.dataset.mode === "reset" ? "Access starts again from today." : "Time was added before expiry.");
+        await renderSubscriptions();
+        const { session } = await api("/api/session").catch(() => ({ session: currentAuth }));
+        currentAuth = session || currentAuth;
+        renderProfiles();
+      } catch (error) {
+        els.subscriptionError.textContent = error.message;
+        els.subscriptionError.classList.add("visible");
+      }
+    });
+
     function closeConfirmation() {
       pendingConfirmation = null;
       els.confirmShade.classList.remove("open");
@@ -6125,6 +6203,7 @@
       renderProfiles();
       renderActors();
       renderPermissionSettings();
+      renderSubscriptions();
       renderFixedRateSettings();
       renderMasterRateDivisorSettings();
       renderInviteCodes();
