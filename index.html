@@ -43,6 +43,71 @@
       cursor: pointer;
     }
 
+    .auth-screen {
+      position: fixed;
+      inset: 0;
+      z-index: 60;
+      display: grid;
+      place-items: center;
+      padding: 20px;
+      background: var(--bg);
+    }
+
+    .auth-screen.hidden {
+      display: none;
+    }
+
+    .auth-card {
+      width: min(780px, 100%);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #ffffff;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .auth-head {
+      padding: 22px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .auth-head h1 {
+      margin: 0;
+      font-size: 22px;
+    }
+
+    .auth-body {
+      padding: 22px;
+      display: grid;
+      gap: 18px;
+    }
+
+    .auth-tabs {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .auth-tabs button.active {
+      background: var(--accent);
+      color: #ffffff;
+    }
+
+    .auth-form.hidden {
+      display: none;
+    }
+
+    .account-strip {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
     .shell {
       min-height: 100vh;
       display: grid;
@@ -385,6 +450,51 @@
 
     .field.full {
       grid-column: 1 / -1;
+    }
+
+    .form-grid.invite-grid {
+      grid-template-columns: minmax(150px, 1fr) minmax(130px, 0.8fr) minmax(220px, 1.4fr);
+      align-items: end;
+    }
+
+    .form-grid.actor-create-grid {
+      grid-template-columns: minmax(150px, 1fr) minmax(130px, 0.8fr) minmax(220px, 1.4fr);
+      align-items: end;
+    }
+
+    .invite-working-field select {
+      min-height: 42px;
+      height: 42px;
+    }
+
+    .currency-checks {
+      min-height: 42px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .currency-check {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 34px;
+      padding: 6px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #ffffff;
+      font-size: 12px;
+      font-weight: 800;
+      color: var(--ink);
+      cursor: pointer;
+    }
+
+    .currency-check input {
+      width: auto;
+      min-height: 0;
+      margin: 0;
+      padding: 0;
     }
 
     .field label {
@@ -737,6 +847,33 @@
     .setting-inline input {
       max-width: 96px;
       min-height: 36px;
+    }
+
+    .setting-inline .special-agent-divider,
+    .setting-inline .special-agent-percent,
+    .master-rate-divider,
+    .master-rate-percent {
+      flex: 0 0 190px;
+      width: 190px;
+      max-width: none;
+      min-width: 160px;
+    }
+
+    .special-divider-panel {
+      display: grid;
+      gap: 8px;
+      min-width: 320px;
+    }
+
+    .special-divider-currency {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-2);
     }
 
     .expand-broker-rates {
@@ -1180,6 +1317,14 @@
         grid-template-columns: 1fr;
       }
 
+      .form-grid.invite-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .form-grid.actor-create-grid {
+        grid-template-columns: 1fr;
+      }
+
       .line-item {
         grid-template-columns: 64px minmax(0, 1fr);
       }
@@ -1248,6 +1393,70 @@
     </div>
   </div>
   <div class="notification-stack" id="notificationStack" aria-live="polite"></div>
+  <div class="auth-screen" id="authScreen">
+    <div class="auth-card">
+      <div class="auth-head">
+        <div>
+          <h1>HaderaPay Accounts</h1>
+          <span class="muted">Sign in as Master or join a Master workspace as an Actor.</span>
+        </div>
+        <span class="state-pill">Local</span>
+      </div>
+      <div class="auth-body">
+        <div class="auth-tabs">
+          <button class="btn primary active" id="showLogin" type="button">Login</button>
+          <button class="btn secondary" id="showSignup" type="button">Create account</button>
+        </div>
+        <form class="auth-form" id="loginForm">
+          <div class="form-grid">
+            <div class="field">
+              <label for="loginEmail">Email</label>
+              <input id="loginEmail" type="email" autocomplete="email">
+            </div>
+            <div class="field">
+              <label for="loginPassword">Password</label>
+              <input id="loginPassword" type="password" autocomplete="current-password">
+            </div>
+          </div>
+          <span class="field-error" id="loginError"></span>
+          <div class="actions">
+            <button class="btn primary" type="submit">Login</button>
+          </div>
+        </form>
+        <form class="auth-form hidden" id="signupForm">
+          <div class="form-grid">
+            <div class="field">
+              <label for="signupName">Display name</label>
+              <input id="signupName" autocomplete="name">
+            </div>
+            <div class="field">
+              <label for="signupEmail">Email</label>
+              <input id="signupEmail" type="email" autocomplete="email">
+            </div>
+            <div class="field">
+              <label for="signupPassword">Password</label>
+              <input id="signupPassword" type="password" autocomplete="new-password">
+            </div>
+            <div class="field">
+              <label for="signupRole">Account type</label>
+              <select id="signupRole">
+                <option>Master</option>
+                <option>Actor</option>
+              </select>
+            </div>
+            <div class="field full" id="inviteCodeField">
+              <label for="signupInviteCode">Invite code</label>
+              <input id="signupInviteCode" placeholder="Required for Actors">
+            </div>
+          </div>
+          <span class="field-error" id="signupError"></span>
+          <div class="actions">
+            <button class="btn primary" type="submit">Create account</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
   <div class="shell">
     <aside class="sidebar" id="sidebar">
       <div class="brand">
@@ -1321,6 +1530,8 @@
           <span class="badge good" id="balanceBadge">Balanced</span>
           <span class="badge" id="currencyBadge">USD / ETB / EUR / ERN</span>
           <span class="badge" id="profileBadge">Master</span>
+          <span class="badge" id="accountBadge">Not logged in</span>
+          <button class="btn secondary" id="logoutButton" type="button">Logout</button>
         </div>
       </header>
 
@@ -1551,6 +1762,10 @@
                       <input id="transferPayoutAmount" inputmode="decimal" placeholder="0.00">
                     </div>
                     <div class="field full">
+                      <label for="transferRemarks">Remarks</label>
+                      <textarea id="transferRemarks" placeholder="Add transfer notes"></textarea>
+                    </div>
+                    <div class="field full">
                       <span class="field-error" id="transferError">Sender and receiver must be different.</span>
                     </div>
                   </div>
@@ -1637,7 +1852,7 @@
               <div class="table-wrap income-table">
                 <table>
                   <thead>
-                    <tr><th>Order No.</th><th>Date</th><th>Details</th><th>Direction</th><th>USD</th><th>Collected Amt</th><th>Profit/Loss</th></tr>
+                    <tr><th>Order No.</th><th>Date</th><th>Details</th><th>Direction</th><th id="incomeBaseCurrencyHead">USD</th><th>Collected Amt</th><th>Profit/Loss</th></tr>
                   </thead>
                   <tbody id="incomeStatementRows"></tbody>
                 </table>
@@ -1718,7 +1933,7 @@
               </div>
               <div class="panel-body">
                 <form id="actorForm">
-                  <div class="form-grid">
+                  <div class="form-grid actor-create-grid">
                     <div class="field full">
                       <label for="actorName">Display name</label>
                       <input id="actorName" value="New Corridor Agent">
@@ -1737,9 +1952,9 @@
                       <label for="actorCurrency">Base currency</label>
                       <select id="actorCurrency"></select>
                     </div>
-                    <div class="field full">
+                    <div class="field actor-working-field">
                       <label for="actorWorkingCurrencies">Working currencies</label>
-                      <select id="actorWorkingCurrencies" multiple size="4"></select>
+                      <div id="actorWorkingCurrencies" class="currency-checks" role="group" aria-label="Working currencies"></div>
                     </div>
                   </div>
                   <div class="actions">
@@ -1808,9 +2023,50 @@
             <div class="panel-body table-wrap">
               <table>
                 <thead>
-                  <tr><th>Actor</th><th>Role</th><th>Currency</th><th>Transfer Access</th><th>Order Currency Access</th><th>Special Agent Divisor / %</th><th>Action</th></tr>
+                  <tr><th>Actor</th><th>Role</th><th>Currency</th><th>Transfer Access</th><th>Income Statement</th><th>Order Currency Access</th><th>Special Agent Divisor / %</th><th>Action</th></tr>
                 </thead>
                 <tbody id="permissionRows"></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-header">
+              <h2>Invite Codes</h2>
+              <span class="state-pill">Actor Linking</span>
+            </div>
+            <div class="panel-body">
+              <form id="inviteForm">
+                <div class="form-grid invite-grid">
+                  <div class="field">
+                    <label for="inviteRole">Actor role</label>
+                    <select id="inviteRole">
+                      <option>Broker</option>
+                      <option>Agent</option>
+                      <option>Special Agent</option>
+                      <option>Special Broker</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="inviteCurrency">Base currency</label>
+                    <select id="inviteCurrency"></select>
+                  </div>
+                  <div class="field invite-working-field">
+                    <label for="inviteWorkingCurrencies">Working currencies</label>
+                    <div id="inviteWorkingCurrencies" class="currency-checks" role="group" aria-label="Working currencies"></div>
+                  </div>
+                </div>
+                <span class="field-error" id="inviteError"></span>
+                <div class="actions">
+                  <button class="btn primary" type="submit">Create Invite Code</button>
+                </div>
+              </form>
+            </div>
+            <div class="panel-body table-wrap">
+              <table>
+                <thead>
+                  <tr><th>Code</th><th>Role</th><th>Currency</th><th>Actor</th><th>Status</th><th>Active</th><th>Created</th></tr>
+                </thead>
+                <tbody id="inviteRows"></tbody>
               </table>
             </div>
           </div>
@@ -1828,14 +2084,46 @@
               </table>
             </div>
           </div>
+          <div class="panel">
+            <div class="panel-header">
+              <h2>Master's Rate Divisor</h2>
+              <span class="state-pill">Income Statement</span>
+            </div>
+            <div class="panel-body table-wrap">
+              <table>
+                <thead>
+                  <tr><th>Master</th><th>Currency Settings</th><th>Status</th><th>Action</th></tr>
+                </thead>
+                <tbody id="masterRateDivisorRows"></tbody>
+              </table>
+            </div>
+          </div>
         </section>
       </main>
     </div>
   </div>
 
   <script>
-    const storageKey = "haderapay.local.state.v1";
+    let storageKey = "haderapay.local.state.v1";
+    let currentAuth = null;
+    let remoteStateReady = false;
+    let saveTimer = null;
+    let suppressRemoteSave = false;
+    let remoteRefreshTimer = null;
     const supportedCurrencies = ["USD", "ETB", "EUR", "ERN"];
+
+    function normalizeCurrencyRateSettings(settings = {}) {
+      const normalized = {};
+      supportedCurrencies.forEach((currency) => {
+        const current = settings?.[currency] || {};
+        normalized[currency] = {
+          enabled: current.enabled === true,
+          divider: Number(current.divider) > 0 ? Number(current.divider) : 1,
+          percent: Number(current.percent) > 0 ? Number(current.percent) : 0
+        };
+      });
+      return normalized;
+    }
 
     const defaultState = {
       activeView: "dashboard",
@@ -1846,6 +2134,8 @@
       selectedLedgerActor: "",
       selectedActorId: "ACT-0",
       expandedFixedRateActorId: "",
+      expandedSpecialDividerActorId: "",
+      expandedMasterRateDivisor: false,
       incomeStatementExpanded: false,
       journalCounter: 0,
       orderCounter: 0,
@@ -1868,6 +2158,7 @@
       transfers: [],
       ledger: [],
       settlements: [],
+      masterRateDivisorSettings: {},
       archives: []
     };
 
@@ -1883,6 +2174,7 @@
           transfers: normalizeTransfers(Array.isArray(saved.transfers) ? saved.transfers : []),
           ledger: Array.isArray(saved.ledger) ? saved.ledger : [],
           settlements: Array.isArray(saved.settlements) ? saved.settlements : [],
+          masterRateDivisorSettings: normalizeCurrencyRateSettings(saved.masterRateDivisorSettings || {}),
           archives: Array.isArray(saved.archives) ? saved.archives : [],
           chatConversations: Array.isArray(saved.chatConversations) ? saved.chatConversations : []
         };
@@ -1892,11 +2184,11 @@
     }
 
     function normalizeActors(actors) {
-      const active = actors.filter((actor) => actor.active !== false);
-      if (!active.some((actor) => actor.id === "ACT-0" || actor.role === "Master")) {
-        active.unshift({ id: "ACT-0", name: "Master", role: "Master", currency: "USD", active: true, transferEnabled: true });
+      const normalizedActors = actors.filter((actor) => actor && typeof actor === "object");
+      if (!normalizedActors.some((actor) => actor.id === "ACT-0" || actor.role === "Master")) {
+        normalizedActors.unshift({ id: "ACT-0", name: "Master", role: "Master", currency: "USD", active: true, transferEnabled: true });
       }
-      return active.map((actor) => {
+      return normalizedActors.map((actor) => {
         const workingCurrencies = Array.isArray(actor.workingCurrencies)
           ? actor.workingCurrencies.filter((currency) => supportedCurrencies.includes(currency)).slice(0, 5)
           : [];
@@ -1910,10 +2202,33 @@
             };
           });
         }
+        const payoutCurrencies = actor.role === "Special Agent"
+          ? Array.from(new Set([actor.currency, ...workingCurrencies])).slice(0, 5)
+          : workingCurrencies;
+        const specialPayoutSettings = {};
+        if (actor.role === "Special Agent") {
+          payoutCurrencies.forEach((currency) => {
+            const current = actor.specialPayoutSettings?.[currency] || {};
+            const hasCurrencyEnabled = Object.prototype.hasOwnProperty.call(current, "enabled");
+            specialPayoutSettings[currency] = {
+              enabled: hasCurrencyEnabled ? current.enabled === true : actor.specialPayoutDividerEnabled === true,
+              divider: Number(current.divider) > 0
+                ? Number(current.divider)
+                : Number(actor.specialPayoutDivider) > 0
+                  ? Number(actor.specialPayoutDivider)
+                  : 1,
+              percent: Number(current.percent) > 0
+                ? Number(current.percent)
+                : Number(actor.specialPayoutPercent) > 0
+                  ? Number(actor.specialPayoutPercent)
+                  : 0
+            };
+          });
+        }
         return {
           ...actor,
           workingCurrencies: actor.role === "Special Agent"
-            ? Array.from(new Set([actor.currency, ...workingCurrencies])).slice(0, 5)
+            ? payoutCurrencies
             : workingCurrencies,
           specialPayoutDivider: actor.role === "Special Agent" && Number(actor.specialPayoutDivider) > 0
             ? Number(actor.specialPayoutDivider)
@@ -1924,11 +2239,14 @@
           specialPayoutPercent: actor.role === "Special Agent" && Number(actor.specialPayoutPercent) > 0
             ? Number(actor.specialPayoutPercent)
             : 0,
+          specialPayoutSettings,
           orderMultiCurrencyEnabled: ["Broker", "Special Broker"].includes(actor.role)
             ? actor.orderMultiCurrencyEnabled === true
             : false,
           orderFixedRates: ["Broker", "Special Broker"].includes(actor.role) ? orderFixedRates : {},
-          transferEnabled: actor.role === "Master" ? true : actor.transferEnabled !== false
+          active: actor.role === "Master" ? true : actor.active !== false,
+          transferEnabled: actor.role === "Master" ? true : actor.transferEnabled !== false,
+          incomeStatementVisible: actor.role === "Master" ? true : actor.incomeStatementVisible !== false
         };
       });
     }
@@ -1947,6 +2265,142 @@
 
     function saveState() {
       localStorage.setItem(storageKey, JSON.stringify(state));
+      if (!currentAuth || !remoteStateReady || suppressRemoteSave) return;
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(() => {
+        api("/api/app-state", { method: "PUT", body: { state } }).catch(() => {});
+      }, 250);
+    }
+
+    async function api(path, options = {}) {
+      let response;
+      try {
+        response = await fetch(path, {
+          method: options.method || "GET",
+          headers: { "content-type": "application/json" },
+          body: options.body ? JSON.stringify(options.body) : undefined
+        });
+      } catch {
+        throw new Error("Could not reach the local server. Open the app at http://127.0.0.1:4173/preview.html after running npm start.");
+      }
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || "Request failed.");
+      return data;
+    }
+
+    function replaceState(nextState) {
+      Object.keys(state).forEach((key) => delete state[key]);
+      Object.assign(state, nextState);
+    }
+
+    function mergeById(existingItems = [], incomingItems = []) {
+      const merged = new Map();
+      [...existingItems, ...incomingItems].forEach((item) => {
+        if (!item || typeof item !== "object" || !item.id) return;
+        merged.set(item.id, { ...(merged.get(item.id) || {}), ...item });
+      });
+      return Array.from(merged.values());
+    }
+
+    function mergeLedgerLines(existingItems = [], incomingItems = []) {
+      const keyForLine = (line) => [line.journal, line.source, line.account, line.direction, line.currency, line.amountMinor, line.postedAt].join(":");
+      const merged = new Map();
+      [...existingItems, ...incomingItems].forEach((line) => {
+        if (!line || typeof line !== "object") return;
+        merged.set(keyForLine(line), { ...(merged.get(keyForLine(line)) || {}), ...line });
+      });
+      return Array.from(merged.values());
+    }
+
+    function mergeChatConversations(existingItems = [], incomingItems = []) {
+      const merged = mergeById(existingItems, incomingItems);
+      return merged.map((chat) => {
+        const current = existingItems.find((item) => item.id === chat.id);
+        const incoming = incomingItems.find((item) => item.id === chat.id);
+        return {
+          ...chat,
+          messages: mergeById(current?.messages || [], incoming?.messages || [])
+            .sort((a, b) => new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime())
+        };
+      });
+    }
+
+    function mergeSharedState(remoteState) {
+      if (!remoteState || typeof remoteState !== "object") return false;
+      state.actors = normalizeActors(mergeById(state.actors, remoteState.actors || []));
+      state.orders = mergeById(state.orders, remoteState.orders || []);
+      state.transfers = normalizeTransfers(mergeById(state.transfers, remoteState.transfers || []));
+      state.ledger = mergeLedgerLines(state.ledger, remoteState.ledger || []);
+      state.settlements = Array.isArray(remoteState.settlements) ? remoteState.settlements : state.settlements;
+      state.archives = mergeById(state.archives, remoteState.archives || []);
+      state.chatConversations = mergeChatConversations(state.chatConversations, remoteState.chatConversations || []);
+      return true;
+    }
+
+    async function refreshSharedState() {
+      if (!currentAuth || !remoteStateReady) return;
+      const remote = await api("/api/app-state").catch(() => null);
+      if (!mergeSharedState(remote?.state)) return;
+      suppressRemoteSave = true;
+      try {
+        renderAll();
+      } finally {
+        suppressRemoteSave = false;
+      }
+    }
+
+    function startRemoteRefresh() {
+      if (remoteRefreshTimer) clearInterval(remoteRefreshTimer);
+      remoteRefreshTimer = setInterval(refreshSharedState, 3000);
+    }
+
+    function authStorageKey(session) {
+      return session?.workspace?.id ? `haderapay.workspace.${session.workspace.id}` : "haderapay.local.state.v1";
+    }
+
+    function ensureSessionActor() {
+      const membership = currentAuth?.membership;
+      if (!membership || membership.role === "Master") {
+        state.selectedActorId = "ACT-0";
+        return;
+      }
+      const exists = state.actors.some((actor) => actor.id === membership.actorId);
+      if (!exists) {
+        state.actors.push({
+          id: membership.actorId,
+          name: membership.actorName,
+          role: membership.actorRole,
+          currency: membership.currency || "USD",
+          workingCurrencies: membership.actorRole === "Special Agent" ? membership.workingCurrencies || [membership.currency || "USD"] : [],
+          active: true,
+          transferEnabled: true
+        });
+      }
+      state.selectedActorId = membership.actorId;
+    }
+
+    async function applyAuthSession(session) {
+      currentAuth = session;
+      remoteStateReady = false;
+      storageKey = authStorageKey(session);
+      const remote = await api("/api/app-state").catch(() => ({ state: null }));
+      const nextState = remote.state || loadState();
+      replaceState({
+        ...structuredClone(defaultState),
+        ...nextState,
+        actors: normalizeActors(Array.isArray(nextState.actors) ? nextState.actors : structuredClone(defaultState.actors)),
+        transfers: normalizeTransfers(Array.isArray(nextState.transfers) ? nextState.transfers : []),
+      });
+      ensureSessionActor();
+      remoteStateReady = true;
+      startRemoteRefresh();
+      els.authScreen.classList.add("hidden");
+      renderAll();
+    }
+
+    function showAuthError(el, message) {
+      el.textContent = message;
+      el.classList.add("visible");
     }
 
     const titles = {
@@ -1973,12 +2427,23 @@
       confirmYes: document.getElementById("confirmYes"),
       confirmNo: document.getElementById("confirmNo"),
       confirmCancel: document.getElementById("confirmCancel"),
+      authScreen: document.getElementById("authScreen"),
+      showLogin: document.getElementById("showLogin"),
+      showSignup: document.getElementById("showSignup"),
+      loginForm: document.getElementById("loginForm"),
+      signupForm: document.getElementById("signupForm"),
+      loginError: document.getElementById("loginError"),
+      signupError: document.getElementById("signupError"),
+      signupRole: document.getElementById("signupRole"),
+      inviteCodeField: document.getElementById("inviteCodeField"),
       forwardShade: document.getElementById("forwardShade"),
       forwardList: document.getElementById("forwardList"),
       forwardCancel: document.getElementById("forwardCancel"),
       menuButton: document.getElementById("menuButton"),
       pageTitle: document.getElementById("pageTitle"),
       pageSubtitle: document.getElementById("pageSubtitle"),
+      accountBadge: document.getElementById("accountBadge"),
+      logoutButton: document.getElementById("logoutButton"),
       orderRows: document.getElementById("orderRows"),
       dashboardOrderRows: document.getElementById("dashboardOrderRows"),
       ledgerRows: document.getElementById("ledgerRows"),
@@ -1986,6 +2451,7 @@
       incomeStatementSection: document.getElementById("incomeStatementSection"),
       incomeStatementToggle: document.getElementById("incomeStatementToggle"),
       incomeStatementToggleText: document.getElementById("incomeStatementToggleText"),
+      incomeBaseCurrencyHead: document.getElementById("incomeBaseCurrencyHead"),
       incomeStatementRows: document.getElementById("incomeStatementRows"),
       exportLedgerExcelButton: document.getElementById("exportLedgerExcelButton"),
       exportLedgerPdfButton: document.getElementById("exportLedgerPdfButton"),
@@ -2005,7 +2471,14 @@
       profileBadge: document.getElementById("profileBadge"),
       actorRows: document.getElementById("actorRows"),
       permissionRows: document.getElementById("permissionRows"),
+      inviteRows: document.getElementById("inviteRows"),
+      inviteForm: document.getElementById("inviteForm"),
+      inviteRole: document.getElementById("inviteRole"),
+      inviteCurrency: document.getElementById("inviteCurrency"),
+      inviteWorkingCurrencies: document.getElementById("inviteWorkingCurrencies"),
+      inviteError: document.getElementById("inviteError"),
       fixedRateRows: document.getElementById("fixedRateRows"),
+      masterRateDivisorRows: document.getElementById("masterRateDivisorRows"),
       actorCount: document.getElementById("actorCount"),
       actorError: document.getElementById("actorError"),
       archiveActorFilter: document.getElementById("archiveActorFilter"),
@@ -2023,6 +2496,7 @@
       transferRate: document.getElementById("transferRate"),
       transferPayoutAmount: document.getElementById("transferPayoutAmount"),
       transferCurrency: document.getElementById("transferCurrency"),
+      transferRemarks: document.getElementById("transferRemarks"),
       transferError: document.getElementById("transferError"),
       transferMode: document.getElementById("transferMode"),
       chatConversationList: document.getElementById("chatConversationList"),
@@ -2122,10 +2596,17 @@
       const payoutSelect = document.getElementById("payoutCurrency");
       const actorSelect = document.getElementById("actorCurrency");
       const workingSelect = document.getElementById("actorWorkingCurrencies");
+      const inviteCurrency = document.getElementById("inviteCurrency");
+      const inviteWorking = document.getElementById("inviteWorkingCurrencies");
       const previousSource = sourceSelect.value || "USD";
       const previousPayout = payoutSelect.value || "ETB";
       const previousActor = actorSelect.value || "USD";
-      const previousWorking = Array.from(workingSelect.selectedOptions || []).map((option) => option.value);
+      const previousWorking = workingSelect
+        ? Array.from(workingSelect.querySelectorAll("input:checked")).map((input) => input.value)
+        : [];
+      const previousInviteWorking = inviteWorking
+        ? Array.from(inviteWorking.querySelectorAll("input:checked")).map((input) => input.value)
+        : [];
       const actor = selectedActor();
       const selectedBrokerName = ["Broker", "Special Broker"].includes(actor?.role)
         ? actor.name
@@ -2139,19 +2620,38 @@
       sourceSelect.innerHTML = sourceOptions.map((currency) => `<option>${currency}</option>`).join("");
       payoutSelect.innerHTML = optionHtml;
       actorSelect.innerHTML = optionHtml;
-      workingSelect.innerHTML = optionHtml;
+      if (workingSelect) {
+        workingSelect.innerHTML = supportedCurrencies.map((currency) => `
+          <label class="currency-check">
+            <input type="checkbox" value="${currency}" ${previousWorking.includes(currency) ? "checked" : ""}>
+            ${currency}
+          </label>
+        `).join("");
+      }
+      if (inviteCurrency) inviteCurrency.innerHTML = optionHtml;
+      if (inviteWorking) {
+        inviteWorking.innerHTML = supportedCurrencies.map((currency) => `
+          <label class="currency-check">
+            <input type="checkbox" value="${currency}" ${previousInviteWorking.includes(currency) ? "checked" : ""}>
+            ${currency}
+          </label>
+        `).join("");
+      }
       sourceSelect.value = sourceOptions.includes(previousSource) ? previousSource : sourceOptions[0] || "USD";
       payoutSelect.value = supportedCurrencies.includes(previousPayout) ? previousPayout : "ETB";
       actorSelect.value = supportedCurrencies.includes(previousActor) ? previousActor : "USD";
-      Array.from(workingSelect.options).forEach((option) => {
-        option.selected = previousWorking.includes(option.value) || option.value === actorSelect.value;
-      });
+      if (workingSelect) {
+        Array.from(workingSelect.querySelectorAll("input")).forEach((input) => {
+          input.checked = previousWorking.includes(input.value) || input.value === actorSelect.value;
+        });
+      }
       applyFixedOrderRate();
     }
 
     const formatRate = (value) => {
       const rounded = Math.round(Number(value || 0) * 1000000) / 1000000;
-      return String(rounded).replace(/\.?0+$/, "");
+      const text = String(rounded);
+      return text.includes(".") ? text.replace(/0+$/, "").replace(/\.$/, "") : text;
     };
 
     function fixedOrderRateFor(brokerName, payoutCurrency) {
@@ -2181,7 +2681,8 @@
       const payoutCurrency = document.getElementById("payoutCurrency").value;
       const sourceAmountMinor = parseMoney(document.getElementById("sourceAmount").value, sourceCurrency);
       const enteredPayoutMinor = parseMoney(document.getElementById("totalPayout").value, payoutCurrency);
-      const rate = Number(document.getElementById("rate").value) || 1;
+      const enteredRate = Number(document.getElementById("rate").value);
+      const rate = Number.isFinite(enteredRate) && enteredRate > 0 ? enteredRate : 0;
       const fixedRate = fixedOrderRateFor(document.getElementById("broker").value, payoutCurrency);
       const effectiveRate = fixedRate || rate;
       const commissionPercent = Number(document.getElementById("commission").value) || 0;
@@ -2395,8 +2896,24 @@
       return state.actors.filter((actor) => actor.active !== false);
     }
 
+    function availableProfiles() {
+      const actors = activeActors();
+      if (!currentAuth || currentAuth.membership?.role === "Master") return actors;
+      return actors.filter((actor) => actor.id === currentAuth.membership.actorId);
+    }
+
     function selectedActor() {
-      return activeActors().find((actor) => actor.id === state.selectedActorId) || activeActors()[0];
+      return availableProfiles().find((actor) => actor.id === state.selectedActorId) || availableProfiles()[0];
+    }
+
+    function signedInAsMaster() {
+      return currentAuth?.membership?.role === "Master";
+    }
+
+    function selectedActorIsOwnLogin() {
+      if (!currentAuth) return true;
+      if (currentAuth.membership?.role === "Master") return selectedActor()?.role === "Master";
+      return selectedActor()?.id === currentAuth.membership?.actorId;
     }
 
     function privilegeViews(role, actor = selectedActor()) {
@@ -2435,6 +2952,16 @@
           .filter((currency) => supportedCurrencies.includes(currency));
       }
       return supportedCurrencies.includes(actor.currency) ? [actor.currency] : [];
+    }
+
+    function specialPayoutSettingFor(actor, currency) {
+      if (!actor || actor.role !== "Special Agent") return { enabled: false, divider: 1, percent: 0 };
+      const config = actor.specialPayoutSettings?.[currency] || {};
+      return {
+        enabled: config.enabled === true,
+        divider: Number(config.divider) > 0 ? Number(config.divider) : 1,
+        percent: Number(config.percent) > 0 ? Number(config.percent) : 0
+      };
     }
 
     function payoutActorsForOrder(order) {
@@ -2592,10 +3119,12 @@
       els.transferRate.value = transfer.rate || "1.00";
       els.transferPayoutAmount.value = formatMinor(transfer.amountMinor, transfer.currency);
       els.transferCurrency.value = transfer.currency;
+      els.transferRemarks.value = transfer.remarks || "";
     }
 
     function renderProfiles() {
-      const actors = activeActors();
+      els.accountBadge.textContent = currentAuth ? `${currentAuth.user.name} / ${currentAuth.membership.role}` : "Not logged in";
+      const actors = availableProfiles();
       if (!actors.some((actor) => actor.id === state.selectedActorId)) {
         state.selectedActorId = actors[0]?.id || "ACT-0";
       }
@@ -2611,6 +3140,19 @@
 
     function masterName() {
       return activeActors().find((actor) => actor.role === "Master")?.name || "Master";
+    }
+
+    function masterActor() {
+      return activeActors().find((actor) => actor.role === "Master") || activeActors()[0];
+    }
+
+    function masterBaseCurrency() {
+      return masterActor()?.currency || "USD";
+    }
+
+    function masterRateDivisorSettingFor(currency) {
+      state.masterRateDivisorSettings = normalizeCurrencyRateSettings(state.masterRateDivisorSettings || {});
+      return state.masterRateDivisorSettings[currency] || { enabled: false, divider: 1, percent: 0 };
     }
 
     function nextChatId() {
@@ -2826,6 +3368,25 @@
       );
     }
 
+    function sendOrderAssignmentToAgent(order, agentName) {
+      if (!order || !agentName) return;
+      const chat = directChatWithMaster(agentName);
+      if (!chat) return;
+      const master = masterName();
+      chat.messages.push({
+        id: nextMessageId(),
+        from: master,
+        text: `Order ${order.id} assigned to you. Pay ${money(order.payoutCurrency || order.sourceCurrency || "USD", order.payoutAmountMinor || order.sourceAmountMinor || 0)} to ${order.receiverName || order.phoneNumber || order.accountNumber || "the receiver"}.`,
+        kind: "text",
+        media: "",
+        fileName: "",
+        replyTo: "",
+        reactions: {},
+        readBy: [master],
+        createdAt: new Date().toISOString()
+      });
+    }
+
     function sendPaymentProofToMaster(order, actor, proof) {
       if (!proof?.media || !actor) return;
       const chat = directChatWithMaster(actor.name);
@@ -2847,8 +3408,9 @@
 
     function applyPrivileges() {
       const actor = selectedActor();
-      const role = actor?.role || "Master";
+      const role = actor?.role || "Inactive";
       const allowedViews = privilegeViews(role);
+      const canActAsSelectedActor = selectedActorIsOwnLogin();
       document.querySelectorAll(".nav button").forEach((button) => {
         const allowed = allowedViews.includes(button.dataset.view);
         button.classList.toggle("hidden", !allowed);
@@ -2857,10 +3419,10 @@
         el.classList.toggle("hidden", role !== "Master");
       });
       document.querySelectorAll("[data-agent-action]").forEach((el) => {
-        el.classList.toggle("hidden", role !== "Agent" && role !== "Special Agent" && role !== "Special Broker" && role !== "Master");
+        el.classList.toggle("hidden", !canActAsSelectedActor || (role !== "Agent" && role !== "Special Agent" && role !== "Special Broker"));
       });
       document.querySelectorAll("[data-send-action], [data-send-panel]").forEach((el) => {
-        el.classList.toggle("hidden", role === "Agent" || role === "Special Agent" || role === "Master");
+        el.classList.toggle("hidden", !canActAsSelectedActor || role === "Agent" || role === "Special Agent" || role === "Master");
       });
       const actorForm = document.getElementById("actorForm");
       const resetForm = document.getElementById("resetForm");
@@ -2901,7 +3463,7 @@
             <td>${nameCell}</td>
             <td>${escapeHtml(actor.role)}</td>
             <td>${currencyCell}</td>
-            <td><span class="state-pill good">Active</span></td>
+            <td><span class="state-pill ${actor.active === false ? "danger" : "good"}">${actor.active === false ? "Inactive" : "Active"}</span></td>
             <td>
               <button class="btn ${removable ? "danger" : "secondary"} remove-actor" data-id="${actor.id}" type="button" ${removable ? "" : "disabled"}>
                 Remove
@@ -3028,6 +3590,7 @@
         .filter((actor) => actor.role !== "Master")
         .map((actor) => {
           const allowed = actor.transferEnabled !== false;
+          const incomeVisible = actor.incomeStatementVisible !== false;
           const orderMultiCurrency = actor.orderMultiCurrencyEnabled === true;
           const orderCurrencyControl = ["Broker", "Special Broker"].includes(actor.role)
             ? `
@@ -3039,19 +3602,31 @@
               </div>
             `
             : '<span class="muted">Not applicable</span>';
-          const specialDividerEnabled = actor.specialPayoutDividerEnabled === true;
-          const specialDivider = Number(actor.specialPayoutDivider || 1);
-          const specialPercent = Number(actor.specialPayoutPercent || 0);
+          const specialCurrencies = actor.role === "Special Agent" ? actorTransferCurrencies(actor) : [];
+          const specialExpanded = state.expandedSpecialDividerActorId === actor.id;
+          const activeSpecialCount = specialCurrencies.filter((currency) => specialPayoutSettingFor(actor, currency).enabled).length;
           const specialDividerControl = actor.role === "Special Agent"
             ? `
-              <div class="setting-inline">
-                <input class="special-agent-divider" data-id="${actor.id}" type="number" min="0.000001" step="0.000001" value="${formatRate(specialDivider)}" aria-label="Special Agent payout divisor">
-                <input class="special-agent-percent" data-id="${actor.id}" type="number" min="0" step="0.000001" value="${formatRate(specialPercent)}" aria-label="Special Agent payout percentage">
-                <span class="state-pill ${specialDividerEnabled ? "good" : "danger"}">${specialDividerEnabled ? "On" : "Off"}</span>
-                <button class="btn primary save-special-divider" data-id="${actor.id}" type="button">Save</button>
-                <button class="btn ${specialDividerEnabled ? "danger" : "primary"} toggle-special-divider" data-id="${actor.id}" type="button">
-                  ${specialDividerEnabled ? "Switch Off" : "Switch On"}
+              <div class="special-divider-panel">
+                <button class="btn secondary expand-special-divider" data-id="${actor.id}" type="button">
+                  ${specialExpanded ? "Hide" : "Show"} currency payout settings
                 </button>
+                <span class="muted">${activeSpecialCount} active / ${specialCurrencies.length} currencies</span>
+                ${specialExpanded ? specialCurrencies.map((currency) => {
+                  const setting = specialPayoutSettingFor(actor, currency);
+                  return `
+                    <div class="special-divider-currency">
+                      <strong>${escapeHtml(currency)}</strong>
+                      <input class="special-agent-divider" data-id="${actor.id}" data-currency="${currency}" type="text" inputmode="decimal" value="${formatRate(setting.divider)}" placeholder="Divisor" aria-label="${currency} payout divisor">
+                      <input class="special-agent-percent" data-id="${actor.id}" data-currency="${currency}" type="text" inputmode="decimal" value="${formatRate(setting.percent)}" placeholder="Percent" aria-label="${currency} payout percentage">
+                      <span class="state-pill ${setting.enabled ? "good" : "danger"}">${setting.enabled ? "On" : "Off"}</span>
+                      <button class="btn primary save-special-divider" data-id="${actor.id}" data-currency="${currency}" type="button">Save</button>
+                      <button class="btn ${setting.enabled ? "danger" : "primary"} toggle-special-divider" data-id="${actor.id}" data-currency="${currency}" type="button">
+                        ${setting.enabled ? "Switch Off" : "Switch On"}
+                      </button>
+                    </div>
+                  `;
+                }).join("") : ""}
               </div>
             `
             : '<span class="muted">Not applicable</span>';
@@ -3061,6 +3636,14 @@
               <td>${escapeHtml(actor.role)}</td>
               <td>${actor.role === "Special Agent" ? `${escapeHtml(actor.currency)} / ${(actor.workingCurrencies || [actor.currency]).map(escapeHtml).join(", ")}` : escapeHtml(actor.currency)}</td>
               <td><span class="state-pill ${allowed ? "good" : "danger"}">${allowed ? "Allowed" : "Restricted"}</span></td>
+              <td>
+                <div class="setting-inline">
+                  <span class="state-pill ${incomeVisible ? "good" : "danger"}">${incomeVisible ? "View" : "Hidden"}</span>
+                  <button class="btn ${incomeVisible ? "danger" : "primary"} toggle-income-permission" data-id="${actor.id}" type="button">
+                    ${incomeVisible ? "Hide" : "View"}
+                  </button>
+                </div>
+              </td>
               <td>${orderCurrencyControl}</td>
               <td>${specialDividerControl}</td>
               <td>
@@ -3071,7 +3654,7 @@
             </tr>
           `;
         });
-      els.permissionRows.innerHTML = rows.length ? rows.join("") : '<tr><td colspan="7">No actors available for permissions.</td></tr>';
+      els.permissionRows.innerHTML = rows.length ? rows.join("") : '<tr><td colspan="8">No actors available for permissions.</td></tr>';
     }
 
     function renderFixedRateSettings() {
@@ -3118,6 +3701,73 @@
         return [summary, ...details];
       });
       els.fixedRateRows.innerHTML = rows.length ? rows.join("") : '<tr><td colspan="4">No Brokers or Special Brokers available.</td></tr>';
+    }
+
+    function renderMasterRateDivisorSettings() {
+      const master = masterActor();
+      const expanded = state.expandedMasterRateDivisor === true;
+      const activeCount = supportedCurrencies.filter((currency) => masterRateDivisorSettingFor(currency).enabled).length;
+      const details = expanded ? supportedCurrencies.map((currency) => {
+        const setting = masterRateDivisorSettingFor(currency);
+        return `
+          <div class="special-divider-currency">
+            <strong>${escapeHtml(currency)}</strong>
+            <input class="master-rate-divider" data-currency="${currency}" type="text" inputmode="decimal" value="${formatRate(setting.divider)}" placeholder="Divisor" aria-label="${currency} master rate divisor">
+            <input class="master-rate-percent" data-currency="${currency}" type="text" inputmode="decimal" value="${formatRate(setting.percent)}" placeholder="Percent" aria-label="${currency} master rate percentage">
+            <span class="state-pill ${setting.enabled ? "good" : "danger"}">${setting.enabled ? "On" : "Off"}</span>
+            <button class="btn primary save-master-rate-divisor" data-currency="${currency}" type="button">Save</button>
+            <button class="btn ${setting.enabled ? "danger" : "primary"} toggle-master-rate-divisor" data-currency="${currency}" type="button">
+              ${setting.enabled ? "Switch Off" : "Switch On"}
+            </button>
+          </div>
+        `;
+      }).join("") : "";
+      els.masterRateDivisorRows.innerHTML = `
+        <tr>
+          <td><strong>${escapeHtml(master?.name || "Master")}</strong><br><span class="muted">Base ${escapeHtml(masterBaseCurrency())}</span></td>
+          <td>
+            <div class="special-divider-panel">
+              <button class="btn secondary expand-master-rate-divisor" type="button">${expanded ? "Hide" : "Show"} currency payout settings</button>
+              ${details}
+            </div>
+          </td>
+          <td>${activeCount} active / ${supportedCurrencies.length} currencies</td>
+          <td><span class="muted">Controls Income Statement ${escapeHtml(masterBaseCurrency())} column</span></td>
+        </tr>
+      `;
+    }
+
+    async function renderInviteCodes() {
+      if (!currentAuth || currentAuth.membership?.role !== "Master") {
+        els.inviteRows.innerHTML = '<tr><td colspan="7">Only Master can create invite codes.</td></tr>';
+        return;
+      }
+      try {
+        const { invites } = await api("/api/invites");
+        els.inviteRows.innerHTML = invites.length ? invites.map((invite) => {
+          const linkedActor = state.actors.find((actor) => actor.id === invite.actorId || actor.name === invite.actorName);
+          const isAccepted = Boolean(invite.acceptedAt);
+          const isActive = linkedActor?.active !== false;
+          return `
+            <tr>
+              <td><strong>${escapeHtml(invite.code)}</strong></td>
+              <td>${escapeHtml(invite.actorRole)}</td>
+              <td>${escapeHtml(invite.currency)}${invite.workingCurrencies?.length ? ` / ${invite.workingCurrencies.map(escapeHtml).join(", ")}` : ""}</td>
+              <td>${escapeHtml(linkedActor?.name || invite.actorName || "Pending")}</td>
+              <td><span class="state-pill ${isAccepted ? "good" : "warn"}">${isAccepted ? "Accepted" : "Open"}</span></td>
+              <td>
+                <label class="currency-check">
+                  <input class="invite-actor-active" type="checkbox" data-actor-id="${escapeHtml(invite.actorId || "")}" ${isAccepted ? "" : "disabled"} ${isAccepted && isActive ? "checked" : ""}>
+                  Active
+                </label>
+              </td>
+              <td>${escapeHtml(displayDate(invite.createdAt))}</td>
+            </tr>
+          `;
+        }).join("") : '<tr><td colspan="7">No active invite codes.</td></tr>';
+      } catch (error) {
+        els.inviteRows.innerHTML = `<tr><td colspan="7">${escapeHtml(error.message)}</td></tr>`;
+      }
     }
 
     function removeActor(actorId) {
@@ -3179,6 +3829,8 @@
         order.paidAt ? `Paid: ${escapeHtml(displayDate(order.paidAt))}` : "",
         order.manualSpecialPayoutDivider ? `Manual divisor: ${escapeHtml(formatRate(order.manualSpecialPayoutDivider))}` : "",
         order.manualSpecialPayoutPercent ? `Manual %: ${escapeHtml(formatRate(order.manualSpecialPayoutPercent))}` : "",
+        order.manualMasterRateDivider ? `Master rate divisor: ${escapeHtml(formatRate(order.manualMasterRateDivider))}` : "",
+        order.manualMasterRatePercent ? `Master rate %: ${escapeHtml(formatRate(order.manualMasterRatePercent))}` : "",
         order.returnedBy ? `Returned by: ${escapeHtml(order.returnedBy)}` : "",
         order.voidRequestedBy ? `Void requested by: ${escapeHtml(order.voidRequestedBy)}` : "",
         order.voidRejectedBy ? `Void rejected by: ${escapeHtml(order.voidRejectedBy)}` : ""
@@ -3198,9 +3850,14 @@
       const canRequestVoid = ["Agent", "Special Agent", "Special Broker"].includes(actor?.role) && order.state === "Paid" && order.agent === actor.name && !order.voidRequested && !order.locked;
       const canApproveVoid = actor?.role === "Master" && order.state === "Void Requested";
       const canModify = ["Broker", "Special Broker"].includes(actor?.role) && order.state === "Returned" && order.broker === actor.name;
+      const masterRateSetting = masterRateDivisorSettingFor(order.payoutCurrency || order.sourceCurrency || masterBaseCurrency());
+      const canSetMasterRate = actor?.role === "Master" && order.state === "Paid" && !order.locked && masterRateSetting.enabled !== true;
+      const specialPayoutSetting = actor?.role === "Special Agent"
+        ? specialPayoutSettingFor(actor, order.payoutCurrency || order.sourceCurrency || actor.currency)
+        : null;
       const showManualDivider = canPay &&
         actor?.role === "Special Agent" &&
-        actor.specialPayoutDividerEnabled !== true;
+        specialPayoutSetting?.enabled !== true;
       const matchedAgents = payoutActorsForOrder(order);
       if (canForward) {
         if (matchedAgents.length === 0) {
@@ -3236,6 +3893,21 @@
             </label>
             <button class="btn primary pay-order" data-id="${order.id}" type="button">${icons.check}Mark Paid</button>
             <button class="btn secondary return-order" data-id="${order.id}" type="button">Return</button>
+          </div>
+        `;
+      }
+      if (canSetMasterRate) {
+        return `
+          <div class="order-actions">
+            <div class="manual-divider-field">
+              <label for="masterRateDivider-${order.id}">Master divisor</label>
+              <input id="masterRateDivider-${order.id}" class="manual-master-rate-divider" data-id="${order.id}" type="text" inputmode="decimal" value="${order.manualMasterRateDivider ? formatRate(order.manualMasterRateDivider) : ""}" placeholder="Optional">
+            </div>
+            <div class="manual-divider-field">
+              <label for="masterRatePercent-${order.id}">Percentage</label>
+              <input id="masterRatePercent-${order.id}" class="manual-master-rate-percent" data-id="${order.id}" type="text" inputmode="decimal" value="${order.manualMasterRatePercent ? formatRate(order.manualMasterRatePercent) : ""}" placeholder="Optional">
+            </div>
+            <button class="btn primary save-master-order-rate" data-id="${order.id}" type="button">Save Rate</button>
           </div>
         `;
       }
@@ -3340,6 +4012,11 @@
     function signedUsd(amountMinor) {
       const amount = Number(amountMinor || 0);
       return `${amount < 0 ? "-" : ""}${money("USD", Math.abs(amount))}`;
+    }
+
+    function signedMoney(currency, amountMinor) {
+      const amount = Number(amountMinor || 0);
+      return `${amount < 0 ? "-" : ""}${money(currency, Math.abs(amount))}`;
     }
 
     function lockedAmount(currency, amountMinor) {
@@ -3465,6 +4142,29 @@
       return "";
     }
 
+    function masterIncomeAmountForOrder(order, journalLines) {
+      const baseCurrency = masterBaseCurrency();
+      const payoutCurrency = order.payoutCurrency || order.sourceCurrency || baseCurrency;
+      const payoutAmountMinor = Number(order.payoutAmountMinor || order.sourceAmountMinor || 0);
+      const setting = masterRateDivisorSettingFor(payoutCurrency);
+      if (setting.enabled === true && Number(setting.divider) > 0) {
+        const baseMajor = majorAmount(payoutAmountMinor, payoutCurrency) / Number(setting.divider);
+        const percent = Number(setting.percent) > 0 ? Number(setting.percent) : 0;
+        return minorFromMajor(baseMajor * (1 + percent / 100), baseCurrency);
+      }
+      const manualDivider = Number(order.manualMasterRateDivider || 0);
+      const manualPercent = Number(order.manualMasterRatePercent || 0);
+      if ((Number.isFinite(manualDivider) && manualDivider > 0) || (Number.isFinite(manualPercent) && manualPercent > 0)) {
+        const divider = Number.isFinite(manualDivider) && manualDivider > 0 ? manualDivider : 1;
+        const percent = Number.isFinite(manualPercent) && manualPercent > 0 ? manualPercent : 0;
+        const baseMajor = majorAmount(payoutAmountMinor, payoutCurrency) / divider;
+        return minorFromMajor(baseMajor * (1 + percent / 100), baseCurrency);
+      }
+      return journalLines
+        .filter((line) => line.currency === baseCurrency && line.account === "MASTER_FX_CLEARING" && line.direction === "Debit")
+        .reduce((sum, line) => sum + Number(line.amountMinor || 0), 0);
+    }
+
     function incomeStatementRows(lines) {
       const orderJournals = new Set(
         lines
@@ -3475,18 +4175,19 @@
         .map((journal) => {
           const order = state.orders.find((item) => item.journal === journal);
           if (!order) return null;
+          if (order.state === "Voided" || order.voidJournal) return null;
           const journalLines = state.ledger.filter((line) => line.journal === journal && line.source === "ORDER_PAYMENT");
-          const usdMinor = journalLines
-            .filter((line) => line.currency === "USD" && line.account === "MASTER_FX_CLEARING" && line.direction === "Debit")
-            .reduce((sum, line) => sum + Number(line.amountMinor || 0), 0);
-          const collectedMinor = order.sourceCurrency === "USD" ? Number(order.sourceAmountMinor || 0) : 0;
+          const baseCurrency = masterBaseCurrency();
+          const baseAmountMinor = masterIncomeAmountForOrder(order, journalLines);
+          const collectedMinor = order.sourceCurrency === baseCurrency ? Number(order.sourceAmountMinor || 0) : 0;
           return {
             order,
             postedAt: order.paidAt || journalLines[0]?.postedAt || order.createdAt,
             direction: journalLines.some((line) => line.direction === "Debit") ? "Debit" : "Credit",
-            usdMinor,
+            baseCurrency,
+            baseAmountMinor,
             collectedMinor,
-            profitMinor: collectedMinor - usdMinor,
+            profitMinor: collectedMinor - baseAmountMinor,
             details: ledgerLineDetails(journalLines[0] || { source: "ORDER_PAYMENT", journal }, selectedActor())
           };
         })
@@ -3763,6 +4464,15 @@
     }
 
     function renderIncomeStatement(lines, ledgerActor) {
+      const viewer = selectedActor();
+      const canViewIncome = viewer?.role === "Master" || viewer?.incomeStatementVisible !== false;
+      els.incomeStatementSection.classList.toggle("hidden", !canViewIncome);
+      if (!canViewIncome) {
+        els.incomeStatementRows.innerHTML = "";
+        return;
+      }
+      const baseCurrency = masterBaseCurrency();
+      els.incomeBaseCurrencyHead.textContent = baseCurrency;
       els.incomeStatementSection.classList.toggle("collapsed", state.incomeStatementExpanded !== true);
       els.incomeStatementToggleText.textContent = state.incomeStatementExpanded === true ? "Collapse" : "Expand";
       const rows = incomeStatementRows(lines);
@@ -3774,6 +4484,7 @@
       const totalProfit = rows.reduce((sum, row) => sum + row.profitMinor, 0);
       const closedBodyRows = closedRows.map((archive) => {
         const profitMinor = Number(archive.incomeProfitMinor || 0);
+        const archiveCurrency = archive.incomeProfitCurrency || baseCurrency;
         const profitClass = profitMinor >= 0 ? "profit-positive" : "profit-negative";
         return `
           <tr>
@@ -3783,7 +4494,7 @@
             <td>Closed</td>
             <td></td>
             <td></td>
-            <td class="${profitClass}">${signedUsd(profitMinor)}</td>
+            <td class="${profitClass}">${signedMoney(archiveCurrency, profitMinor)}</td>
           </tr>
         `;
       }).join("");
@@ -3795,9 +4506,9 @@
             <td>${escapeHtml(displayDate(row.postedAt))}</td>
             <td>${escapeHtml(row.details)}</td>
             <td>${escapeHtml(row.direction)}</td>
-            <td>${row.usdMinor ? money("USD", row.usdMinor) : ""}</td>
-            <td>${row.collectedMinor ? money("USD", row.collectedMinor) : ""}</td>
-            <td class="${profitClass}">${signedUsd(row.profitMinor)}</td>
+            <td>${row.baseAmountMinor ? money(baseCurrency, row.baseAmountMinor) : ""}</td>
+            <td>${row.collectedMinor ? money(baseCurrency, row.collectedMinor) : ""}</td>
+            <td class="${profitClass}">${signedMoney(baseCurrency, row.profitMinor)}</td>
           </tr>
         `;
       }).join("");
@@ -3805,7 +4516,7 @@
       els.incomeStatementRows.innerHTML = `${closedBodyRows}${bodyRows}
         <tr>
           <td colspan="6"><strong>Current Session Profit/Loss</strong></td>
-          <td class="${totalClass}"><strong>${signedUsd(totalProfit)}</strong></td>
+          <td class="${totalClass}"><strong>${signedMoney(baseCurrency, totalProfit)}</strong></td>
         </tr>
       `;
     }
@@ -3846,6 +4557,7 @@
         <div class="transfer-row">
           <div>
             <strong>${transfer.from} -> ${transfer.to}</strong>
+            ${transfer.remarks ? `<span>Remarks: ${escapeHtml(transfer.remarks)}</span>` : ""}
             <span>${money(transfer.sourceCurrency || transfer.currency, transfer.sourceAmountMinor || transfer.amountMinor)} -> ${money(transfer.currency, transfer.amountMinor)} at ${escapeHtml(transfer.rate || "1")} · ${transfer.state}</span>
             <span>Sent: ${escapeHtml(displayDate(transfer.sentAt || transfer.createdAt))}${transfer.paidOutAt ? ` · Paid out: ${escapeHtml(displayDate(transfer.paidOutAt))}` : ""}</span>
             <span>${escapeHtml(dateBits.join(" - "))}</span>
@@ -4031,9 +4743,10 @@
         return { currency: payoutCurrency, amountMinor: payoutAmountMinor };
       }
       const baseCurrency = actor.currency;
-      const specialDivider = Number(actor.specialPayoutDivider || 0);
-      const specialPercent = Number(actor.specialPayoutPercent || 0);
-      if (actor.specialPayoutDividerEnabled === true && Number.isFinite(specialDivider) && specialDivider > 0) {
+      const payoutSetting = specialPayoutSettingFor(actor, payoutCurrency);
+      const specialDivider = Number(payoutSetting.divider || 0);
+      const specialPercent = Number(payoutSetting.percent || 0);
+      if (payoutSetting.enabled === true && Number.isFinite(specialDivider) && specialDivider > 0) {
         const baseMajor = majorAmount(payoutAmountMinor, payoutCurrency) / specialDivider;
         const adjustedMajor = baseMajor * (1 + (Number.isFinite(specialPercent) && specialPercent > 0 ? specialPercent : 0) / 100);
         return { currency: baseCurrency, amountMinor: minorFromMajor(adjustedMajor, baseCurrency) };
@@ -4133,6 +4846,7 @@
           actor: actor.name,
           closedAt: new Date().toISOString(),
           incomeProfitMinor,
+          incomeProfitCurrency: masterBaseCurrency(),
           incomeSummary: `Closed Profit/Loss for ${actor.name}`,
           ledger: actorLines.map((line) => ({ ...line, locked: true })),
           orders: archivedOrders.map((order) => ({ ...order, locked: true, archived: true })),
@@ -4207,6 +4921,99 @@
     let chatAudioChunks = [];
     let orderConversionTouches = [];
     let transferConversionTouches = [];
+
+    function setAuthMode(mode) {
+      const signup = mode === "signup";
+      els.loginForm.classList.toggle("hidden", signup);
+      els.signupForm.classList.toggle("hidden", !signup);
+      els.showLogin.className = `btn ${signup ? "secondary" : "primary active"}`;
+      els.showSignup.className = `btn ${signup ? "primary active" : "secondary"}`;
+    }
+
+    els.showLogin.addEventListener("click", () => setAuthMode("login"));
+    els.showSignup.addEventListener("click", () => setAuthMode("signup"));
+    els.signupRole.addEventListener("change", () => {
+      els.inviteCodeField.classList.toggle("hidden", els.signupRole.value !== "Actor");
+    });
+
+    els.loginForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      els.loginError.classList.remove("visible");
+      try {
+        const { session } = await api("/api/auth/login", {
+          method: "POST",
+          body: {
+            email: document.getElementById("loginEmail").value,
+            password: document.getElementById("loginPassword").value
+          }
+        });
+        await applyAuthSession(session);
+      } catch (error) {
+        showAuthError(els.loginError, error.message);
+      }
+    });
+
+    els.signupForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      els.signupError.classList.remove("visible");
+      try {
+        const { session } = await api("/api/auth/signup", {
+          method: "POST",
+          body: {
+            name: document.getElementById("signupName").value,
+            email: document.getElementById("signupEmail").value,
+            password: document.getElementById("signupPassword").value,
+            role: els.signupRole.value,
+            inviteCode: document.getElementById("signupInviteCode").value
+          }
+        });
+        await applyAuthSession(session);
+      } catch (error) {
+        showAuthError(els.signupError, error.message);
+      }
+    });
+
+    els.logoutButton.addEventListener("click", async () => {
+      await api("/api/auth/logout", { method: "POST" }).catch(() => {});
+      currentAuth = null;
+      remoteStateReady = false;
+      if (remoteRefreshTimer) clearInterval(remoteRefreshTimer);
+      remoteRefreshTimer = null;
+      els.authScreen.classList.remove("hidden");
+      els.accountBadge.textContent = "Not logged in";
+    });
+
+    els.inviteForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      els.inviteError.classList.remove("visible");
+      try {
+        await api("/api/invites", {
+          method: "POST",
+          body: {
+            actorRole: els.inviteRole.value,
+            currency: els.inviteCurrency.value,
+            workingCurrencies: Array.from(els.inviteWorkingCurrencies.querySelectorAll("input:checked")).map((input) => input.value)
+          }
+        });
+        notifyEvent("Invite created", "Share the new code with the actor.");
+        renderInviteCodes();
+      } catch (error) {
+        els.inviteError.textContent = error.message;
+        els.inviteError.classList.add("visible");
+      }
+    });
+
+    els.inviteRows.addEventListener("change", (event) => {
+      const checkbox = event.target.closest(".invite-actor-active");
+      if (!checkbox || selectedActor()?.role !== "Master") return;
+      const actor = state.actors.find((item) => item.id === checkbox.dataset.actorId);
+      if (!actor || actor.role === "Master") return;
+      actor.active = checkbox.checked;
+      if (!actor.active && state.selectedActorId === actor.id) {
+        state.selectedActorId = "ACT-0";
+      }
+      renderAll();
+    });
 
     function closeConfirmation() {
       pendingConfirmation = null;
@@ -4511,8 +5318,8 @@
       if (invalid) return;
 
       state.actorCounter += 1;
-      const selectedWorkingCurrencies = Array.from(workingInput.selectedOptions)
-        .map((option) => option.value)
+      const selectedWorkingCurrencies = Array.from(workingInput.querySelectorAll("input:checked"))
+        .map((input) => input.value)
         .filter((currency) => supportedCurrencies.includes(currency));
       const workingCurrencies = roleInput.value === "Special Agent"
         ? Array.from(new Set([currencyInput.value, ...selectedWorkingCurrencies])).slice(0, 5)
@@ -4524,10 +5331,14 @@
         currency: currencyInput.value,
         active: true,
         transferEnabled: true,
+        incomeStatementVisible: true,
         workingCurrencies,
         specialPayoutDivider: roleInput.value === "Special Agent" ? 1 : undefined,
         specialPayoutDividerEnabled: false,
-        specialPayoutPercent: roleInput.value === "Special Agent" ? 0 : undefined
+        specialPayoutPercent: roleInput.value === "Special Agent" ? 0 : undefined,
+        specialPayoutSettings: roleInput.value === "Special Agent"
+          ? Object.fromEntries(workingCurrencies.map((currency) => [currency, { enabled: false, divider: 1, percent: 0 }]))
+          : undefined
       });
       state.settlements.push({ actor: name, currency: currencyInput.value, netMinor: 0 });
       nameInput.value = "";
@@ -4547,6 +5358,8 @@
     });
 
     document.getElementById("assignButton").addEventListener("click", () => {
+      const actor = selectedActor();
+      if (!selectedActorIsOwnLogin() || actor?.role === "Master") return;
       const { input, hasReceiver } = buildJournalPreview();
       if (!hasReceiver) {
         state.orderValidationVisible = true;
@@ -4555,6 +5368,10 @@
       }
       if (input.broker === input.agent) {
         showOrderError("Broker and payout actor must be different.");
+        return;
+      }
+      if (input.rate <= 0 || input.sourceAmountMinor <= 0 || input.payoutAmountMinor <= 0) {
+        showOrderError("Enter source amount, payout amount, and an exchange rate greater than zero.");
         return;
       }
       const brokerActor = activeActors().find((actor) => actor.name === input.broker);
@@ -4579,6 +5396,8 @@
 
     document.getElementById("orderForm").addEventListener("submit", (event) => {
       event.preventDefault();
+      const actor = selectedActor();
+      if (!selectedActorIsOwnLogin() || !["Broker", "Special Broker"].includes(actor?.role)) return;
       const { input, hasReceiver } = buildJournalPreview();
       if (!hasReceiver) {
         state.orderValidationVisible = true;
@@ -4624,6 +5443,7 @@
       const currency = els.transferCurrency.value;
       const sourceAmountMinor = parseMoney(els.transferAmount.value, sourceCurrency);
       const amountMinor = parseMoney(els.transferPayoutAmount.value, currency);
+      const remarks = els.transferRemarks.value.trim();
       const invalid = !from || !to || !sourceCurrency || !currency || from === to || sourceAmountMinor <= 0 || amountMinor <= 0 || rate <= 0;
       els.transferError.textContent = from === to
         ? "Sender and receiver must be different."
@@ -4644,6 +5464,7 @@
         amountMinor,
         sourceAmountMinor,
         rate,
+        remarks,
         state: actor?.role === "Master" ? "Approved" : "Pending Approval",
         initiatedBy: actor?.name || "Unknown",
         createdAt: existingTransfer?.createdAt || sentAt,
@@ -4669,6 +5490,7 @@
         transferConversionTouches = [];
         els.transferAmount.value = "";
         els.transferPayoutAmount.value = "";
+        els.transferRemarks.value = "";
         els.transferError.classList.remove("visible");
         notifyEvent("New transfer", transfer.state === "Pending Approval"
           ? `${transfer.id} sent to Master for approval.`
@@ -4769,12 +5591,40 @@
         return;
       }
 
+      const incomePermissionButton = event.target.closest(".toggle-income-permission");
+      if (incomePermissionButton) {
+        if (selectedActor()?.role !== "Master") return;
+        const actor = state.actors.find((item) => item.id === incomePermissionButton.dataset.id);
+        if (!actor || actor.role === "Master") return;
+        actor.incomeStatementVisible = actor.incomeStatementVisible === false;
+        renderAll();
+        return;
+      }
+
       const expandBrokerRatesButton = event.target.closest(".expand-broker-rates");
       if (expandBrokerRatesButton) {
         if (selectedActor()?.role !== "Master") return;
         state.expandedFixedRateActorId = state.expandedFixedRateActorId === expandBrokerRatesButton.dataset.id
           ? ""
           : expandBrokerRatesButton.dataset.id;
+        renderAll();
+        return;
+      }
+
+      const expandSpecialDividerButton = event.target.closest(".expand-special-divider");
+      if (expandSpecialDividerButton) {
+        if (selectedActor()?.role !== "Master") return;
+        state.expandedSpecialDividerActorId = state.expandedSpecialDividerActorId === expandSpecialDividerButton.dataset.id
+          ? ""
+          : expandSpecialDividerButton.dataset.id;
+        renderAll();
+        return;
+      }
+
+      const expandMasterRateButton = event.target.closest(".expand-master-rate-divisor");
+      if (expandMasterRateButton) {
+        if (selectedActor()?.role !== "Master") return;
+        state.expandedMasterRateDivisor = state.expandedMasterRateDivisor !== true;
         renderAll();
         return;
       }
@@ -4828,12 +5678,13 @@
       if (saveSpecialDividerButton) {
         if (selectedActor()?.role !== "Master") return;
         const actor = state.actors.find((item) => item.id === saveSpecialDividerButton.dataset.id);
-        const wrapper = saveSpecialDividerButton.closest(".setting-inline");
+        const currency = saveSpecialDividerButton.dataset.currency;
+        const wrapper = saveSpecialDividerButton.closest(".special-divider-currency");
         const input = wrapper?.querySelector(".special-agent-divider");
         const percentInput = wrapper?.querySelector(".special-agent-percent");
         const divider = Number(input?.value || 0);
         const percent = Number(percentInput?.value || 0);
-        if (!actor || actor.role !== "Special Agent") return;
+        if (!actor || actor.role !== "Special Agent" || !actorTransferCurrencies(actor).includes(currency)) return;
         if (!Number.isFinite(divider) || divider <= 0) {
           input?.setCustomValidity("Enter a divisor greater than zero.");
           input?.reportValidity();
@@ -4846,8 +5697,12 @@
         }
         input?.setCustomValidity("");
         percentInput?.setCustomValidity("");
-        actor.specialPayoutDivider = divider;
-        actor.specialPayoutPercent = percent;
+        actor.specialPayoutSettings ||= {};
+        actor.specialPayoutSettings[currency] = {
+          ...(actor.specialPayoutSettings[currency] || {}),
+          divider,
+          percent
+        };
         renderAll();
         return;
       }
@@ -4856,12 +5711,14 @@
       if (toggleSpecialDividerButton) {
         if (selectedActor()?.role !== "Master") return;
         const actor = state.actors.find((item) => item.id === toggleSpecialDividerButton.dataset.id);
-        if (!actor || actor.role !== "Special Agent") return;
-        const wrapper = toggleSpecialDividerButton.closest(".setting-inline");
+        const currency = toggleSpecialDividerButton.dataset.currency;
+        if (!actor || actor.role !== "Special Agent" || !actorTransferCurrencies(actor).includes(currency)) return;
+        const wrapper = toggleSpecialDividerButton.closest(".special-divider-currency");
         const input = wrapper?.querySelector(".special-agent-divider");
         const percentInput = wrapper?.querySelector(".special-agent-percent");
-        const divider = Number(input?.value || actor.specialPayoutDivider || 0);
-        const percent = Number(percentInput?.value || actor.specialPayoutPercent || 0);
+        const current = specialPayoutSettingFor(actor, currency);
+        const divider = Number(input?.value || current.divider || 0);
+        const percent = Number(percentInput?.value || current.percent || 0);
         if (!Number.isFinite(divider) || divider <= 0) {
           input?.setCustomValidity("Enter a divisor greater than zero.");
           input?.reportValidity();
@@ -4874,19 +5731,88 @@
         }
         input?.setCustomValidity("");
         percentInput?.setCustomValidity("");
-        actor.specialPayoutDivider = divider;
-        actor.specialPayoutPercent = percent;
-        actor.specialPayoutDividerEnabled = actor.specialPayoutDividerEnabled !== true;
+        actor.specialPayoutSettings ||= {};
+        actor.specialPayoutSettings[currency] = {
+          divider,
+          percent,
+          enabled: current.enabled !== true
+        };
+        renderAll();
+        return;
+      }
+
+      const saveMasterRateButton = event.target.closest(".save-master-rate-divisor");
+      if (saveMasterRateButton) {
+        if (selectedActor()?.role !== "Master") return;
+        const currency = saveMasterRateButton.dataset.currency;
+        const wrapper = saveMasterRateButton.closest(".special-divider-currency");
+        const input = wrapper?.querySelector(".master-rate-divider");
+        const percentInput = wrapper?.querySelector(".master-rate-percent");
+        const divider = Number(input?.value || 0);
+        const percent = Number(percentInput?.value || 0);
+        if (!supportedCurrencies.includes(currency)) return;
+        if (!Number.isFinite(divider) || divider <= 0) {
+          input?.setCustomValidity("Enter a divisor greater than zero.");
+          input?.reportValidity();
+          return;
+        }
+        if (!Number.isFinite(percent) || percent < 0) {
+          percentInput?.setCustomValidity("Enter zero or a positive percentage.");
+          percentInput?.reportValidity();
+          return;
+        }
+        input?.setCustomValidity("");
+        percentInput?.setCustomValidity("");
+        state.masterRateDivisorSettings ||= {};
+        state.masterRateDivisorSettings[currency] = {
+          ...(state.masterRateDivisorSettings[currency] || {}),
+          divider,
+          percent
+        };
+        renderAll();
+        return;
+      }
+
+      const toggleMasterRateButton = event.target.closest(".toggle-master-rate-divisor");
+      if (toggleMasterRateButton) {
+        if (selectedActor()?.role !== "Master") return;
+        const currency = toggleMasterRateButton.dataset.currency;
+        const wrapper = toggleMasterRateButton.closest(".special-divider-currency");
+        const input = wrapper?.querySelector(".master-rate-divider");
+        const percentInput = wrapper?.querySelector(".master-rate-percent");
+        const current = masterRateDivisorSettingFor(currency);
+        const divider = Number(input?.value || current.divider || 0);
+        const percent = Number(percentInput?.value || current.percent || 0);
+        if (!supportedCurrencies.includes(currency)) return;
+        if (!Number.isFinite(divider) || divider <= 0) {
+          input?.setCustomValidity("Enter a divisor greater than zero.");
+          input?.reportValidity();
+          return;
+        }
+        if (!Number.isFinite(percent) || percent < 0) {
+          percentInput?.setCustomValidity("Enter zero or a positive percentage.");
+          percentInput?.reportValidity();
+          return;
+        }
+        input?.setCustomValidity("");
+        percentInput?.setCustomValidity("");
+        state.masterRateDivisorSettings ||= {};
+        state.masterRateDivisorSettings[currency] = {
+          divider,
+          percent,
+          enabled: current.enabled !== true
+        };
         renderAll();
         return;
       }
 
       const forwardButton = event.target.closest(".forward-order");
       if (forwardButton) {
+        const actor = selectedActor();
         const order = state.orders.find((item) => item.id === forwardButton.dataset.id);
         const actionBox = forwardButton.closest(".order-actions");
         const targetAgent = actionBox?.querySelector(".forward-agent")?.value || "";
-        if (!order || order.state !== "Pending Forward") return;
+        if (!order || actor?.role !== "Master" || order.state !== "Pending Forward") return;
         if (!targetAgent || targetAgent === order.broker) {
           showOrderError("Choose a payout actor different from the broker.");
           return;
@@ -4898,10 +5824,13 @@
         }
         order.agent = targetAgent;
         order.state = "Assigned";
+        order.assignedAt = new Date().toISOString();
+        sendOrderAssignmentToAgent(order, targetAgent);
         state.orderState = "Assigned";
         els.orderState.textContent = "Assigned";
         els.orderState.className = "state-pill";
         clearOrderDetails();
+        notifyEvent("Order forwarded", `${order.id} sent to ${targetAgent}.`);
         renderAll();
         return;
       }
@@ -4940,7 +5869,7 @@
       if (payButton) {
         const actor = selectedActor();
         const order = state.orders.find((item) => item.id === payButton.dataset.id);
-        if (!order || order.state !== "Assigned" || order.agent !== actor?.name) return;
+        if (!selectedActorIsOwnLogin() || !order || order.state !== "Assigned" || order.agent !== actor?.name) return;
         const actionBox = payButton.closest(".order-actions");
         const proofFile = actionBox?.querySelector(".payment-proof-input")?.files?.[0] || null;
         const manualDividerInput = actionBox?.querySelector(".manual-payout-divider");
@@ -4994,6 +5923,44 @@
           els.voidButton.disabled = false;
           renderAll();
         });
+        return;
+      }
+
+      const saveMasterOrderRateButton = event.target.closest(".save-master-order-rate");
+      if (saveMasterOrderRateButton) {
+        const actor = selectedActor();
+        const order = state.orders.find((item) => item.id === saveMasterOrderRateButton.dataset.id);
+        if (!order || actor?.role !== "Master" || order.state !== "Paid") return;
+        const actionBox = saveMasterOrderRateButton.closest(".order-actions");
+        const dividerInput = actionBox?.querySelector(".manual-master-rate-divider");
+        const percentInput = actionBox?.querySelector(".manual-master-rate-percent");
+        const dividerText = dividerInput?.value.trim() || "";
+        const percentText = percentInput?.value.trim() || "";
+        const divider = Number(dividerText || 0);
+        const percent = Number(percentText || 0);
+        if (dividerText && (!Number.isFinite(divider) || divider <= 0)) {
+          dividerInput?.setCustomValidity("Enter a divisor greater than zero.");
+          dividerInput?.reportValidity();
+          return;
+        }
+        if (percentText && (!Number.isFinite(percent) || percent < 0)) {
+          percentInput?.setCustomValidity("Enter zero or a positive percentage.");
+          percentInput?.reportValidity();
+          return;
+        }
+        dividerInput?.setCustomValidity("");
+        percentInput?.setCustomValidity("");
+        if (dividerText) {
+          order.manualMasterRateDivider = divider;
+        } else {
+          delete order.manualMasterRateDivider;
+        }
+        if (percentText) {
+          order.manualMasterRatePercent = percent;
+        } else {
+          delete order.manualMasterRatePercent;
+        }
+        renderAll();
         return;
       }
 
@@ -5159,6 +6126,8 @@
       renderActors();
       renderPermissionSettings();
       renderFixedRateSettings();
+      renderMasterRateDivisorSettings();
+      renderInviteCodes();
       renderChat();
       renderOrders();
       renderTransfers();
@@ -5170,9 +6139,18 @@
       saveState();
     }
 
-    applyPrivileges();
-    setView(state.activeView || "dashboard");
-    renderAll();
+    async function initApp() {
+      const { session } = await api("/api/session").catch(() => ({ session: null }));
+      if (session) {
+        await applyAuthSession(session);
+      } else {
+        els.authScreen.classList.remove("hidden");
+        renderAll();
+      }
+      els.inviteCodeField.classList.toggle("hidden", els.signupRole.value !== "Actor");
+    }
+
+    initApp();
   </script>
 </body>
 </html>
