@@ -122,15 +122,29 @@ function workspaceOwnerSubscription(db, workspace) {
 }
 
 function masterSubscriptionRows(db) {
-  return db.memberships
+  const masterMemberships = new Map();
+  db.memberships
     .filter((membership) => membership.role === "Master")
+    .forEach((membership) => masterMemberships.set(membership.userId, membership));
+  db.workspaces
+    .filter((workspace) => workspace.ownerUserId)
+    .forEach((workspace) => {
+      if (masterMemberships.has(workspace.ownerUserId)) return;
+      masterMemberships.set(workspace.ownerUserId, {
+        userId: workspace.ownerUserId,
+        workspaceId: workspace.id,
+        role: "Master",
+      });
+    });
+  return Array.from(masterMemberships.values())
     .map((membership) => {
       const user = db.users.find((item) => item.id === membership.userId);
       const workspace = db.workspaces.find((item) => item.id === membership.workspaceId);
+      if (!user) return null;
       return {
-        userId: user?.id || "",
-        name: user?.name || "Unknown",
-        email: user?.email || "",
+        userId: user.id,
+        name: user.name || "Unknown",
+        email: user.email || "",
         workspace: workspace?.name || "",
         plan: user?.subscriptionPlan || "one_month",
         active: user?.active !== false,
@@ -138,6 +152,7 @@ function masterSubscriptionRows(db) {
         expired: subscriptionExpired(user?.subscriptionExpiresAt),
       };
     })
+    .filter(Boolean)
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -238,6 +253,33 @@ function mergeById(existingItems = [], incomingItems = []) {
   return Array.from(merged.values());
 }
 
+function recordTimestamp(item = {}) {
+  return Math.max(
+    new Date(item.updatedAt || 0).getTime(),
+    new Date(item.paidAt || 0).getTime(),
+    new Date(item.assignedAt || 0).getTime(),
+    new Date(item.returnedAt || 0).getTime(),
+    new Date(item.sentAt || 0).getTime(),
+    new Date(item.createdAt || 0).getTime(),
+    0
+  );
+}
+
+function mergeOrders(existingItems = [], incomingItems = []) {
+  const merged = new Map();
+  [...existingItems, ...incomingItems].forEach((item) => {
+    if (!item || typeof item !== "object" || !item.id) return;
+    const previous = merged.get(item.id);
+    if (!previous) {
+      merged.set(item.id, item);
+      return;
+    }
+    const itemIsNewer = recordTimestamp(item) >= recordTimestamp(previous);
+    merged.set(item.id, itemIsNewer ? { ...previous, ...item } : { ...item, ...previous });
+  });
+  return Array.from(merged.values());
+}
+
 function mergeByKey(existingItems = [], incomingItems = [], keyForItem) {
   const merged = new Map();
   [...existingItems, ...incomingItems].forEach((item) => {
@@ -265,7 +307,7 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   const currentState = db.appStates[workspaceId] || {};
   const nextState = { ...currentState, ...incomingState };
   nextState.actors = mergeById(currentState.actors, incomingState.actors);
-  nextState.orders = mergeById(currentState.orders, incomingState.orders);
+  nextState.orders = mergeOrders(currentState.orders, incomingState.orders);
   nextState.transfers = mergeById(currentState.transfers, incomingState.transfers);
   nextState.ledger = mergeByKey(currentState.ledger, incomingState.ledger, (line) =>
     [line.journal, line.source, line.account, line.direction, line.currency, line.amountMinor, line.postedAt].join(":")

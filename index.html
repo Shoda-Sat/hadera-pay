@@ -2366,6 +2366,33 @@
       return Array.from(merged.values());
     }
 
+    function recordTimestamp(item = {}) {
+      return Math.max(
+        new Date(item.updatedAt || 0).getTime(),
+        new Date(item.paidAt || 0).getTime(),
+        new Date(item.assignedAt || 0).getTime(),
+        new Date(item.returnedAt || 0).getTime(),
+        new Date(item.sentAt || 0).getTime(),
+        new Date(item.createdAt || 0).getTime(),
+        0
+      );
+    }
+
+    function mergeOrders(existingItems = [], incomingItems = []) {
+      const merged = new Map();
+      [...existingItems, ...incomingItems].forEach((item) => {
+        if (!item || typeof item !== "object" || !item.id) return;
+        const previous = merged.get(item.id);
+        if (!previous) {
+          merged.set(item.id, item);
+          return;
+        }
+        const itemIsNewer = recordTimestamp(item) >= recordTimestamp(previous);
+        merged.set(item.id, itemIsNewer ? { ...previous, ...item } : { ...item, ...previous });
+      });
+      return Array.from(merged.values());
+    }
+
     function mergeLedgerLines(existingItems = [], incomingItems = []) {
       const keyForLine = (line) => [line.journal, line.source, line.account, line.direction, line.currency, line.amountMinor, line.postedAt].join(":");
       const merged = new Map();
@@ -2392,7 +2419,7 @@
     function mergeSharedState(remoteState) {
       if (!remoteState || typeof remoteState !== "object") return false;
       state.actors = normalizeActors(mergeById(state.actors, remoteState.actors || []));
-      state.orders = mergeById(state.orders, remoteState.orders || []);
+      state.orders = mergeOrders(state.orders, remoteState.orders || []);
       state.transfers = normalizeTransfers(mergeById(state.transfers, remoteState.transfers || []));
       state.ledger = mergeLedgerLines(state.ledger, remoteState.ledger || []);
       state.settlements = Array.isArray(remoteState.settlements) ? remoteState.settlements : state.settlements;
@@ -2427,6 +2454,21 @@
 
     function authStorageKey(session) {
       return session?.workspace?.id ? `haderapay.workspace.${session.workspace.id}` : "haderapay.local.state.v1";
+    }
+
+    function signedInRole() {
+      return currentAuth?.membership?.role || "";
+    }
+
+    function signedInAsOwner() {
+      return signedInRole() === "Owner";
+    }
+
+    async function saveStateNow() {
+      saveState();
+      if (!currentAuth || !remoteStateReady || suppressRemoteSave) return;
+      clearTimeout(saveTimer);
+      await api("/api/app-state", { method: "PUT", body: { state } }).catch(() => {});
     }
 
     function ensureSessionActor() {
@@ -2882,7 +2924,8 @@
         sentAt: existingOrder?.sentAt || now,
         paidAt: existingOrder?.paidAt || "",
         returnedBy: "",
-        returnedReason: ""
+        returnedReason: "",
+        updatedAt: now
       };
     }
 
@@ -5006,6 +5049,7 @@
       order.state = "Voided";
       order.voidJournal = journalId;
       order.voidRequested = false;
+      order.updatedAt = postedAt;
       syncSettlementsFromLedger();
     }
 
@@ -5170,7 +5214,7 @@
 
     els.ownerMasterForm.addEventListener("submit", async (event) => {
       event.preventDefault();
-      if (selectedActor()?.role !== "Owner") return;
+      if (!signedInAsOwner()) return;
       els.ownerMasterError.classList.remove("visible");
       try {
         await api("/api/owner/masters", {
@@ -5227,7 +5271,7 @@
 
     els.subscriptionRows.addEventListener("click", async (event) => {
       const button = event.target.closest(".extend-subscription");
-      if (!button || selectedActor()?.role !== "Owner") return;
+      if (!button || !signedInAsOwner()) return;
       const userId = button.dataset.userId;
       const row = button.closest("tr");
       const plan = row?.querySelector(".subscription-plan")?.value || "one_month";
@@ -5246,7 +5290,7 @@
 
     els.subscriptionRows.addEventListener("change", async (event) => {
       const checkbox = event.target.closest(".master-active-toggle");
-      if (!checkbox || selectedActor()?.role !== "Owner") return;
+      if (!checkbox || !signedInAsOwner()) return;
       const userId = checkbox.dataset.userId;
       const active = checkbox.checked;
       try {
@@ -5279,6 +5323,7 @@
       order.voidRequested = false;
       order.voidRejectedBy = actorName;
       order.voidRejectedAt = new Date().toISOString();
+      order.updatedAt = order.voidRejectedAt;
       state.orderState = "Paid";
       els.orderState.textContent = "Paid";
       els.orderState.className = "state-pill good";
@@ -6088,6 +6133,7 @@
         }
         order.state = "Assigned";
         order.assignedAt = new Date().toISOString();
+        order.updatedAt = order.assignedAt;
         sendOrderAssignmentToAgent(order, targetAgent);
         state.orderState = "Assigned";
         els.orderState.textContent = "Assigned";
@@ -6095,6 +6141,7 @@
         clearOrderDetails();
         notifyEvent("Order forwarded", `${order.id} sent to ${targetAgent}.`);
         renderAll();
+        await saveStateNow();
         return;
       }
 
@@ -6105,6 +6152,7 @@
         if (!order || actor?.role !== "Master" || order.state !== "Pending Forward") return;
         order.state = "Returned";
         order.returnedBy = "Master";
+        order.updatedAt = new Date().toISOString();
         order.agent = "Unassigned";
         state.orderState = "Returned";
         els.orderState.textContent = "Returned";
@@ -6120,6 +6168,7 @@
         if (!order || actor?.role !== "Master" || order.state !== "Pending Forward") return;
         order.state = "Cancelled";
         order.returnedBy = "";
+        order.updatedAt = new Date().toISOString();
         order.agent = "Cancelled";
         state.orderState = "Cancelled";
         els.orderState.textContent = "Cancelled";
@@ -6179,6 +6228,7 @@
           postOrderPayment(order);
           order.state = "Paid";
           order.paidAt = new Date().toISOString();
+          order.updatedAt = order.paidAt;
           sendPaymentProofToMaster(order, actor, proof);
           state.orderState = "Paid";
           els.orderState.textContent = "Paid";
@@ -6223,6 +6273,7 @@
         } else {
           delete order.manualMasterRatePercent;
         }
+        order.updatedAt = new Date().toISOString();
         renderAll();
         return;
       }
@@ -6236,6 +6287,7 @@
           order.state = "Void Requested";
           order.voidRequested = true;
           order.voidRequestedBy = actor.name;
+          order.updatedAt = new Date().toISOString();
           state.orderState = "Void Requested";
           els.orderState.textContent = "Void Requested";
           els.orderState.className = "state-pill warn";
@@ -6280,6 +6332,7 @@
         if (!order || order.state !== "Assigned" || order.agent !== actor?.name) return;
         order.state = "Returned";
         order.returnedBy = actor.name;
+        order.updatedAt = new Date().toISOString();
         order.agent = "Unassigned";
         state.orderState = "Returned";
         els.orderState.textContent = "Returned";
