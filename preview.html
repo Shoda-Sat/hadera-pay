@@ -4068,8 +4068,9 @@
 
     function orderActionsHtml(order, actor) {
       const canForward = actor?.role === "Master" && order.state === "Pending Forward";
-      const canPay = ["Agent", "Special Agent", "Special Broker"].includes(actor?.role) && order.state === "Assigned" && order.agent === actor.name;
-      const canRequestVoid = ["Agent", "Special Agent", "Special Broker"].includes(actor?.role) && order.state === "Paid" && order.agent === actor.name && !order.voidRequested && !order.locked;
+      const canActAsSelectedActor = selectedActorIsOwnLogin();
+      const canPay = canActAsSelectedActor && ["Agent", "Special Agent", "Special Broker"].includes(actor?.role) && order.state === "Assigned" && order.agent === actor.name;
+      const canRequestVoid = canActAsSelectedActor && ["Agent", "Special Agent", "Special Broker"].includes(actor?.role) && order.state === "Paid" && order.agent === actor.name && !order.voidRequested && !order.locked;
       const canApproveVoid = actor?.role === "Master" && order.state === "Void Requested";
       const canModify = ["Broker", "Special Broker"].includes(actor?.role) && order.state === "Returned" && order.broker === actor.name;
       const masterRateSetting = masterRateDivisorSettingFor(order.payoutCurrency || order.sourceCurrency || masterBaseCurrency());
@@ -6260,9 +6261,10 @@
 
       const payButton = event.target.closest(".pay-order");
       if (payButton) {
-        if (payButton.disabled || processingOrderIds.has(payButton.dataset.id)) return;
+        const orderId = payButton.dataset.id;
+        if (payButton.disabled || processingOrderIds.has(orderId)) return;
         const actor = selectedActor();
-        const order = state.orders.find((item) => item.id === payButton.dataset.id);
+        const order = state.orders.find((item) => item.id === orderId);
         if (!selectedActorIsOwnLogin() || !order || order.state !== "Assigned" || order.agent !== actor?.name) return;
         const actionBox = payButton.closest(".order-actions");
         const proofFile = actionBox?.querySelector(".payment-proof-input")?.files?.[0] || null;
@@ -6271,37 +6273,34 @@
           showOrderError(`Payment proof is too large. Use an image under ${Math.round(maxProofFileBytes / 1024 / 1024)} MB.`);
           return;
         }
-        confirmAction("Mark this order as paid?", async () => {
-          if (processingOrderIds.has(order.id)) return;
-          processingOrderIds.add(order.id);
-          payButton.disabled = true;
-          if (progress) progress.textContent = proofFile ? "Uploading 0%" : "";
-          let proof = null;
-          if (proofFile) {
-            try {
-              proof = {
-                media: await readFileAsDataUrl(proofFile, (percent) => {
-                  if (progress) progress.textContent = `Uploading ${percent}%`;
-                }),
-                fileName: proofFile.name || `${order.id}-payment-proof.png`
-              };
-            } catch {
-              processingOrderIds.delete(order.id);
-              payButton.disabled = false;
-              if (progress) progress.textContent = "";
-              showOrderError("Could not attach the payment proof. Try another screenshot.");
-              return;
-            }
-          }
-          if (progress && proofFile) progress.textContent = "Posting payment...";
-          if (order.state !== "Assigned" || order.journal) {
+        processingOrderIds.add(order.id);
+        payButton.disabled = true;
+        if (progress) progress.textContent = proofFile ? "Uploading 0%" : "Posting payment...";
+        let proof = null;
+        if (proofFile) {
+          try {
+            proof = {
+              media: await readFileAsDataUrl(proofFile, (percent) => {
+                if (progress) progress.textContent = `Uploading ${percent}%`;
+              }),
+              fileName: proofFile.name || `${order.id}-payment-proof.png`
+            };
+          } catch {
             processingOrderIds.delete(order.id);
+            payButton.disabled = false;
+            if (progress) progress.textContent = "";
+            showOrderError("Could not attach the payment proof. Try another screenshot.");
+            return;
+          }
+        }
+        if (progress) progress.textContent = "Posting payment...";
+        try {
+          if (order.state !== "Assigned" || order.journal) {
             renderAll();
             return;
           }
           const posted = postOrderPayment(order);
           if (!posted) {
-            processingOrderIds.delete(order.id);
             renderAll();
             return;
           }
@@ -6315,12 +6314,9 @@
           els.voidButton.disabled = false;
           renderAll();
           await saveStateNow();
+        } finally {
           processingOrderIds.delete(order.id);
-        }, () => {
-          processingOrderIds.delete(order.id);
-          payButton.disabled = false;
-          if (progress) progress.textContent = "";
-        });
+        }
         return;
       }
 
