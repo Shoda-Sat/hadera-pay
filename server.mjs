@@ -275,7 +275,13 @@ function mergeOrders(existingItems = [], incomingItems = []) {
       return;
     }
     const itemIsNewer = recordTimestamp(item) >= recordTimestamp(previous);
-    merged.set(item.id, itemIsNewer ? { ...previous, ...item } : { ...item, ...previous });
+    const next = itemIsNewer ? { ...previous, ...item } : { ...item, ...previous };
+    if (previous.journal && !next.journal) next.journal = previous.journal;
+    if (item.journal && !next.journal) next.journal = item.journal;
+    if (previous.paidAt && !next.paidAt) next.paidAt = previous.paidAt;
+    if (item.paidAt && !next.paidAt) next.paidAt = item.paidAt;
+    if (previous.state === "Paid" || item.state === "Paid") next.state = "Paid";
+    merged.set(item.id, next);
   });
   return Array.from(merged.values());
 }
