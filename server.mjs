@@ -569,6 +569,30 @@ async function handleApi(request, response, url) {
     return;
   }
 
+  if (url.pathname === "/api/app-state/remove-actor" && method === "POST") {
+    if (session.membership.role !== "Master") return sendJson(response, 403, { error: "Only Master can remove actors." });
+    const body = await readJson(request);
+    const actorId = String(body.actorId || "");
+    const actorName = String(body.actorName || "");
+    if (!actorId || actorId === "ACT-0") return sendJson(response, 400, { error: "Choose an actor to remove." });
+    const currentState = db.appStates[session.workspace.id] || {};
+    const nextState = { ...currentState };
+    nextState.actors = (currentState.actors || []).filter((actor) => actor?.id !== actorId);
+    nextState.settlements = (currentState.settlements || []).filter((item) => item?.actor !== actorName);
+    nextState.transfers = (currentState.transfers || []).filter((item) => item?.from !== actorName && item?.to !== actorName);
+    nextState.orders = (currentState.orders || []).filter((item) => item?.broker !== actorName && item?.agent !== actorName);
+    nextState.chatConversations = (currentState.chatConversations || [])
+      .map((chat) => ({ ...chat, members: (chat.members || []).filter((member) => member !== actorName) }))
+      .filter((chat) => (chat.type !== "direct" && chat.members.length > 1) || chat.type === "group");
+    if (nextState.selectedLedgerActor === actorName) nextState.selectedLedgerActor = "";
+    if (nextState.expandedFixedRateActorId === actorId) nextState.expandedFixedRateActorId = "";
+    if (nextState.expandedSpecialDividerActorId === actorId) nextState.expandedSpecialDividerActorId = "";
+    db.appStates[session.workspace.id] = nextState;
+    await saveDb(db);
+    sendJson(response, 200, { ok: true, state: nextState });
+    return;
+  }
+
   if (url.pathname === "/api/app-state" && method === "PUT") {
     const body = await readJson(request);
     db.appStates[session.workspace.id] = mergeWorkspaceState(db, session.workspace.id, body.state || {});

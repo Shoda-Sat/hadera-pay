@@ -2401,8 +2401,15 @@
       return true;
     }
 
+    function settingsRateInputIsFocused() {
+      return Boolean(document.activeElement?.closest?.(
+        ".special-agent-divider, .special-agent-percent, .master-rate-divider, .master-rate-percent"
+      ));
+    }
+
     async function refreshSharedState() {
       if (!currentAuth || !remoteStateReady) return;
+      if (settingsRateInputIsFocused()) return;
       const remote = await api("/api/app-state").catch(() => null);
       if (!mergeSharedState(remote?.state)) return;
       suppressRemoteSave = true;
@@ -3896,9 +3903,10 @@
       }
     }
 
-    function removeActor(actorId) {
+    async function removeActor(actorId) {
       const actor = state.actors.find((item) => item.id === actorId);
-      if (!actor) return;
+      if (!actor || actor.role === "Master" || selectedActor()?.role !== "Master") return;
+      const previousState = structuredClone(state);
       state.actors = state.actors.filter((item) => item.id !== actorId);
       state.settlements = state.settlements.filter((item) => item.actor !== actor.name);
       state.transfers = state.transfers.filter((item) => item.from !== actor.name && item.to !== actor.name);
@@ -3909,6 +3917,17 @@
       if (state.selectedLedgerActor === actor.name) state.selectedLedgerActor = "";
       if (state.expandedFixedRateActorId === actorId) state.expandedFixedRateActorId = "";
       renderAll();
+      try {
+        await api("/api/app-state/remove-actor", {
+          method: "POST",
+          body: { actorId, actorName: actor.name }
+        });
+      } catch (error) {
+        replaceState(previousState);
+        els.actorError.textContent = error.message;
+        els.actorError.classList.add("visible");
+        renderAll();
+      }
     }
 
     function resetFinancialData() {
@@ -3955,6 +3974,7 @@
         order.paidAt ? `Paid: ${escapeHtml(displayDate(order.paidAt))}` : "",
         order.manualSpecialPayoutDivider ? `Manual divisor: ${escapeHtml(formatRate(order.manualSpecialPayoutDivider))}` : "",
         order.manualSpecialPayoutPercent ? `Manual %: ${escapeHtml(formatRate(order.manualSpecialPayoutPercent))}` : "",
+        Number.isFinite(Number(order.forwardedPayoutPercent)) ? `Forwarded payout %: ${escapeHtml(formatRate(order.forwardedPayoutPercent))}` : "",
         order.manualMasterRateDivider ? `Master rate divisor: ${escapeHtml(formatRate(order.manualMasterRateDivider))}` : "",
         order.manualMasterRatePercent ? `Master rate %: ${escapeHtml(formatRate(order.manualMasterRatePercent))}` : "",
         order.returnedBy ? `Returned by: ${escapeHtml(order.returnedBy)}` : "",
@@ -3981,6 +4001,7 @@
       const specialPayoutSetting = actor?.role === "Special Agent"
         ? specialPayoutSettingFor(actor, order.payoutCurrency || order.sourceCurrency || actor.currency)
         : null;
+      const hasForwardedPayoutPercent = Number.isFinite(Number(order.forwardedPayoutPercent));
       const showManualDivider = canPay &&
         actor?.role === "Special Agent" &&
         specialPayoutSetting?.enabled !== true;
@@ -3994,6 +4015,10 @@
             <select class="forward-agent" data-id="${order.id}">
               ${matchedAgents.map((item) => `<option>${escapeHtml(item.name)}</option>`).join("")}
             </select>
+            <div class="manual-divider-field">
+              <label for="forwardPercent-${order.id}">Payer %</label>
+              <input id="forwardPercent-${order.id}" class="forward-payout-percent" data-id="${order.id}" type="number" min="0" step="0.000001" value="${escapeHtml(formatRate(Number.isFinite(Number(order.forwardedPayoutPercent)) ? Number(order.forwardedPayoutPercent) : Number(order.commissionPercent || 0)))}" placeholder="Optional">
+            </div>
             <button class="btn secondary forward-order" data-id="${order.id}" type="button">Forward</button>
             <button class="btn secondary master-return-order" data-id="${order.id}" type="button">Return</button>
             <button class="btn danger cancel-order" data-id="${order.id}" type="button">Cancel</button>
@@ -4008,10 +4033,10 @@
                 <label for="manualDivider-${order.id}">Payout divisor</label>
                 <input id="manualDivider-${order.id}" class="manual-payout-divider" data-id="${order.id}" type="number" min="0.000001" step="0.000001" placeholder="Optional">
               </div>
-              <div class="manual-divider-field">
+              ${hasForwardedPayoutPercent ? "" : `<div class="manual-divider-field">
                 <label for="manualPercent-${order.id}">Percentage</label>
                 <input id="manualPercent-${order.id}" class="manual-payout-percent" data-id="${order.id}" type="number" min="0" step="0.000001" placeholder="Optional">
-              </div>
+              </div>`}
             ` : ""}
             <label class="btn secondary proof-upload">
               Attach proof
@@ -4291,6 +4316,15 @@
         .reduce((sum, line) => sum + Number(line.amountMinor || 0), 0);
     }
 
+    function masterCollectedAmountForOrder(order) {
+      const baseCurrency = masterBaseCurrency();
+      const sourceCurrency = order.sourceCurrency || baseCurrency;
+      const sourceAmountMinor = Number(order.sourceAmountMinor || 0);
+      const commissionMinor = Number(order.commissionMinor || 0);
+      if (sourceCurrency !== baseCurrency) return 0;
+      return sourceAmountMinor + commissionMinor;
+    }
+
     function incomeStatementRows(lines) {
       const orderJournals = new Set(
         lines
@@ -4305,7 +4339,7 @@
           const journalLines = state.ledger.filter((line) => line.journal === journal && line.source === "ORDER_PAYMENT");
           const baseCurrency = masterBaseCurrency();
           const baseAmountMinor = masterIncomeAmountForOrder(order, journalLines);
-          const collectedMinor = order.sourceCurrency === baseCurrency ? Number(order.sourceAmountMinor || 0) : 0;
+          const collectedMinor = masterCollectedAmountForOrder(order);
           return {
             order,
             postedAt: order.paidAt || journalLines[0]?.postedAt || order.createdAt,
@@ -4865,17 +4899,29 @@
       const actor = activeActors().find((item) => item.name === order.agent);
       const payoutCurrency = order.payoutCurrency || order.sourceCurrency || "USD";
       const payoutAmountMinor = Number(order.payoutAmountMinor || order.sourceAmountMinor || 0);
+      const forwardedPercent = Number(order.forwardedPayoutPercent);
+      const hasForwardedPercent = Number.isFinite(forwardedPercent) && forwardedPercent >= 0;
+      const applyPercent = (amountMinor, currency, percent) => {
+        const major = majorAmount(amountMinor, currency);
+        return minorFromMajor(major * (1 + percent / 100), currency);
+      };
       if (actor?.role !== "Special Agent") {
-        return { currency: payoutCurrency, amountMinor: payoutAmountMinor };
+        return {
+          currency: payoutCurrency,
+          amountMinor: hasForwardedPercent ? applyPercent(payoutAmountMinor, payoutCurrency, forwardedPercent) : payoutAmountMinor
+        };
       }
       const baseCurrency = actor.currency;
       const payoutSetting = specialPayoutSettingFor(actor, payoutCurrency);
       const specialDivider = Number(payoutSetting.divider || 0);
       const specialPercent = Number(payoutSetting.percent || 0);
+      const finishSpecial = (baseMajor, fallbackPercent) => {
+        const percent = hasForwardedPercent ? forwardedPercent : fallbackPercent;
+        return { currency: baseCurrency, amountMinor: minorFromMajor(baseMajor * (1 + percent / 100), baseCurrency) };
+      };
       if (payoutSetting.enabled === true && Number.isFinite(specialDivider) && specialDivider > 0) {
         const baseMajor = majorAmount(payoutAmountMinor, payoutCurrency) / specialDivider;
-        const adjustedMajor = baseMajor * (1 + (Number.isFinite(specialPercent) && specialPercent > 0 ? specialPercent : 0) / 100);
-        return { currency: baseCurrency, amountMinor: minorFromMajor(adjustedMajor, baseCurrency) };
+        return finishSpecial(baseMajor, Number.isFinite(specialPercent) && specialPercent > 0 ? specialPercent : 0);
       }
       const manualDivider = Number(order.manualSpecialPayoutDivider || 0);
       const manualPercent = Number(order.manualSpecialPayoutPercent || 0);
@@ -4883,16 +4929,27 @@
         const divider = Number.isFinite(manualDivider) && manualDivider > 0 ? manualDivider : 1;
         const percent = Number.isFinite(manualPercent) && manualPercent > 0 ? manualPercent : 0;
         const baseMajor = majorAmount(payoutAmountMinor, payoutCurrency) / divider;
-        return { currency: baseCurrency, amountMinor: minorFromMajor(baseMajor * (1 + percent / 100), baseCurrency) };
+        return finishSpecial(baseMajor, percent);
       }
       if (baseCurrency === payoutCurrency) {
-        return { currency: baseCurrency, amountMinor: payoutAmountMinor };
+        return {
+          currency: baseCurrency,
+          amountMinor: hasForwardedPercent ? applyPercent(payoutAmountMinor, baseCurrency, forwardedPercent) : payoutAmountMinor
+        };
       }
       if (baseCurrency === order.sourceCurrency) {
-        return { currency: baseCurrency, amountMinor: Number(order.sourceAmountMinor || 0) };
+        const sourceAmountMinor = Number(order.sourceAmountMinor || 0);
+        return {
+          currency: baseCurrency,
+          amountMinor: hasForwardedPercent ? applyPercent(sourceAmountMinor, baseCurrency, forwardedPercent) : sourceAmountMinor
+        };
       }
       const rate = Number(order.rate || 1) || 1;
-      return { currency: baseCurrency, amountMinor: minorFromMajor(majorAmount(payoutAmountMinor, payoutCurrency) / rate, baseCurrency) };
+      const baseAmountMinor = minorFromMajor(majorAmount(payoutAmountMinor, payoutCurrency) / rate, baseCurrency);
+      return {
+        currency: baseCurrency,
+        amountMinor: hasForwardedPercent ? applyPercent(baseAmountMinor, baseCurrency, forwardedPercent) : baseAmountMinor
+      };
     }
 
     function settlementFor(actorName, currency) {
@@ -5232,7 +5289,7 @@
       button.addEventListener("click", () => setView(button.dataset.view));
     });
 
-    document.addEventListener("click", (event) => {
+    document.addEventListener("click", async (event) => {
       const profileButton = event.target.closest(".profile-button");
       if (!profileButton) return;
       state.selectedActorId = profileButton.dataset.profileId;
@@ -5706,7 +5763,7 @@
       });
     });
 
-    document.addEventListener("click", (event) => {
+    document.addEventListener("click", async (event) => {
       const saveActorNameButton = event.target.closest(".save-actor-name");
       if (saveActorNameButton) {
         if (selectedActor()?.role !== "Master") return;
@@ -5754,7 +5811,7 @@
 
       const removeActorButton = event.target.closest(".remove-actor");
       if (removeActorButton) {
-        removeActor(removeActorButton.dataset.id);
+        await removeActor(removeActorButton.dataset.id);
         return;
       }
 
@@ -6003,9 +6060,17 @@
         const order = state.orders.find((item) => item.id === forwardButton.dataset.id);
         const actionBox = forwardButton.closest(".order-actions");
         const targetAgent = actionBox?.querySelector(".forward-agent")?.value || "";
+        const percentInput = actionBox?.querySelector(".forward-payout-percent");
+        const percentText = percentInput?.value.trim() || "";
+        const forwardedPercent = Number(percentText || 0);
         if (!order || actor?.role !== "Master" || order.state !== "Pending Forward") return;
         if (!targetAgent || targetAgent === order.broker) {
           showOrderError("Choose a payout actor different from the broker.");
+          return;
+        }
+        if (percentText && (!Number.isFinite(forwardedPercent) || forwardedPercent < 0)) {
+          percentInput?.setCustomValidity("Enter zero or a positive percentage.");
+          percentInput?.reportValidity();
           return;
         }
         const targetActor = activeActors().find((actor) => actor.name === targetAgent);
@@ -6013,7 +6078,14 @@
           showOrderError(`Choose a ${order.payoutCurrency} payout actor.`);
           return;
         }
+        percentInput?.setCustomValidity("");
         order.agent = targetAgent;
+        if (percentText) {
+          order.forwardedPayoutPercent = forwardedPercent;
+          delete order.manualSpecialPayoutPercent;
+        } else {
+          delete order.forwardedPayoutPercent;
+        }
         order.state = "Assigned";
         order.assignedAt = new Date().toISOString();
         sendOrderAssignmentToAgent(order, targetAgent);
