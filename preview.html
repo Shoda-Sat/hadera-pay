@@ -2165,6 +2165,8 @@
     let saveTimer = null;
     let suppressRemoteSave = false;
     let remoteRefreshTimer = null;
+    const processingOrderIds = new Set();
+    const maxProofFileBytes = 4 * 1024 * 1024;
     const supportedCurrencies = ["USD", "ETB", "EUR", "ERN"];
 
     function normalizeCurrencyRateSettings(settings = {}) {
@@ -2368,6 +2370,9 @@
 
     function recordTimestamp(item = {}) {
       return Math.max(
+        new Date(item.voidRequestedAt || 0).getTime(),
+        new Date(item.voidRejectedAt || 0).getTime(),
+        new Date(item.voidedAt || 0).getTime(),
         new Date(item.updatedAt || 0).getTime(),
         new Date(item.paidAt || 0).getTime(),
         new Date(item.assignedAt || 0).getTime(),
@@ -2393,7 +2398,9 @@
         if (item.journal && !next.journal) next.journal = item.journal;
         if (previous.paidAt && !next.paidAt) next.paidAt = previous.paidAt;
         if (item.paidAt && !next.paidAt) next.paidAt = item.paidAt;
-        if (previous.state === "Paid" || item.state === "Paid") next.state = "Paid";
+        if (previous.voidJournal && !next.voidJournal) next.voidJournal = previous.voidJournal;
+        if (item.voidJournal && !next.voidJournal) next.voidJournal = item.voidJournal;
+        if (previous.state === "Voided" || item.state === "Voided") next.state = "Voided";
         merged.set(item.id, next);
       });
       return Array.from(merged.values());
@@ -2436,7 +2443,7 @@
 
     function settingsRateInputIsFocused() {
       return Boolean(document.activeElement?.closest?.(
-        ".special-agent-divider, .special-agent-percent, .master-rate-divider, .master-rate-percent, .forward-payout-divider, .forward-payout-percent"
+        ".fixed-order-rate, .special-agent-divider, .special-agent-percent, .master-rate-divider, .master-rate-percent, .forward-payout-divider, .forward-payout-percent"
       ));
     }
 
@@ -3480,7 +3487,7 @@
       saveState();
     }
 
-    function readFileAsDataUrl(file) {
+    function readFileAsDataUrl(file, onProgress = () => {}) {
       return new Promise((resolve, reject) => {
         if (!file) {
           resolve("");
@@ -3489,6 +3496,10 @@
         const reader = new FileReader();
         reader.onload = () => resolve(String(reader.result || ""));
         reader.onerror = () => reject(reader.error);
+        reader.onprogress = (event) => {
+          if (!event.lengthComputable) return;
+          onProgress(Math.round(event.loaded / event.total * 100));
+        };
         reader.readAsDataURL(file);
       });
     }
@@ -3791,6 +3802,7 @@
     }
 
     function renderFixedRateSettings() {
+      if (document.activeElement?.closest?.(".fixed-order-rate")) return;
       const brokers = activeActors().filter((actor) => ["Broker", "Special Broker"].includes(actor.role));
       const rows = brokers.flatMap((actor) => {
         const expanded = state.expandedFixedRateActorId === actor.id;
@@ -4012,19 +4024,33 @@
       state.settlements = state.settlements.filter((item) => activeActors().some((actor) => actor.name === item.actor));
     }
 
-    function orderDetailsHtml(order) {
+    function orderDetailsHtml(order, viewer) {
+      const commissionPercent = Number.isFinite(Number(order.forwardedPayoutPercent))
+        ? Number(order.forwardedPayoutPercent)
+        : Number(order.commissionPercent || 0);
+      const commissionCurrency = Number.isFinite(Number(order.forwardedPayoutPercent))
+        ? order.payoutCurrency || order.sourceCurrency || "USD"
+        : order.sourceCurrency || "USD";
+      const commissionMinor = Number.isFinite(Number(order.forwardedPayoutPercent))
+        ? minorFromMajor(majorAmount(Number(order.payoutAmountMinor || order.sourceAmountMinor || 0), commissionCurrency) * commissionPercent / 100, commissionCurrency)
+        : Number(order.commissionMinor || 0);
+      const masterCanSeePayoutRates = viewer?.role === "Master";
       const bits = [
+        order.id ? `Order Number: ${escapeHtml(order.id)}` : "",
         order.senderName ? `Sender: ${escapeHtml(order.senderName)}` : "",
         order.receiverName ? `Receiver: ${escapeHtml(order.receiverName)}` : "",
-        order.accountNumber ? `Account: ${escapeHtml(order.accountNumber)}` : "",
         order.phoneNumber ? `Phone: ${escapeHtml(order.phoneNumber)}` : "",
+        order.accountNumber ? `Account: ${escapeHtml(order.accountNumber)}` : "",
         order.remarks ? `Remarks: ${escapeHtml(order.remarks)}` : "",
+        `Base Amount: ${money(order.sourceCurrency || "USD", order.sourceAmountMinor || 0)}`,
+        `Payout Amount: ${money(order.payoutCurrency || order.sourceCurrency || "USD", order.payoutAmountMinor || order.sourceAmountMinor || 0)}`,
+        `Commission: ${money(commissionCurrency, commissionMinor)}${commissionPercent ? ` (${escapeHtml(formatRate(commissionPercent))}%)` : ""}`,
         order.sentAt || order.createdAt ? `Sent: ${escapeHtml(displayDate(order.sentAt || order.createdAt))}` : "",
         order.paidAt ? `Paid: ${escapeHtml(displayDate(order.paidAt))}` : "",
-        order.manualSpecialPayoutDivider ? `Manual divisor: ${escapeHtml(formatRate(order.manualSpecialPayoutDivider))}` : "",
-        order.manualSpecialPayoutPercent ? `Manual %: ${escapeHtml(formatRate(order.manualSpecialPayoutPercent))}` : "",
-        Number.isFinite(Number(order.forwardedPayoutDivider)) ? `Forwarded payout divisor: ${escapeHtml(formatRate(order.forwardedPayoutDivider))}` : "",
-        Number.isFinite(Number(order.forwardedPayoutPercent)) ? `Forwarded payout %: ${escapeHtml(formatRate(order.forwardedPayoutPercent))}` : "",
+        masterCanSeePayoutRates && order.manualSpecialPayoutDivider ? `Manual divisor: ${escapeHtml(formatRate(order.manualSpecialPayoutDivider))}` : "",
+        masterCanSeePayoutRates && order.manualSpecialPayoutPercent ? `Manual %: ${escapeHtml(formatRate(order.manualSpecialPayoutPercent))}` : "",
+        masterCanSeePayoutRates && Number.isFinite(Number(order.forwardedPayoutDivider)) ? `Forwarded payout divisor: ${escapeHtml(formatRate(order.forwardedPayoutDivider))}` : "",
+        masterCanSeePayoutRates && Number.isFinite(Number(order.forwardedPayoutPercent)) ? `Forwarded payout %: ${escapeHtml(formatRate(order.forwardedPayoutPercent))}` : "",
         order.manualMasterRateDivider ? `Master rate divisor: ${escapeHtml(formatRate(order.manualMasterRateDivider))}` : "",
         order.manualMasterRatePercent ? `Master rate %: ${escapeHtml(formatRate(order.manualMasterRatePercent))}` : "",
         order.returnedBy ? `Returned by: ${escapeHtml(order.returnedBy)}` : "",
@@ -4034,7 +4060,7 @@
       return `
         <div class="order-detail">
           <span>${money(order.sourceCurrency || "USD", order.sourceAmountMinor || 0)} source -> ${money(order.payoutCurrency || order.sourceCurrency || "USD", order.payoutAmountMinor || order.sourceAmountMinor || 0)} payout</span>
-          <span>Rate ${escapeHtml(order.rate || "1")} · Fee ${money(order.sourceCurrency || "USD", order.commissionMinor || 0)}</span>
+          <span>Rate ${escapeHtml(order.rate || "1")} - Commission ${money(commissionCurrency, commissionMinor)}</span>
           ${bits.map((bit) => `<span>${bit}</span>`).join("")}
         </div>
       `;
@@ -4048,13 +4074,6 @@
       const canModify = ["Broker", "Special Broker"].includes(actor?.role) && order.state === "Returned" && order.broker === actor.name;
       const masterRateSetting = masterRateDivisorSettingFor(order.payoutCurrency || order.sourceCurrency || masterBaseCurrency());
       const canSetMasterRate = actor?.role === "Master" && order.state === "Paid" && !order.locked && masterRateSetting.enabled !== true;
-      const specialPayoutSetting = actor?.role === "Special Agent"
-        ? specialPayoutSettingFor(actor, order.payoutCurrency || order.sourceCurrency || actor.currency)
-        : null;
-      const hasForwardedPayoutPercent = Number.isFinite(Number(order.forwardedPayoutPercent));
-      const showManualDivider = canPay &&
-        actor?.role === "Special Agent" &&
-        specialPayoutSetting?.enabled !== true;
       const matchedAgents = payoutActorsForOrder(order);
       if (canForward) {
         if (matchedAgents.length === 0) {
@@ -4082,20 +4101,11 @@
       if (canPay) {
         return `
           <div class="order-actions">
-            ${showManualDivider ? `
-              <div class="manual-divider-field">
-                <label for="manualDivider-${order.id}">Payout divisor</label>
-                <input id="manualDivider-${order.id}" class="manual-payout-divider" data-id="${order.id}" type="number" min="0.000001" step="0.000001" placeholder="Optional">
-              </div>
-              ${hasForwardedPayoutPercent ? "" : `<div class="manual-divider-field">
-                <label for="manualPercent-${order.id}">Percentage</label>
-                <input id="manualPercent-${order.id}" class="manual-payout-percent" data-id="${order.id}" type="number" min="0" step="0.000001" placeholder="Optional">
-              </div>`}
-            ` : ""}
             <label class="btn secondary proof-upload">
               Attach proof
               <input class="payment-proof-input hidden" data-id="${order.id}" type="file" accept="image/*">
             </label>
+            <span class="muted proof-progress" data-id="${order.id}"></span>
             <button class="btn primary pay-order" data-id="${order.id}" type="button">${icons.check}Mark Paid</button>
             <button class="btn secondary return-order" data-id="${order.id}" type="button">Return</button>
           </div>
@@ -4417,6 +4427,7 @@
     }
 
     function ledgerLineDetails(line, viewer) {
+      if (line.source === "PREVIOUS_CLOSE") return line.details || "Previous Close";
       const order = orderForLedgerLine(line);
       if (!order) return "";
       const bits = [
@@ -4634,7 +4645,7 @@
               : "";
         return `
           <tr>
-            <td><strong>${order.id}</strong>${orderDetailsHtml(order)}</td>
+            <td><strong>${order.id}</strong>${orderDetailsHtml(order, actor)}</td>
             <td>${escapeHtml(order.broker)}</td>
             <td>${escapeHtml(order.agent)}</td>
             <td>${money(order.sourceCurrency || "USD", order.sourceAmountMinor || 0)}</td>
@@ -5072,6 +5083,7 @@
       order.state = "Voided";
       order.voidJournal = journalId;
       order.voidRequested = false;
+      order.voidedAt = postedAt;
       order.updatedAt = postedAt;
       syncSettlementsFromLedger();
     }
@@ -5079,7 +5091,11 @@
     function closeCurrentBalanceForActor(actorName) {
       const actor = activeActors().find((item) => item.name === actorName && item.role !== "Master");
       if (!actor) return;
-      const actorLines = state.ledger.filter((line) => lineBelongsToActor(line, actor));
+      const previousCloseDetails = `Previous Close for ${actor.name}`;
+      const closesWithActor = (line) =>
+        lineBelongsToActor(line, actor) ||
+        (line.source === "PREVIOUS_CLOSE" && line.account === "MASTER_PREVIOUS_CLOSE" && line.details === previousCloseDetails);
+      const actorLines = state.ledger.filter((line) => closesWithActor(line));
       const archivedOrders = state.orders.filter((order) =>
         (order.state === "Paid" || order.state === "Voided") &&
         (order.broker === actor.name || order.agent === actor.name)
@@ -5091,6 +5107,7 @@
       const incomeRows = incomeStatementRows(actorLines);
       const incomeProfitMinor = incomeRows.reduce((sum, row) => sum + row.profitMinor, 0);
       const closedAt = new Date().toISOString();
+      const previousBalances = archivedBalances(actor.name, actorLines);
       if (actorLines.length || archivedOrders.length || archivedTransfers.length) {
         state.archives.unshift({
           id: "ARC-" + Date.now(),
@@ -5105,7 +5122,7 @@
         });
       }
       state.ledger = state.ledger.map((line) =>
-        lineBelongsToActor(line, actor) && line.archived !== true
+        closesWithActor(line) && line.archived !== true
           ? { ...line, archived: true, closedAt }
           : line
       );
@@ -5117,6 +5134,38 @@
         transfer.state !== "Approved" ||
         (transfer.from !== actor.name && transfer.to !== actor.name)
       );
+      const openingLines = supportedCurrencies
+        .filter((currency) => (previousBalances[currency] || 0) !== 0)
+        .flatMap((currency) => {
+          const netMinor = previousBalances[currency];
+          const amountMinor = Math.abs(netMinor);
+          const actorDirection = netMinor > 0 ? "Debit" : "Credit";
+          const offsetDirection = actorDirection === "Debit" ? "Credit" : "Debit";
+          const journal = nextJournalId();
+          return [
+            {
+              journal,
+              source: "PREVIOUS_CLOSE",
+              account: `${actor.name} ACTOR_CLEARING`,
+              direction: actorDirection,
+              currency,
+              amountMinor,
+              postedAt: closedAt,
+              details: `Previous Close for ${actor.name}`
+            },
+            {
+              journal,
+              source: "PREVIOUS_CLOSE",
+              account: "MASTER_PREVIOUS_CLOSE",
+              direction: offsetDirection,
+              currency,
+              amountMinor,
+              postedAt: closedAt,
+              details: `Previous Close for ${actor.name}`
+            }
+          ];
+        });
+      if (openingLines.length) state.ledger.unshift(...openingLines);
       syncSettlementsFromLedger();
     }
 
@@ -5809,6 +5858,8 @@
         paidOrder.state = "Void Requested";
         paidOrder.voidRequested = true;
         paidOrder.voidRequestedBy = actor.name;
+        paidOrder.voidRequestedAt = new Date().toISOString();
+        paidOrder.updatedAt = paidOrder.voidRequestedAt;
         state.orderState = "Void Requested";
         els.orderState.textContent = "Void Requested";
         els.orderState.className = "state-pill warn";
@@ -6209,64 +6260,48 @@
 
       const payButton = event.target.closest(".pay-order");
       if (payButton) {
-        if (payButton.disabled) return;
+        if (payButton.disabled || processingOrderIds.has(payButton.dataset.id)) return;
         const actor = selectedActor();
         const order = state.orders.find((item) => item.id === payButton.dataset.id);
         if (!selectedActorIsOwnLogin() || !order || order.state !== "Assigned" || order.agent !== actor?.name) return;
         const actionBox = payButton.closest(".order-actions");
         const proofFile = actionBox?.querySelector(".payment-proof-input")?.files?.[0] || null;
-        const manualDividerInput = actionBox?.querySelector(".manual-payout-divider");
-        const manualPercentInput = actionBox?.querySelector(".manual-payout-percent");
-        const manualDividerText = manualDividerInput?.value.trim() || "";
-        const manualPercentText = manualPercentInput?.value.trim() || "";
-        const manualDivider = Number(manualDividerText || 0);
-        const manualPercent = Number(manualPercentText || 0);
-        if (manualDividerText && (!Number.isFinite(manualDivider) || manualDivider <= 0)) {
-          payButton.disabled = false;
-          manualDividerInput?.setCustomValidity("Enter a divisor greater than zero.");
-          manualDividerInput?.reportValidity();
+        const progress = actionBox?.querySelector(".proof-progress");
+        if (proofFile && proofFile.size > maxProofFileBytes) {
+          showOrderError(`Payment proof is too large. Use an image under ${Math.round(maxProofFileBytes / 1024 / 1024)} MB.`);
           return;
         }
-        if (manualPercentText && (!Number.isFinite(manualPercent) || manualPercent < 0)) {
-          payButton.disabled = false;
-          manualPercentInput?.setCustomValidity("Enter zero or a positive percentage.");
-          manualPercentInput?.reportValidity();
-          return;
-        }
-        manualDividerInput?.setCustomValidity("");
-        manualPercentInput?.setCustomValidity("");
         confirmAction("Mark this order as paid?", async () => {
-          if (payButton.disabled) return;
+          if (processingOrderIds.has(order.id)) return;
+          processingOrderIds.add(order.id);
           payButton.disabled = true;
+          if (progress) progress.textContent = proofFile ? "Uploading 0%" : "";
           let proof = null;
           if (proofFile) {
             try {
               proof = {
-                media: await readFileAsDataUrl(proofFile),
+                media: await readFileAsDataUrl(proofFile, (percent) => {
+                  if (progress) progress.textContent = `Uploading ${percent}%`;
+                }),
                 fileName: proofFile.name || `${order.id}-payment-proof.png`
               };
             } catch {
+              processingOrderIds.delete(order.id);
               payButton.disabled = false;
+              if (progress) progress.textContent = "";
               showOrderError("Could not attach the payment proof. Try another screenshot.");
               return;
             }
           }
+          if (progress && proofFile) progress.textContent = "Posting payment...";
           if (order.state !== "Assigned" || order.journal) {
+            processingOrderIds.delete(order.id);
             renderAll();
             return;
           }
-          if (manualDividerText) {
-            order.manualSpecialPayoutDivider = manualDivider;
-          } else {
-            delete order.manualSpecialPayoutDivider;
-          }
-          if (manualPercentText) {
-            order.manualSpecialPayoutPercent = manualPercent;
-          } else {
-            delete order.manualSpecialPayoutPercent;
-          }
           const posted = postOrderPayment(order);
           if (!posted) {
+            processingOrderIds.delete(order.id);
             renderAll();
             return;
           }
@@ -6280,6 +6315,11 @@
           els.voidButton.disabled = false;
           renderAll();
           await saveStateNow();
+          processingOrderIds.delete(order.id);
+        }, () => {
+          processingOrderIds.delete(order.id);
+          payButton.disabled = false;
+          if (progress) progress.textContent = "";
         });
         return;
       }
@@ -6332,7 +6372,8 @@
           order.state = "Void Requested";
           order.voidRequested = true;
           order.voidRequestedBy = actor.name;
-          order.updatedAt = new Date().toISOString();
+          order.voidRequestedAt = new Date().toISOString();
+          order.updatedAt = order.voidRequestedAt;
           state.orderState = "Void Requested";
           els.orderState.textContent = "Void Requested";
           els.orderState.className = "state-pill warn";

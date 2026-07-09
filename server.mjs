@@ -309,6 +309,9 @@ function mergeById(existingItems = [], incomingItems = []) {
 
 function recordTimestamp(item = {}) {
   return Math.max(
+    new Date(item.voidRequestedAt || 0).getTime(),
+    new Date(item.voidRejectedAt || 0).getTime(),
+    new Date(item.voidedAt || 0).getTime(),
     new Date(item.updatedAt || 0).getTime(),
     new Date(item.paidAt || 0).getTime(),
     new Date(item.assignedAt || 0).getTime(),
@@ -334,7 +337,9 @@ function mergeOrders(existingItems = [], incomingItems = []) {
     if (item.journal && !next.journal) next.journal = item.journal;
     if (previous.paidAt && !next.paidAt) next.paidAt = previous.paidAt;
     if (item.paidAt && !next.paidAt) next.paidAt = item.paidAt;
-    if (previous.state === "Paid" || item.state === "Paid") next.state = "Paid";
+    if (previous.voidJournal && !next.voidJournal) next.voidJournal = previous.voidJournal;
+    if (item.voidJournal && !next.voidJournal) next.voidJournal = item.voidJournal;
+    if (previous.state === "Voided" || item.state === "Voided") next.state = "Voided";
     merged.set(item.id, next);
   });
   return Array.from(merged.values());
