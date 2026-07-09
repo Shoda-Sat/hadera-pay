@@ -1,5 +1,5 @@
 import http from "node:http";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
@@ -12,6 +12,7 @@ const dbPath = path.join(dataDir, "auth-db.json");
 const inviteTtlMs = 1000 * 60 * 60;
 const ownerUser = process.env.OWNER_USER ?? "Owner";
 const ownerPassword = process.env.OWNER_PASSWORD ?? "1453@Siem#";
+let saveQueue = Promise.resolve();
 const subscriptionPlans = new Map([
   ["one_day", { label: "1 day", days: 1 }],
   ["three_days", { label: "3 days", days: 3 }],
@@ -40,20 +41,73 @@ const blankDb = () => ({
   appStates: {},
 });
 
-async function loadDb() {
-  await mkdir(dataDir, { recursive: true });
+async function readPersistedDb() {
   try {
     return { ...blankDb(), ...JSON.parse(await readFile(dbPath, "utf8")) };
   } catch {
+    return null;
+  }
+}
+
+function mergeRecordsById(existingItems = [], incomingItems = []) {
+  const merged = new Map();
+  [...existingItems, ...incomingItems].forEach((item) => {
+    if (!item || typeof item !== "object" || !item.id) return;
+    merged.set(item.id, { ...(merged.get(item.id) || {}), ...item });
+  });
+  return Array.from(merged.values());
+}
+
+function mergeAppStates(existingStates = {}, incomingStates = {}) {
+  return Object.fromEntries(
+    Array.from(new Set([...Object.keys(existingStates || {}), ...Object.keys(incomingStates || {})])).map((workspaceId) => [
+      workspaceId,
+      {
+        ...(existingStates?.[workspaceId] || {}),
+        ...(incomingStates?.[workspaceId] || {}),
+      },
+    ])
+  );
+}
+
+function mergeDatabase(existingDb, incomingDb) {
+  if (!existingDb) return { ...blankDb(), ...incomingDb };
+  return {
+    ...blankDb(),
+    ...existingDb,
+    ...incomingDb,
+    users: mergeRecordsById(existingDb.users, incomingDb.users),
+    workspaces: mergeRecordsById(existingDb.workspaces, incomingDb.workspaces),
+    memberships: mergeRecordsById(existingDb.memberships, incomingDb.memberships),
+    invites: mergeRecordsById(existingDb.invites, incomingDb.invites),
+    sessions: mergeRecordsById(existingDb.sessions, incomingDb.sessions),
+    appStates: mergeAppStates(existingDb.appStates, incomingDb.appStates),
+  };
+}
+
+async function loadDb() {
+  await mkdir(dataDir, { recursive: true });
+  const db = await readPersistedDb();
+  if (db) return db;
+  try {
     const db = blankDb();
     await saveDb(db);
     return db;
+  } catch {
+    return blankDb();
   }
 }
 
 async function saveDb(db) {
-  await mkdir(dataDir, { recursive: true });
-  await writeFile(dbPath, JSON.stringify(db, null, 2));
+  const write = async () => {
+    await mkdir(dataDir, { recursive: true });
+    const nextDb = mergeDatabase(await readPersistedDb(), db);
+    const tempPath = `${dbPath}.${process.pid}.${Date.now()}.tmp`;
+    await writeFile(tempPath, JSON.stringify(nextDb, null, 2));
+    await rename(tempPath, dbPath);
+  };
+  saveQueue = saveQueue.then(write, write);
+  await saveQueue;
 }
 
 function id(prefix) {
