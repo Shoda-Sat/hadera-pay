@@ -2922,6 +2922,7 @@
         id: state.editingOrderId || nextOrderId(),
         broker: input.broker,
         agent: stateName === "Pending Forward" ? "Unassigned" : input.agent,
+        agentActorId: stateName === "Pending Forward" ? "" : activeActors().find((actor) => actor.name === input.agent)?.id || "",
         sourceCurrency: input.sourceCurrency,
         payoutCurrency: input.payoutCurrency,
         sourceAmountMinor: input.sourceAmountMinor,
@@ -4085,7 +4086,7 @@
     function orderActionsHtml(order, actor) {
       const canForward = actor?.role === "Master" && order.state === "Pending Forward";
       const canActAsSelectedActor = selectedActorIsOwnLogin();
-      const canPay = canActAsSelectedActor && ["Agent", "Special Agent", "Special Broker"].includes(actor?.role) && order.state === "Assigned" && order.agent === actor.name;
+      const canPay = signedInActorCanPayOrder(order);
       const canRequestVoid = canActAsSelectedActor && ["Agent", "Special Agent", "Special Broker"].includes(actor?.role) && order.state === "Paid" && order.agent === actor.name && !order.voidRequested && !order.locked;
       const canApproveVoid = actor?.role === "Master" && order.state === "Void Requested";
       const canModify = ["Broker", "Special Broker"].includes(actor?.role) && order.state === "Returned" && order.broker === actor.name;
@@ -4123,7 +4124,7 @@
               <input class="payment-proof-input hidden" data-id="${order.id}" type="file" accept="image/*">
             </label>
             <span class="muted proof-progress" data-id="${order.id}"></span>
-            <button class="btn primary pay-order" data-id="${order.id}" type="button">${icons.check}Mark Paid</button>
+            <button class="btn primary pay-order" data-id="${order.id}" type="button" onclick="event.stopPropagation(); openMarkPaidConfirmation(this);">${icons.check}Mark Paid</button>
             <button class="btn secondary return-order" data-id="${order.id}" type="button">Return</button>
           </div>
         `;
@@ -5206,14 +5207,58 @@
       state.orderValidationVisible = true;
       els.receiverError.textContent = message;
       els.receiverError.classList.add("visible");
+      notifyEvent("Order action", message);
+    }
+
+    function actorForOrderPayment(order) {
+      return activeActors().find((actor) => actor.id === order?.agentActorId) ||
+        activeActors().find((actor) => actor.name === order?.agent) ||
+        selectedActor();
+    }
+
+    function signedInActorCanPayOrder(order) {
+      if (!order || order.state !== "Assigned" || order.journal) return false;
+      const actor = selectedActor();
+      if (!currentAuth) return ["Agent", "Special Agent", "Special Broker"].includes(actor?.role) && order.agent === actor?.name;
+      const membership = currentAuth.membership || {};
+      if (membership.role === "Master" || membership.role === "Owner") return false;
+      const role = membership.actorRole || actor?.role;
+      if (!["Agent", "Special Agent", "Special Broker"].includes(role)) return false;
+      const assignedIdMatches = order.agentActorId && order.agentActorId === membership.actorId;
+      const assignedNameMatches = [membership.actorName, currentAuth.user?.name, actor?.name].filter(Boolean).includes(order.agent);
+      return Boolean(assignedIdMatches || assignedNameMatches);
+    }
+
+    function openMarkPaidConfirmation(payButton) {
+      const orderId = payButton?.dataset?.id;
+      const order = state.orders.find((item) => item.id === orderId);
+      const proofFile = payButton?.closest(".order-actions")?.querySelector(".payment-proof-input")?.files?.[0] || null;
+      if (!order) {
+        showOrderError("Order was not found. Refresh and try again.");
+        return;
+      }
+      if (!signedInActorCanPayOrder(order)) {
+        showOrderError("Only the assigned payer can mark this order as paid.");
+        return;
+      }
+      if (proofFile && proofFile.size > maxProofFileBytes) {
+        showOrderError(`Payment proof is too large. Use an image under ${Math.round(maxProofFileBytes / 1024 / 1024)} MB.`);
+        return;
+      }
+      confirmAction("Mark this order as paid?", () => {
+        markOrderPaidFromButton(payButton);
+      });
     }
 
     async function markOrderPaidFromButton(payButton) {
       const orderId = payButton?.dataset?.id;
       if (!orderId || payButton.disabled || processingOrderIds.has(orderId)) return;
-      const actor = selectedActor();
       const order = state.orders.find((item) => item.id === orderId);
-      if (!selectedActorIsOwnLogin() || !order || order.state !== "Assigned" || order.agent !== actor?.name) return;
+      if (!order || !signedInActorCanPayOrder(order)) {
+        showOrderError("Only the assigned payer can mark this order as paid.");
+        return;
+      }
+      const actor = actorForOrderPayment(order);
       const actionBox = payButton.closest(".order-actions");
       const proofFile = actionBox?.querySelector(".payment-proof-input")?.files?.[0] || null;
       const progress = actionBox?.querySelector(".proof-progress");
@@ -6291,6 +6336,7 @@
         dividerInput?.setCustomValidity("");
         percentInput?.setCustomValidity("");
         order.agent = targetAgent;
+        order.agentActorId = targetActor.id;
         if (dividerText) {
           order.forwardedPayoutDivider = forwardedDivider;
           delete order.manualSpecialPayoutDivider;
@@ -6326,6 +6372,7 @@
         order.returnedBy = "Master";
         order.updatedAt = new Date().toISOString();
         order.agent = "Unassigned";
+        order.agentActorId = "";
         state.orderState = "Returned";
         els.orderState.textContent = "Returned";
         els.orderState.className = "state-pill warn";
@@ -6351,30 +6398,7 @@
 
       const payButton = event.target.closest(".pay-order");
       if (payButton) {
-        const orderId = payButton.dataset.id;
-        const actor = selectedActor();
-        const order = state.orders.find((item) => item.id === orderId);
-        const proofFile = payButton.closest(".order-actions")?.querySelector(".payment-proof-input")?.files?.[0] || null;
-        if (!order) {
-          showOrderError("Order was not found. Refresh and try again.");
-          return;
-        }
-        if (!selectedActorIsOwnLogin() || order.agent !== actor?.name) {
-          showOrderError("Only the assigned payer can mark this order as paid.");
-          return;
-        }
-        if (order.state !== "Assigned" || order.journal) {
-          showOrderError("This order is no longer ready to mark paid.");
-          renderAll();
-          return;
-        }
-        if (proofFile && proofFile.size > maxProofFileBytes) {
-          showOrderError(`Payment proof is too large. Use an image under ${Math.round(maxProofFileBytes / 1024 / 1024)} MB.`);
-          return;
-        }
-        confirmAction("Mark this order as paid?", () => {
-          markOrderPaidFromButton(payButton);
-        });
+        openMarkPaidConfirmation(payButton);
         return;
       }
 
