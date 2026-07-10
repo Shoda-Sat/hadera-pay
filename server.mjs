@@ -399,10 +399,16 @@ function mergeReceivables(existingItems = [], incomingItems = []) {
 function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   const currentState = db.appStates[workspaceId] || {};
   const nextState = { ...currentState, ...incomingState };
+  const deletedActorIds = new Set([...(currentState.deletedActorIds || []), ...(incomingState.deletedActorIds || [])]);
+  const deletedActorNames = new Set([...(currentState.deletedActorNames || []), ...(incomingState.deletedActorNames || [])]);
   nextState.actors = mergeById(currentState.actors, incomingState.actors);
+  nextState.actors = nextState.actors.filter((actor) => !deletedActorIds.has(actor?.id) && !deletedActorNames.has(actor?.name));
   nextState.orders = mergeOrders(currentState.orders, incomingState.orders);
+  nextState.orders = nextState.orders.filter((order) => !deletedActorNames.has(order?.broker) && !deletedActorNames.has(order?.agent));
   nextState.receivables = mergeReceivables(currentState.receivables, incomingState.receivables);
+  nextState.receivables = nextState.receivables.filter((item) => !deletedActorIds.has(item?.borrowerActorId) && !deletedActorNames.has(item?.borrower));
   nextState.transfers = mergeById(currentState.transfers, incomingState.transfers);
+  nextState.transfers = nextState.transfers.filter((item) => !deletedActorNames.has(item?.from) && !deletedActorNames.has(item?.to));
   nextState.ledger = mergeByKey(currentState.ledger, incomingState.ledger, (line) =>
     [line.journal, line.source, line.account, line.direction, line.currency, line.amountMinor, line.postedAt].join(":")
   );
@@ -411,6 +417,9 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   );
   nextState.chatConversations = mergeChatConversations(currentState.chatConversations, incomingState.chatConversations);
   nextState.actors = mergeById(workspaceActors(db, workspaceId), nextState.actors);
+  nextState.actors = nextState.actors.filter((actor) => !deletedActorIds.has(actor?.id) && !deletedActorNames.has(actor?.name));
+  nextState.deletedActorIds = Array.from(deletedActorIds);
+  nextState.deletedActorNames = Array.from(deletedActorNames);
   nextState.orderCounter = Math.max(Number(currentState.orderCounter || 0), Number(incomingState.orderCounter || 0), nextOrderNumberFromOrders(nextState.orders) - 1);
   nextState.receivableCounter = Math.max(Number(currentState.receivableCounter || 0), Number(incomingState.receivableCounter || 0), nextReceivableNumberFromReceivables(nextState.receivables) - 1);
   return nextState;
@@ -431,6 +440,7 @@ function resetWorkspaceState(db, workspaceId, scope = "data") {
   const actors = scope === "wipe"
     ? [{ ...masterActor, id: "ACT-0", name: "Master", role: "Master", active: true, transferEnabled: true, transferMode: "both" }]
     : allActors;
+  const removedActors = scope === "wipe" ? allActors.filter((actor) => actor?.role !== "Master") : [];
   const nextState = {
     ...currentState,
     actors,
@@ -456,11 +466,13 @@ function resetWorkspaceState(db, workspaceId, scope = "data") {
     orderState: "Draft",
   };
   if (scope === "wipe") {
-    nextState.actorCounter = 0;
+    nextState.actorCounter = Number(currentState.actorCounter || 0);
     nextState.selectedActorId = "ACT-0";
     nextState.chatConversations = [];
     nextState.chatCounter = 0;
     nextState.messageCounter = 0;
+    nextState.deletedActorIds = Array.from(new Set([...(currentState.deletedActorIds || []), ...removedActors.map((actor) => actor.id).filter(Boolean)]));
+    nextState.deletedActorNames = Array.from(new Set([...(currentState.deletedActorNames || []), ...removedActors.map((actor) => actor.name).filter(Boolean)]));
   }
   return nextState;
 }
@@ -788,8 +800,29 @@ async function handleApi(request, response, url) {
     const actorId = String(body.actorId || "");
     const actorName = String(body.actorName || "");
     if (!actorId || actorId === "ACT-0") return sendJson(response, 400, { error: "Choose an actor to remove." });
+    const removedActorUserIds = db.memberships
+      .filter((membership) =>
+        membership.workspaceId === session.workspace.id &&
+        membership.role !== "Master" &&
+        (membership.actorId === actorId || membership.actorName === actorName)
+      )
+      .map((membership) => membership.userId);
+    db.memberships = db.memberships.filter((membership) =>
+      membership.workspaceId !== session.workspace.id ||
+      membership.role === "Master" ||
+      (membership.actorId !== actorId && membership.actorName !== actorName)
+    );
+    db.invites = db.invites.filter((invite) =>
+      invite.workspaceId !== session.workspace.id ||
+      (invite.actorId !== actorId && invite.actorName !== actorName)
+    );
+    db.sessions = db.sessions.filter((item) =>
+      item.workspaceId !== session.workspace.id || !removedActorUserIds.includes(item.userId)
+    );
     const currentState = db.appStates[session.workspace.id] || {};
     const nextState = { ...currentState };
+    nextState.deletedActorIds = Array.from(new Set([...(currentState.deletedActorIds || []), actorId]));
+    nextState.deletedActorNames = Array.from(new Set([...(currentState.deletedActorNames || []), actorName].filter(Boolean)));
     nextState.actors = (currentState.actors || []).filter((actor) => actor?.id !== actorId);
     nextState.settlements = (currentState.settlements || []).filter((item) => item?.actor !== actorName);
     nextState.receivables = (currentState.receivables || []).filter((item) => item?.borrower !== actorName && item?.borrowerActorId !== actorId);

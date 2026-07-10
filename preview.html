@@ -1939,9 +1939,12 @@
             <div class="panel-body trial-balance-section" id="trialBalanceSection" data-master-action>
               <div class="trial-balance-head">
                 <h3>Trial Balance</h3>
-                <span class="state-pill">Master</span>
+                <button class="btn secondary" id="trialBalanceToggle" type="button">
+                  Trial Balance
+                  <span id="trialBalanceToggleText">Collapse</span>
+                </button>
               </div>
-              <div class="table-wrap">
+              <div class="table-wrap" id="trialBalanceTableWrap">
                 <table>
                   <thead>
                     <tr><th>Actor</th><th>Role</th><th>USD</th><th>ETB</th><th>EUR</th><th>ERN</th><th>Running Position</th></tr>
@@ -2273,6 +2276,14 @@
     const maxProofFileBytes = 4 * 1024 * 1024;
     const supportedCurrencies = ["USD", "ETB", "EUR", "ERN"];
 
+    function normalizeBuyingRates(settings = {}) {
+      return {
+        eurToUsd: Number(settings.eurToUsd || settings.eurToUsdDivider) > 0 ? Number(settings.eurToUsd || settings.eurToUsdDivider) : 1,
+        usdToEtb: Number(settings.usdToEtb) > 0 ? Number(settings.usdToEtb) : 1,
+        usdToErn: Number(settings.usdToErn) > 0 ? Number(settings.usdToErn) : 1
+      };
+    }
+
     function normalizeCurrencyRateSettings(settings = {}) {
       const normalized = {};
       supportedCurrencies.forEach((currency) => {
@@ -2313,7 +2324,8 @@
       expandedSpecialDividerActorId: "",
       expandedMasterRateDivisor: false,
       incomeStatementExpanded: false,
-      eurToUsdDivider: 1,
+      trialBalanceExpanded: true,
+      buyingRates: normalizeBuyingRates(),
       journalCounter: 0,
       orderCounter: 0,
       receivableCounter: 0,
@@ -2355,7 +2367,7 @@
           ledger: Array.isArray(saved.ledger) ? saved.ledger : [],
           settlements: Array.isArray(saved.settlements) ? saved.settlements : [],
           masterRateDivisorSettings: normalizeCurrencyRateSettings(saved.masterRateDivisorSettings || {}),
-          eurToUsdDivider: Number(saved.eurToUsdDivider) > 0 ? Number(saved.eurToUsdDivider) : 1,
+          buyingRates: normalizeBuyingRates(saved.buyingRates || { eurToUsdDivider: saved.eurToUsdDivider }),
           archives: Array.isArray(saved.archives) ? saved.archives : [],
           chatConversations: Array.isArray(saved.chatConversations) ? saved.chatConversations : []
         };
@@ -2569,15 +2581,23 @@
 
     function mergeSharedState(remoteState) {
       if (!remoteState || typeof remoteState !== "object") return false;
+      const deletedActorIds = new Set(remoteState.deletedActorIds || []);
+      const deletedActorNames = new Set(remoteState.deletedActorNames || []);
       state.actors = normalizeActors(mergeById(state.actors, remoteState.actors || []));
+      state.actors = state.actors.filter((actor) => !deletedActorIds.has(actor.id) && !deletedActorNames.has(actor.name));
       state.orders = mergeOrders(state.orders, remoteState.orders || []);
+      state.orders = state.orders.filter((order) => !deletedActorNames.has(order.broker) && !deletedActorNames.has(order.agent));
       state.receivables = mergeReceivables(state.receivables, remoteState.receivables || []);
+      state.receivables = state.receivables.filter((item) => !deletedActorIds.has(item.borrowerActorId) && !deletedActorNames.has(item.borrower));
       state.transfers = normalizeTransfers(mergeById(state.transfers, remoteState.transfers || []));
+      state.transfers = state.transfers.filter((item) => !deletedActorNames.has(item.from) && !deletedActorNames.has(item.to));
       state.ledger = mergeLedgerLines(state.ledger, remoteState.ledger || []);
       state.settlements = Array.isArray(remoteState.settlements) ? remoteState.settlements : state.settlements;
       state.archives = mergeById(state.archives, remoteState.archives || []);
       state.chatConversations = mergeChatConversations(state.chatConversations, remoteState.chatConversations || []);
-      if (Number(remoteState.eurToUsdDivider) > 0) state.eurToUsdDivider = Number(remoteState.eurToUsdDivider);
+      state.deletedActorIds = Array.from(deletedActorIds);
+      state.deletedActorNames = Array.from(deletedActorNames);
+      state.buyingRates = normalizeBuyingRates(remoteState.buyingRates || { eurToUsdDivider: remoteState.eurToUsdDivider });
       state.orderCounter = Math.max(Number(state.orderCounter || 0), nextOrderNumberFromOrders() - 1, Number(remoteState.orderCounter || 0));
       state.receivableCounter = Math.max(Number(state.receivableCounter || 0), nextReceivableNumberFromReceivables() - 1, Number(remoteState.receivableCounter || 0));
       return true;
@@ -2585,7 +2605,7 @@
 
     function settingsRateInputIsFocused() {
       return Boolean(document.activeElement?.closest?.(
-        ".fixed-order-rate, .special-agent-divider, .special-agent-percent, .master-rate-divider, .master-rate-percent, .income-eur-usd-divider, .forward-agent, .forward-payout-divider, .forward-payout-percent"
+        ".fixed-order-rate, .special-agent-divider, .special-agent-percent, .master-rate-divider, .master-rate-percent, .buying-rate-input, .forward-agent, .forward-payout-divider, .forward-payout-percent"
       ));
     }
 
@@ -2728,6 +2748,9 @@
       receivableRows: document.getElementById("receivableRows"),
       ledgerRows: document.getElementById("ledgerRows"),
       trialBalanceSection: document.getElementById("trialBalanceSection"),
+      trialBalanceToggle: document.getElementById("trialBalanceToggle"),
+      trialBalanceToggleText: document.getElementById("trialBalanceToggleText"),
+      trialBalanceTableWrap: document.getElementById("trialBalanceTableWrap"),
       trialBalanceRows: document.getElementById("trialBalanceRows"),
       ledgerActorSelect: document.getElementById("ledgerActorSelect"),
       incomeStatementSection: document.getElementById("incomeStatementSection"),
@@ -3240,7 +3263,7 @@
 
       els.journalPreview.innerHTML = lines.map((line) => `
         <div class="line-item">
-          <b class="${line.direction.toLowerCase()}">${line.direction}</b>
+          <b class="${toneClass(line.direction.toLowerCase())}">${line.direction}</b>
           <span>${line.account}</span>
           <div class="amount">${money(line.currency, line.amountMinor)}</div>
         </div>
@@ -3273,6 +3296,20 @@
 
     function signedInAsMaster() {
       return currentAuth?.membership?.role === "Master";
+    }
+
+    function actorColorView() {
+      const actor = selectedActor();
+      return actor && actor.role !== "Master";
+    }
+
+    function toneClass(className) {
+      if (!actorColorView()) return className;
+      if (className === "debit") return "credit";
+      if (className === "credit") return "debit";
+      if (className === "profit-positive") return "profit-negative";
+      if (className === "profit-negative") return "profit-positive";
+      return className;
     }
 
     function selectedActorIsOwnLogin() {
@@ -3393,8 +3430,8 @@
       const toActor = actors.find((item) => item.name === els.transferTo.value);
       const previousSourceCurrency = els.transferSourceCurrency.value;
       const previousPayoutCurrency = els.transferCurrency.value;
-      const fromCurrencies = actorTransferCurrencies(fromActor);
-      const toCurrencies = actorTransferCurrencies(toActor);
+      const fromCurrencies = actor?.role === "Master" ? supportedCurrencies : actorTransferCurrencies(fromActor);
+      const toCurrencies = actor?.role === "Master" ? supportedCurrencies : actorTransferCurrencies(toActor);
       const sourceOptions = fromCurrencies.filter((currency) => supportedCurrencies.includes(currency));
       const payoutOptions = toCurrencies.filter((currency) => supportedCurrencies.includes(currency));
       els.transferSourceCurrency.innerHTML = sourceOptions.length
@@ -3532,9 +3569,16 @@
       return state.masterRateDivisorSettings[currency] || { enabled: false, divider: 1, percent: 0 };
     }
 
-    function eurToUsdDivider() {
-      const divider = Number(state.eurToUsdDivider || 0);
-      return Number.isFinite(divider) && divider > 0 ? divider : 1;
+    function buyingRates() {
+      state.buyingRates = normalizeBuyingRates(state.buyingRates || { eurToUsdDivider: state.eurToUsdDivider });
+      return state.buyingRates;
+    }
+
+    function buyingRateForPayout(currency) {
+      const rates = buyingRates();
+      if (currency === "ETB") return rates.usdToEtb;
+      if (currency === "ERN") return rates.usdToErn;
+      return 1;
     }
 
     function nextChatId() {
@@ -4108,6 +4152,7 @@
     function renderMasterRateDivisorSettings() {
       const master = masterActor();
       const expanded = state.expandedMasterRateDivisor === true;
+      const rates = buyingRates();
       const activeCount = supportedCurrencies.filter((currency) => masterRateDivisorSettingFor(currency).enabled).length;
       const details = expanded ? supportedCurrencies.map((currency) => {
         const setting = masterRateDivisorSettingFor(currency);
@@ -4126,15 +4171,26 @@
       }).join("") : "";
       els.masterRateDivisorRows.innerHTML = `
         <tr>
-          <td><strong>EUR to USD</strong><br><span class="muted">Income Statement</span></td>
+          <td><strong>Buying Rate</strong><br><span class="muted">Income Statement</span></td>
           <td>
             <div class="setting-inline">
-              <input class="income-eur-usd-divider" type="text" inputmode="decimal" value="${escapeHtml(formatRate(eurToUsdDivider()))}" placeholder="Divisor" aria-label="EUR to USD divisor">
-              <button class="btn primary save-income-eur-usd-divider" type="button">Save</button>
+              <label class="manual-divider-field">
+                <span>EUR to USD</span>
+                <input class="buying-rate-input" data-rate="eurToUsd" type="text" inputmode="decimal" value="${escapeHtml(formatRate(rates.eurToUsd))}" placeholder="Rate" aria-label="EUR to USD buying rate">
+              </label>
+              <label class="manual-divider-field">
+                <span>USD to ETB</span>
+                <input class="buying-rate-input" data-rate="usdToEtb" type="text" inputmode="decimal" value="${escapeHtml(formatRate(rates.usdToEtb))}" placeholder="Rate" aria-label="USD to ETB buying rate">
+              </label>
+              <label class="manual-divider-field">
+                <span>USD to ERN</span>
+                <input class="buying-rate-input" data-rate="usdToErn" type="text" inputmode="decimal" value="${escapeHtml(formatRate(rates.usdToErn))}" placeholder="Rate" aria-label="USD to ERN buying rate">
+              </label>
+              <button class="btn primary save-buying-rates" type="button">Save</button>
             </div>
           </td>
-          <td>Collected EUR / ${escapeHtml(formatRate(eurToUsdDivider()))}</td>
-          <td><span class="muted">Converts Collected EUR into USD totals</span></td>
+          <td>EUR to USD ${escapeHtml(formatRate(rates.eurToUsd))}</td>
+          <td><span class="muted">Used for EUR broker income on ETB and ERN payouts</span></td>
         </tr>
         <tr>
           <td><strong>${escapeHtml(master?.name || "Master")}</strong><br><span class="muted">Base ${escapeHtml(masterBaseCurrency())}</span></td>
@@ -4248,10 +4304,20 @@
       if (state.expandedFixedRateActorId === actorId) state.expandedFixedRateActorId = "";
       renderAll();
       try {
-        await api("/api/app-state/remove-actor", {
+        const result = await api("/api/app-state/remove-actor", {
           method: "POST",
           body: { actorId, actorName: actor.name }
         });
+        if (result.state) {
+          replaceState({
+            ...structuredClone(defaultState),
+            ...result.state,
+            actors: normalizeActors(Array.isArray(result.state.actors) ? result.state.actors : structuredClone(defaultState.actors)),
+            receivables: Array.isArray(result.state.receivables) ? result.state.receivables : [],
+            transfers: normalizeTransfers(Array.isArray(result.state.transfers) ? result.state.transfers : [])
+          });
+          renderAll();
+        }
       } catch (error) {
         replaceState(previousState);
         els.actorError.textContent = error.message;
@@ -4288,7 +4354,7 @@
       const masterActor = state.actors.find((actor) => actor.role === "Master") ||
         structuredClone(defaultState.actors.find((actor) => actor.role === "Master"));
       state.actors = [{ ...masterActor, id: "ACT-0", name: "Master", role: "Master", active: true, transferEnabled: true, transferMode: "both" }];
-      state.actorCounter = 0;
+      state.actorCounter = Number(state.actorCounter || 0);
       state.selectedActorId = "ACT-0";
       state.selectedLedgerActor = "";
       state.expandedFixedRateActorId = "";
@@ -4502,8 +4568,8 @@
       const hasActorOwes = values.some((value) => value > 0);
       const hasMasterOwes = values.some((value) => value < 0);
       if (hasActorOwes && hasMasterOwes) return { text: "Mixed", className: "" };
-      if (hasActorOwes) return { text: "Actor owes Master", className: "debit" };
-      if (hasMasterOwes) return { text: "Master owes Actor", className: "credit" };
+      if (hasActorOwes) return { text: "Actor owes Master", className: toneClass("debit") };
+      if (hasMasterOwes) return { text: "Master owes Actor", className: toneClass("credit") };
       return { text: "Zero", className: "" };
     }
 
@@ -4511,7 +4577,7 @@
       if (!netMinor) return `<td>${money(currency, 0)}</td>`;
       const actorOwes = netMinor > 0;
       return `
-        <td class="${actorOwes ? "debit" : "credit"}">
+        <td class="${toneClass(actorOwes ? "debit" : "credit")}">
           <strong>${money(currency, Math.abs(netMinor))}</strong>
           <span class="trial-balance-note">${actorOwes ? "Actor owes Master" : "Master owes Actor"}</span>
         </td>
@@ -4530,7 +4596,7 @@
                 <td colspan="3"><strong>${escapeHtml(actorName)} balance</strong></td>
                 <td></td>
                 <td>${escapeHtml(actorName)} ACTOR_CLEARING</td>
-                <td class="${net > 0 ? "debit" : "credit"}"><strong>${net > 0 ? "Owes Master" : "Master owes"}</strong></td>
+                <td class="${toneClass(net > 0 ? "debit" : "credit")}"><strong>${net > 0 ? "Owes Master" : "Master owes"}</strong></td>
                 ${currencyCells(currency, Math.abs(net))}
               </tr>
             `;
@@ -4627,7 +4693,7 @@
             <tr>
               <td colspan="5"><strong>${escapeHtml(actor.name)} balance</strong></td>
               <td></td>
-              <td class="${net > 0 ? "debit" : "credit"}"><strong>${direction}</strong></td>
+              <td class="${toneClass(net > 0 ? "debit" : "credit")}"><strong>${direction}</strong></td>
               ${currencyCells(currency, Math.abs(net))}
             </tr>
           `;
@@ -4709,6 +4775,7 @@
 
     function masterCollectedAmountForOrder(order) {
       const sourceCurrency = order.sourceCurrency || "USD";
+      const payoutCurrency = order.payoutCurrency || sourceCurrency;
       const sourceAmountMinor = Number(order.sourceAmountMinor || 0);
       const commissionMinor = Number(order.commissionMinor || 0);
       const collectedMinor = sourceAmountMinor + commissionMinor;
@@ -4721,11 +4788,22 @@
         };
       }
       if (sourceCurrency === "EUR") {
+        const brokerActor = activeActors().find((actor) => actor.name === order.broker);
+        const brokerBaseCurrency = brokerActor?.currency || sourceCurrency;
+        const rates = buyingRates();
+        const localRate = buyingRateForPayout(payoutCurrency);
+        const collectedEurMajor = majorAmount(collectedMinor, "EUR");
+        const collectedUsdMinor = minorFromMajor(collectedEurMajor * rates.eurToUsd, "USD");
+        const payoutMajor = majorAmount(Number(order.payoutAmountMinor || 0), payoutCurrency);
+        const buyingProfitMinor = brokerBaseCurrency === "EUR" && ["ETB", "ERN"].includes(payoutCurrency) && localRate > 0
+          ? minorFromMajor(((collectedEurMajor * rates.eurToUsd * localRate) - payoutMajor) / localRate, "USD")
+          : null;
         return {
           collectedCurrency: "EUR",
           collectedOriginalMinor: collectedMinor,
           collectedEurMinor: collectedMinor,
-          collectedUsdMinor: minorFromMajor(majorAmount(collectedMinor, "EUR") / eurToUsdDivider(), "USD")
+          collectedUsdMinor,
+          buyingProfitMinor
         };
       }
       return {
@@ -4749,8 +4827,14 @@
           if (order.state === "Voided" || order.voidJournal) return null;
           const journalLines = state.ledger.filter((line) => line.journal === journal && line.source === "ORDER_PAYMENT");
           const baseCurrency = "USD";
-          const baseAmountMinor = masterIncomeAmountForOrder(order, journalLines);
+          let baseAmountMinor = masterIncomeAmountForOrder(order, journalLines);
           const collected = masterCollectedAmountForOrder(order);
+          const profitMinor = Number.isFinite(Number(collected.buyingProfitMinor))
+            ? Number(collected.buyingProfitMinor)
+            : collected.collectedUsdMinor - baseAmountMinor;
+          if (Number.isFinite(Number(collected.buyingProfitMinor))) {
+            baseAmountMinor = collected.collectedUsdMinor - profitMinor;
+          }
           return {
             order,
             postedAt: order.paidAt || journalLines[0]?.postedAt || order.createdAt,
@@ -4761,7 +4845,7 @@
             collectedOriginalMinor: collected.collectedOriginalMinor,
             collectedEurMinor: collected.collectedEurMinor,
             collectedUsdMinor: collected.collectedUsdMinor,
-            profitMinor: collected.collectedUsdMinor - baseAmountMinor,
+            profitMinor,
             details: ledgerLineDetails(journalLines[0] || { source: "ORDER_PAYMENT", journal }, selectedActor())
           };
         })
@@ -5090,6 +5174,11 @@
       const actor = selectedActor();
       const masterView = actor?.role === "Master";
       els.trialBalanceSection?.classList.toggle("hidden", !masterView);
+      if (masterView) {
+        const expanded = state.trialBalanceExpanded !== false;
+        els.trialBalanceTableWrap?.classList.toggle("hidden", !expanded);
+        if (els.trialBalanceToggleText) els.trialBalanceToggleText.textContent = expanded ? "Collapse" : "Expand";
+      }
       if (!masterView) {
         if (els.trialBalanceRows) els.trialBalanceRows.innerHTML = "";
         return;
@@ -5146,7 +5235,7 @@
           <td>${line.source}</td>
           <td>${escapeHtml(ledgerLineDetails(line, actor))}</td>
           <td>${line.account}</td>
-          <td class="${line.direction.toLowerCase()}"><strong>${line.direction}</strong></td>
+          <td class="${toneClass(line.direction.toLowerCase())}"><strong>${line.direction}</strong></td>
           ${currencyCells(line.currency, line.amountMinor)}
         </tr>
       `).join("");
@@ -5183,7 +5272,7 @@
       const closedBodyRows = closedRows.map((archive) => {
         const profitMinor = Number(archive.incomeProfitMinor || 0);
         const archiveCurrency = archive.incomeProfitCurrency || baseCurrency;
-        const profitClass = profitMinor >= 0 ? "profit-positive" : "profit-negative";
+        const profitClass = toneClass(profitMinor >= 0 ? "profit-positive" : "profit-negative");
         return `
           <tr>
             <td><strong>Closed Session</strong></td>
@@ -5198,7 +5287,7 @@
         `;
       }).join("");
       const bodyRows = rows.map((row) => {
-        const profitClass = row.profitMinor >= 0 ? "profit-positive" : "profit-negative";
+        const profitClass = toneClass(row.profitMinor >= 0 ? "profit-positive" : "profit-negative");
         return `
           <tr>
             <td><strong>${escapeHtml(row.order.id)}</strong></td>
@@ -5212,7 +5301,7 @@
           </tr>
         `;
       }).join("");
-      const totalClass = totalProfit >= 0 ? "profit-positive" : "profit-negative";
+      const totalClass = toneClass(totalProfit >= 0 ? "profit-positive" : "profit-negative");
       els.incomeStatementRows.innerHTML = `${closedBodyRows}${bodyRows}
         <tr>
           <td colspan="7"><strong>Current Session Profit/Loss</strong></td>
@@ -5303,7 +5392,9 @@
           .slice()
           .sort((a, b) => new Date(b.closedAt).getTime() - new Date(a.closedAt).getTime())
           .forEach((archive) => {
-            const balances = archivedBalances(archive.actor, archive.ledger || []);
+            const balances = archive.balances && typeof archive.balances === "object"
+              ? archive.balances
+              : archivedBalances(archive.actor, archive.ledger || []);
             supportedCurrencies.forEach((currency) => {
               const netMinor = balances[currency] || 0;
               const amountMinor = Math.abs(netMinor);
@@ -5319,6 +5410,7 @@
                 </tr>
               `);
             });
+            if (archive.balances) return;
             (archive.orders || []).forEach((order) => {
               const date = order.sentAt || order.createdAt || order.postedAt || archive.closedAt;
               const amountMinor = Number(order.sourceAmountMinor || 0);
@@ -5389,7 +5481,7 @@
         return `
           <div class="settlement-card">
             <b>${item.actor}</b>
-            <strong class="${settled ? "" : positive ? "debit" : "credit"}">${settled ? money(item.currency, 0) : `${positive ? "+" : "-"}${money(item.currency, amountMinor)}`}</strong>
+            <strong class="${settled ? "" : toneClass(positive ? "debit" : "credit")}">${settled ? money(item.currency, 0) : `${positive ? "+" : "-"}${money(item.currency, amountMinor)}`}</strong>
             <span>${settled ? "Zero balance" : positive ? "Actor owes Master" : "Master owes actor"}</span>
           </div>
         `;
@@ -5584,7 +5676,8 @@
       const closesWithActor = (line) =>
         lineBelongsToActor(line, actor) ||
         (line.source === "PREVIOUS_CLOSE" && line.account === "MASTER_PREVIOUS_CLOSE" && line.details === previousCloseDetails);
-      const actorLines = state.ledger.filter((line) => closesWithActor(line));
+      const actorLines = activeLedgerLines(state.ledger).filter((line) => closesWithActor(line));
+      const openTransactionLines = actorLines.filter((line) => line.source !== "PREVIOUS_CLOSE");
       const archivedOrders = state.orders.filter((order) =>
         (order.state === "Paid" || order.state === "Voided") &&
         (order.broker === actor.name || order.agent === actor.name)
@@ -5597,17 +5690,19 @@
       const incomeProfitMinor = incomeRows.reduce((sum, row) => sum + row.profitMinor, 0);
       const closedAt = new Date().toISOString();
       const previousBalances = archivedBalances(actor.name, actorLines);
+      if (!openTransactionLines.length && !archivedOrders.length && !archivedTransfers.length) return;
       if (actorLines.length || archivedOrders.length || archivedTransfers.length) {
         state.archives.unshift({
           id: "ARC-" + Date.now(),
           actor: actor.name,
           closedAt,
+          balances: previousBalances,
           incomeProfitMinor,
           incomeProfitCurrency: "USD",
           incomeSummary: `Closed Profit/Loss for ${actor.name}`,
-          ledger: actorLines.map((line) => ({ ...line, locked: true })),
-          orders: archivedOrders.map((order) => ({ ...order, locked: true, archived: true })),
-          transfers: archivedTransfers.map((transfer) => ({ ...transfer, locked: true, archived: true }))
+          ledger: [],
+          orders: [],
+          transfers: []
         });
       }
       state.ledger = state.ledger.map((line) =>
@@ -6332,6 +6427,12 @@
       saveState();
     });
 
+    els.trialBalanceToggle?.addEventListener("click", () => {
+      state.trialBalanceExpanded = state.trialBalanceExpanded === false;
+      renderTrialBalance();
+      saveState();
+    });
+
     document.getElementById("actorForm").addEventListener("submit", (event) => {
       event.preventDefault();
       const nameInput = document.getElementById("actorName");
@@ -6475,6 +6576,25 @@
       if (!hasReceiver) {
         state.orderValidationVisible = true;
         buildJournalPreview();
+        return;
+      }
+      if (!input.fundingType) {
+        showOrderError("Choose whether this order is Cash or Credit.");
+        return;
+      }
+      if (input.sourceAmountMinor <= 0) {
+        showOrderError("Enter a source amount greater than zero.");
+        return;
+      }
+      if (input.fundingType === "credit") {
+        confirmAction("Register this order as a credit receivable?", () => {
+          const receivable = buildReceivableRecord(input);
+          state.receivables.unshift(receivable);
+          clearOrderDetails();
+          notifyEvent("Receivable registered", `${receivable.id} recorded for ${receivable.borrower}.`);
+          setView("receivables");
+          renderAll();
+        });
         return;
       }
       if (input.broker === input.agent) {
@@ -6835,18 +6955,24 @@
         return;
       }
 
-      const saveIncomeEurUsdDividerButton = event.target.closest(".save-income-eur-usd-divider");
-      if (saveIncomeEurUsdDividerButton) {
+      const saveBuyingRatesButton = event.target.closest(".save-buying-rates");
+      if (saveBuyingRatesButton) {
         if (selectedActor()?.role !== "Master") return;
-        const input = saveIncomeEurUsdDividerButton.closest(".setting-inline")?.querySelector(".income-eur-usd-divider");
-        const divider = Number(input?.value || 0);
-        if (!Number.isFinite(divider) || divider <= 0) {
-          input?.setCustomValidity("Enter a divisor greater than zero.");
-          input?.reportValidity();
-          return;
+        const inputs = Array.from(saveBuyingRatesButton.closest(".setting-inline")?.querySelectorAll(".buying-rate-input") || []);
+        const nextRates = {};
+        for (const input of inputs) {
+          const key = input.dataset.rate;
+          const rate = Number(input.value || 0);
+          if (!["eurToUsd", "usdToEtb", "usdToErn"].includes(key)) continue;
+          if (!Number.isFinite(rate) || rate <= 0) {
+            input.setCustomValidity("Enter a rate greater than zero.");
+            input.reportValidity();
+            return;
+          }
+          input.setCustomValidity("");
+          nextRates[key] = rate;
         }
-        input?.setCustomValidity("");
-        state.eurToUsdDivider = divider;
+        state.buyingRates = normalizeBuyingRates(nextRates);
         renderAll();
         return;
       }
