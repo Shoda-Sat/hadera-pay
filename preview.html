@@ -2163,9 +2163,12 @@
           <div class="panel">
             <div class="panel-header">
               <h2>Master Reset Permit</h2>
-              <span class="state-pill danger">Restricted</span>
+              <button class="btn secondary" id="resetPanelToggle" type="button">
+                Master Reset Permit
+                <span id="resetPanelToggleText">Collapse</span>
+              </button>
             </div>
-            <div class="panel-body">
+            <div class="panel-body" id="resetPanelBody">
               <form id="resetForm">
                 <div class="form-grid">
                   <div class="field">
@@ -2193,9 +2196,12 @@
           <div class="panel">
             <div class="panel-header">
               <h2>Invite Codes</h2>
-              <span class="state-pill">Actor Linking</span>
+              <button class="btn secondary" id="invitePanelToggle" type="button">
+                Invite Codes
+                <span id="invitePanelToggleText">Collapse</span>
+              </button>
             </div>
-            <div class="panel-body">
+            <div class="panel-body" id="invitePanelFormBody">
               <form id="inviteForm">
                 <div class="form-grid invite-grid">
                   <div class="field">
@@ -2222,7 +2228,7 @@
                 </div>
               </form>
             </div>
-            <div class="panel-body table-wrap">
+            <div class="panel-body table-wrap" id="invitePanelTableBody">
               <table>
                 <thead>
                   <tr><th>Code</th><th>Role</th><th>Currency</th><th>Actor</th><th>Status</th><th>Active</th><th>Created</th></tr>
@@ -2323,6 +2329,8 @@
       expandedFixedRateActorId: "",
       expandedSpecialDividerActorId: "",
       expandedMasterRateDivisor: false,
+      resetPanelExpanded: true,
+      invitePanelExpanded: true,
       incomeStatementExpanded: false,
       trialBalanceExpanded: true,
       buyingRates: normalizeBuyingRates(),
@@ -2776,6 +2784,13 @@
       inviteCurrency: document.getElementById("inviteCurrency"),
       inviteWorkingCurrencies: document.getElementById("inviteWorkingCurrencies"),
       inviteError: document.getElementById("inviteError"),
+      invitePanelToggle: document.getElementById("invitePanelToggle"),
+      invitePanelToggleText: document.getElementById("invitePanelToggleText"),
+      invitePanelFormBody: document.getElementById("invitePanelFormBody"),
+      invitePanelTableBody: document.getElementById("invitePanelTableBody"),
+      resetPanelToggle: document.getElementById("resetPanelToggle"),
+      resetPanelToggleText: document.getElementById("resetPanelToggleText"),
+      resetPanelBody: document.getElementById("resetPanelBody"),
       ownerMasterForm: document.getElementById("ownerMasterForm"),
       ownerMasterName: document.getElementById("ownerMasterName"),
       ownerMasterEmail: document.getElementById("ownerMasterEmail"),
@@ -2906,6 +2921,7 @@
       const previousSource = sourceSelect.value || "USD";
       const previousPayout = payoutSelect.value || "ETB";
       const previousActor = actorSelect.value || "USD";
+      const previousInviteCurrency = inviteCurrency?.value || "USD";
       const previousWorking = workingSelect
         ? Array.from(workingSelect.querySelectorAll("input:checked")).map((input) => input.value)
         : [];
@@ -2945,9 +2961,15 @@
       sourceSelect.value = sourceOptions.includes(previousSource) ? previousSource : sourceOptions[0] || "USD";
       payoutSelect.value = supportedCurrencies.includes(previousPayout) ? previousPayout : "ETB";
       actorSelect.value = supportedCurrencies.includes(previousActor) ? previousActor : "USD";
+      if (inviteCurrency) inviteCurrency.value = supportedCurrencies.includes(previousInviteCurrency) ? previousInviteCurrency : "USD";
       if (workingSelect) {
         Array.from(workingSelect.querySelectorAll("input")).forEach((input) => {
           input.checked = previousWorking.includes(input.value) || input.value === actorSelect.value;
+        });
+      }
+      if (inviteWorking) {
+        Array.from(inviteWorking.querySelectorAll("input")).forEach((input) => {
+          input.checked = previousInviteWorking.includes(input.value) || input.value === inviteCurrency?.value;
         });
       }
       applyFixedOrderRate();
@@ -4212,6 +4234,16 @@
           <td><span class="muted">Controls Income Statement Base USD column</span></td>
         </tr>
       `;
+    }
+
+    function renderSettingsCollapses() {
+      const resetExpanded = state.resetPanelExpanded !== false;
+      const inviteExpanded = state.invitePanelExpanded !== false;
+      els.resetPanelBody?.classList.toggle("hidden", !resetExpanded);
+      if (els.resetPanelToggleText) els.resetPanelToggleText.textContent = resetExpanded ? "Collapse" : "Expand";
+      els.invitePanelFormBody?.classList.toggle("hidden", !inviteExpanded);
+      els.invitePanelTableBody?.classList.toggle("hidden", !inviteExpanded);
+      if (els.invitePanelToggleText) els.invitePanelToggleText.textContent = inviteExpanded ? "Collapse" : "Expand";
     }
 
     async function renderSubscriptions() {
@@ -6441,6 +6473,18 @@
       saveState();
     });
 
+    els.resetPanelToggle?.addEventListener("click", () => {
+      state.resetPanelExpanded = state.resetPanelExpanded === false;
+      renderSettingsCollapses();
+      saveState();
+    });
+
+    els.invitePanelToggle?.addEventListener("click", () => {
+      state.invitePanelExpanded = state.invitePanelExpanded === false;
+      renderSettingsCollapses();
+      saveState();
+    });
+
     document.getElementById("actorForm").addEventListener("submit", (event) => {
       event.preventDefault();
       const nameInput = document.getElementById("actorName");
@@ -7346,6 +7390,7 @@
       renderProfiles();
       renderActors();
       renderPermissionSettings();
+      renderSettingsCollapses();
       renderSubscriptions();
       renderFixedRateSettings();
       renderMasterRateDivisorSettings();

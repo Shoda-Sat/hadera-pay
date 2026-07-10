@@ -814,8 +814,11 @@ async function handleApi(request, response, url) {
     );
     db.invites = db.invites.filter((invite) =>
       invite.workspaceId !== session.workspace.id ||
-      (invite.actorId !== actorId && invite.actorName !== actorName)
+      (invite.actorId !== actorId &&
+        invite.actorName !== actorName &&
+        !removedActorUserIds.includes(invite.acceptedByUserId))
     );
+    db.users = db.users.filter((user) => !removedActorUserIds.includes(user.id));
     db.sessions = db.sessions.filter((item) =>
       item.workspaceId !== session.workspace.id || !removedActorUserIds.includes(item.userId)
     );
