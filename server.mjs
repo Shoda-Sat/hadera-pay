@@ -407,7 +407,6 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   nextState.actors = nextState.actors.filter((actor) => !deletedActorIds.has(actor?.id));
   nextState.orders = mergeOrders(currentState.orders, incomingState.orders);
   nextState.receivables = mergeReceivables(currentState.receivables, incomingState.receivables);
-  nextState.receivables = nextState.receivables.filter((item) => !deletedActorIds.has(item?.borrowerActorId));
   nextState.transfers = mergeById(currentState.transfers, incomingState.transfers);
   nextState.ledger = mergeByKey(currentState.ledger, incomingState.ledger, (line) =>
     [line.journal, line.source, line.account, line.direction, line.currency, line.amountMinor, line.postedAt].join(":")
@@ -828,12 +827,6 @@ async function handleApi(request, response, url) {
     nextState.deletedActorNames = Array.from(new Set([...(currentState.deletedActorNames || []), actorName].filter(Boolean)));
     nextState.actors = (currentState.actors || []).filter((actor) => actor?.id !== actorId);
     nextState.settlements = (currentState.settlements || []).filter((item) => item?.actor !== actorName);
-    nextState.receivables = (currentState.receivables || []).filter((item) => item?.borrower !== actorName && item?.borrowerActorId !== actorId);
-    nextState.transfers = (currentState.transfers || []).filter((item) => item?.from !== actorName && item?.to !== actorName);
-    nextState.orders = (currentState.orders || []).filter((item) => item?.broker !== actorName && item?.agent !== actorName);
-    nextState.chatConversations = (currentState.chatConversations || [])
-      .map((chat) => ({ ...chat, members: (chat.members || []).filter((member) => member !== actorName) }))
-      .filter((chat) => (chat.type !== "direct" && chat.members.length > 1) || chat.type === "group");
     if (nextState.selectedLedgerActor === actorName) nextState.selectedLedgerActor = "";
     if (nextState.expandedFixedRateActorId === actorId) nextState.expandedFixedRateActorId = "";
     if (nextState.expandedSpecialDividerActorId === actorId) nextState.expandedSpecialDividerActorId = "";

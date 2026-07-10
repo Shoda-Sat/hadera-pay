@@ -2595,7 +2595,6 @@
       state.actors = state.actors.filter((actor) => !deletedActorIds.has(actor.id) || remoteActors.some((remoteActor) => remoteActor?.id === actor.id));
       state.orders = mergeOrders(state.orders, remoteState.orders || []);
       state.receivables = mergeReceivables(state.receivables, remoteState.receivables || []);
-      state.receivables = state.receivables.filter((item) => !deletedActorIds.has(item.borrowerActorId));
       state.transfers = normalizeTransfers(mergeById(state.transfers, remoteState.transfers || []));
       state.ledger = mergeLedgerLines(state.ledger, remoteState.ledger || []);
       state.settlements = Array.isArray(remoteState.settlements) ? remoteState.settlements : state.settlements;
@@ -3316,8 +3315,9 @@
     function availableProfiles() {
       const actors = activeActors();
       if (!currentAuth || currentAuth.membership?.role === "Master") return actors;
-      const actorProfiles = actors.filter((actor) => actor.id === currentAuth.membership.actorId);
-      return actorProfiles.length ? actorProfiles : [sessionActorProfile()].filter(Boolean);
+      const storedActor = state.actors.find((actor) => actor.id === currentAuth.membership.actorId);
+      if (storedActor) return storedActor.active === false ? [] : [storedActor];
+      return [sessionActorProfile()].filter(Boolean);
     }
 
     function selectedActor() {
@@ -4334,12 +4334,6 @@
       const previousState = structuredClone(state);
       state.actors = state.actors.filter((item) => item.id !== actorId);
       state.settlements = state.settlements.filter((item) => item.actor !== actor.name);
-      state.receivables = state.receivables.filter((item) => item.borrower !== actor.name && item.borrowerActorId !== actorId);
-      state.transfers = state.transfers.filter((item) => item.from !== actor.name && item.to !== actor.name);
-      state.orders = state.orders.filter((item) => item.broker !== actor.name && item.agent !== actor.name);
-      state.chatConversations = state.chatConversations
-        .map((chat) => ({ ...chat, members: chat.members.filter((member) => member !== actor.name) }))
-        .filter((chat) => chat.type !== "direct" && chat.members.length > 1 || chat.type === "group");
       if (state.selectedLedgerActor === actor.name) state.selectedLedgerActor = "";
       if (state.expandedFixedRateActorId === actorId) state.expandedFixedRateActorId = "";
       renderAll();
