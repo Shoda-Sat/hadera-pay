@@ -1958,7 +1958,7 @@
               <div class="table-wrap income-table">
                 <table>
                   <thead>
-                    <tr><th>Order No.</th><th>Date</th><th>Details</th><th>Direction</th><th id="incomeBaseCurrencyHead">USD</th><th>Collected Amt</th><th>Profit/Loss</th></tr>
+                    <tr><th>Order No.</th><th>Date</th><th>Details</th><th>Direction</th><th id="incomeBaseCurrencyHead">Base USD</th><th>Collected EUR</th><th>Collected USD</th><th>Profit/Loss USD</th></tr>
                   </thead>
                   <tbody id="incomeStatementRows"></tbody>
                 </table>
@@ -2313,6 +2313,7 @@
       expandedSpecialDividerActorId: "",
       expandedMasterRateDivisor: false,
       incomeStatementExpanded: false,
+      eurToUsdDivider: 1,
       journalCounter: 0,
       orderCounter: 0,
       receivableCounter: 0,
@@ -2354,6 +2355,7 @@
           ledger: Array.isArray(saved.ledger) ? saved.ledger : [],
           settlements: Array.isArray(saved.settlements) ? saved.settlements : [],
           masterRateDivisorSettings: normalizeCurrencyRateSettings(saved.masterRateDivisorSettings || {}),
+          eurToUsdDivider: Number(saved.eurToUsdDivider) > 0 ? Number(saved.eurToUsdDivider) : 1,
           archives: Array.isArray(saved.archives) ? saved.archives : [],
           chatConversations: Array.isArray(saved.chatConversations) ? saved.chatConversations : []
         };
@@ -2575,6 +2577,7 @@
       state.settlements = Array.isArray(remoteState.settlements) ? remoteState.settlements : state.settlements;
       state.archives = mergeById(state.archives, remoteState.archives || []);
       state.chatConversations = mergeChatConversations(state.chatConversations, remoteState.chatConversations || []);
+      if (Number(remoteState.eurToUsdDivider) > 0) state.eurToUsdDivider = Number(remoteState.eurToUsdDivider);
       state.orderCounter = Math.max(Number(state.orderCounter || 0), nextOrderNumberFromOrders() - 1, Number(remoteState.orderCounter || 0));
       state.receivableCounter = Math.max(Number(state.receivableCounter || 0), nextReceivableNumberFromReceivables() - 1, Number(remoteState.receivableCounter || 0));
       return true;
@@ -2582,7 +2585,7 @@
 
     function settingsRateInputIsFocused() {
       return Boolean(document.activeElement?.closest?.(
-        ".fixed-order-rate, .special-agent-divider, .special-agent-percent, .master-rate-divider, .master-rate-percent, .forward-agent, .forward-payout-divider, .forward-payout-percent"
+        ".fixed-order-rate, .special-agent-divider, .special-agent-percent, .master-rate-divider, .master-rate-percent, .income-eur-usd-divider, .forward-agent, .forward-payout-divider, .forward-payout-percent"
       ));
     }
 
@@ -3529,6 +3532,11 @@
       return state.masterRateDivisorSettings[currency] || { enabled: false, divider: 1, percent: 0 };
     }
 
+    function eurToUsdDivider() {
+      const divider = Number(state.eurToUsdDivider || 0);
+      return Number.isFinite(divider) && divider > 0 ? divider : 1;
+    }
+
     function nextChatId() {
       state.chatCounter = Number(state.chatCounter || 0) + 1;
       return "CHAT-" + state.chatCounter;
@@ -4118,6 +4126,17 @@
       }).join("") : "";
       els.masterRateDivisorRows.innerHTML = `
         <tr>
+          <td><strong>EUR to USD</strong><br><span class="muted">Income Statement</span></td>
+          <td>
+            <div class="setting-inline">
+              <input class="income-eur-usd-divider" type="text" inputmode="decimal" value="${escapeHtml(formatRate(eurToUsdDivider()))}" placeholder="Divisor" aria-label="EUR to USD divisor">
+              <button class="btn primary save-income-eur-usd-divider" type="button">Save</button>
+            </div>
+          </td>
+          <td>Collected EUR / ${escapeHtml(formatRate(eurToUsdDivider()))}</td>
+          <td><span class="muted">Converts Collected EUR into USD totals</span></td>
+        </tr>
+        <tr>
           <td><strong>${escapeHtml(master?.name || "Master")}</strong><br><span class="muted">Base ${escapeHtml(masterBaseCurrency())}</span></td>
           <td>
             <div class="special-divider-panel">
@@ -4126,7 +4145,7 @@
             </div>
           </td>
           <td>${activeCount} active / ${supportedCurrencies.length} currencies</td>
-          <td><span class="muted">Controls Income Statement ${escapeHtml(masterBaseCurrency())} column</span></td>
+          <td><span class="muted">Controls Income Statement Base USD column</span></td>
         </tr>
       `;
     }
@@ -4666,7 +4685,7 @@
     }
 
     function masterIncomeAmountForOrder(order, journalLines) {
-      const baseCurrency = masterBaseCurrency();
+      const baseCurrency = "USD";
       const payoutCurrency = order.payoutCurrency || order.sourceCurrency || baseCurrency;
       const payoutAmountMinor = Number(order.payoutAmountMinor || order.sourceAmountMinor || 0);
       const setting = masterRateDivisorSettingFor(payoutCurrency);
@@ -4689,12 +4708,32 @@
     }
 
     function masterCollectedAmountForOrder(order) {
-      const baseCurrency = masterBaseCurrency();
-      const sourceCurrency = order.sourceCurrency || baseCurrency;
+      const sourceCurrency = order.sourceCurrency || "USD";
       const sourceAmountMinor = Number(order.sourceAmountMinor || 0);
       const commissionMinor = Number(order.commissionMinor || 0);
-      if (sourceCurrency !== baseCurrency) return 0;
-      return sourceAmountMinor + commissionMinor;
+      const collectedMinor = sourceAmountMinor + commissionMinor;
+      if (sourceCurrency === "USD") {
+        return {
+          collectedCurrency: "USD",
+          collectedOriginalMinor: collectedMinor,
+          collectedEurMinor: 0,
+          collectedUsdMinor: collectedMinor
+        };
+      }
+      if (sourceCurrency === "EUR") {
+        return {
+          collectedCurrency: "EUR",
+          collectedOriginalMinor: collectedMinor,
+          collectedEurMinor: collectedMinor,
+          collectedUsdMinor: minorFromMajor(majorAmount(collectedMinor, "EUR") / eurToUsdDivider(), "USD")
+        };
+      }
+      return {
+        collectedCurrency: sourceCurrency,
+        collectedOriginalMinor: collectedMinor,
+        collectedEurMinor: 0,
+        collectedUsdMinor: 0
+      };
     }
 
     function incomeStatementRows(lines) {
@@ -4709,17 +4748,20 @@
           if (!order) return null;
           if (order.state === "Voided" || order.voidJournal) return null;
           const journalLines = state.ledger.filter((line) => line.journal === journal && line.source === "ORDER_PAYMENT");
-          const baseCurrency = masterBaseCurrency();
+          const baseCurrency = "USD";
           const baseAmountMinor = masterIncomeAmountForOrder(order, journalLines);
-          const collectedMinor = masterCollectedAmountForOrder(order);
+          const collected = masterCollectedAmountForOrder(order);
           return {
             order,
             postedAt: order.paidAt || journalLines[0]?.postedAt || order.createdAt,
             direction: journalLines.some((line) => line.direction === "Debit") ? "Debit" : "Credit",
             baseCurrency,
             baseAmountMinor,
-            collectedMinor,
-            profitMinor: collectedMinor - baseAmountMinor,
+            collectedCurrency: collected.collectedCurrency,
+            collectedOriginalMinor: collected.collectedOriginalMinor,
+            collectedEurMinor: collected.collectedEurMinor,
+            collectedUsdMinor: collected.collectedUsdMinor,
+            profitMinor: collected.collectedUsdMinor - baseAmountMinor,
             details: ledgerLineDetails(journalLines[0] || { source: "ORDER_PAYMENT", journal }, selectedActor())
           };
         })
@@ -5127,14 +5169,14 @@
         els.incomeStatementRows.innerHTML = "";
         return;
       }
-      const baseCurrency = masterBaseCurrency();
-      els.incomeBaseCurrencyHead.textContent = baseCurrency;
+      const baseCurrency = "USD";
+      els.incomeBaseCurrencyHead.textContent = "Base USD";
       els.incomeStatementSection.classList.toggle("collapsed", state.incomeStatementExpanded !== true);
       els.incomeStatementToggleText.textContent = state.incomeStatementExpanded === true ? "Collapse" : "Expand";
       const rows = incomeStatementRows(lines);
       const closedRows = archivedIncomeStatementRows(ledgerActor);
       if (rows.length === 0 && closedRows.length === 0) {
-        els.incomeStatementRows.innerHTML = '<tr><td colspan="7">No paid order income rows yet.</td></tr>';
+        els.incomeStatementRows.innerHTML = '<tr><td colspan="8">No paid order income rows yet.</td></tr>';
         return;
       }
       const totalProfit = rows.reduce((sum, row) => sum + row.profitMinor, 0);
@@ -5150,6 +5192,7 @@
             <td>Closed</td>
             <td></td>
             <td></td>
+            <td></td>
             <td class="${profitClass}">${signedMoney(archiveCurrency, profitMinor)}</td>
           </tr>
         `;
@@ -5163,16 +5206,17 @@
             <td>${escapeHtml(row.details)}</td>
             <td>${escapeHtml(row.direction)}</td>
             <td>${row.baseAmountMinor ? money(baseCurrency, row.baseAmountMinor) : ""}</td>
-            <td>${row.collectedMinor ? money(baseCurrency, row.collectedMinor) : ""}</td>
-            <td class="${profitClass}">${signedMoney(baseCurrency, row.profitMinor)}</td>
+            <td>${row.collectedEurMinor ? money("EUR", row.collectedEurMinor) : ""}</td>
+            <td>${row.collectedUsdMinor ? money("USD", row.collectedUsdMinor) : ""}</td>
+            <td class="${profitClass}">${signedUsd(row.profitMinor)}</td>
           </tr>
         `;
       }).join("");
       const totalClass = totalProfit >= 0 ? "profit-positive" : "profit-negative";
       els.incomeStatementRows.innerHTML = `${closedBodyRows}${bodyRows}
         <tr>
-          <td colspan="6"><strong>Current Session Profit/Loss</strong></td>
-          <td class="${totalClass}"><strong>${signedMoney(baseCurrency, totalProfit)}</strong></td>
+          <td colspan="7"><strong>Current Session Profit/Loss</strong></td>
+          <td class="${totalClass}"><strong>${signedUsd(totalProfit)}</strong></td>
         </tr>
       `;
     }
@@ -5559,7 +5603,7 @@
           actor: actor.name,
           closedAt,
           incomeProfitMinor,
-          incomeProfitCurrency: masterBaseCurrency(),
+          incomeProfitCurrency: "USD",
           incomeSummary: `Closed Profit/Loss for ${actor.name}`,
           ledger: actorLines.map((line) => ({ ...line, locked: true })),
           orders: archivedOrders.map((order) => ({ ...order, locked: true, archived: true })),
@@ -6787,6 +6831,22 @@
           divider,
           percent
         };
+        renderAll();
+        return;
+      }
+
+      const saveIncomeEurUsdDividerButton = event.target.closest(".save-income-eur-usd-divider");
+      if (saveIncomeEurUsdDividerButton) {
+        if (selectedActor()?.role !== "Master") return;
+        const input = saveIncomeEurUsdDividerButton.closest(".setting-inline")?.querySelector(".income-eur-usd-divider");
+        const divider = Number(input?.value || 0);
+        if (!Number.isFinite(divider) || divider <= 0) {
+          input?.setCustomValidity("Enter a divisor greater than zero.");
+          input?.reportValidity();
+          return;
+        }
+        input?.setCustomValidity("");
+        state.eurToUsdDivider = divider;
         renderAll();
         return;
       }
