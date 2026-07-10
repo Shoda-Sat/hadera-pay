@@ -2966,9 +2966,12 @@
 
     function updateOrderFundingMode() {
       const isCredit = document.getElementById("orderFundingType").value === "credit";
+      const actor = selectedActor();
+      const hidePayoutAgent = isCredit || ["Broker", "Special Broker"].includes(actor?.role);
       document.querySelectorAll("[data-credit-optional]").forEach((field) => {
         field.classList.toggle("hidden", isCredit);
       });
+      document.getElementById("agent")?.closest(".field")?.classList.toggle("hidden", hidePayoutAgent);
       if (isCredit) {
         document.getElementById("rate").disabled = true;
       } else {
