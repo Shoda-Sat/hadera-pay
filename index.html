@@ -1263,10 +1263,38 @@
     .chat-compose {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto auto auto;
+      align-items: end;
       gap: 8px;
       padding: 12px;
       border-top: 1px solid var(--line);
       background: #ffffff;
+    }
+
+    .chat-compose textarea {
+      min-height: 82px;
+      max-height: 180px;
+      resize: vertical;
+      line-height: 1.45;
+    }
+
+    .chat-compose .icon-btn {
+      width: 42px;
+      min-width: 42px;
+      padding: 0;
+      aspect-ratio: 1;
+    }
+
+    .chat-compose .icon-btn.recording {
+      color: var(--danger);
+      border-color: #ffd0ca;
+      background: var(--danger-soft);
+    }
+
+    .proof-upload-row {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
     }
 
     .forward-list {
@@ -1897,10 +1925,14 @@
               <div class="chat-messages" id="chatMessages"></div>
               <div class="chat-reply hidden" id="chatReplyPreview"></div>
               <form class="chat-compose" id="chatComposer">
-                <input id="chatText" placeholder="Message">
+                <textarea id="chatText" rows="3" placeholder="Message"></textarea>
                 <input class="hidden" id="chatPhotoInput" type="file" accept="image/*">
-                <button class="btn secondary" id="chatPhotoButton" type="button">Photo</button>
-                <button class="btn secondary" id="chatRecordButton" type="button">Voice</button>
+                <button class="btn secondary icon-btn" id="chatPhotoButton" type="button" aria-label="Photo" title="Photo">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3Z"/><circle cx="12" cy="13" r="3"/></svg>
+                </button>
+                <button class="btn secondary icon-btn" id="chatRecordButton" type="button" aria-label="Voice" title="Voice">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/></svg>
+                </button>
                 <button class="btn primary" id="chatSend" type="submit">Send</button>
               </form>
             </section>
@@ -2278,6 +2310,7 @@
     let suppressRemoteSave = false;
     let remoteRefreshTimer = null;
     const processingOrderIds = new Set();
+    const pendingProofFiles = new Map();
     const processingTransferIds = new Set();
     const maxProofFileBytes = 4 * 1024 * 1024;
     const supportedCurrencies = ["USD", "ETB", "EUR", "ERN"];
@@ -2466,7 +2499,11 @@
     const state = loadState();
 
     function saveState() {
-      localStorage.setItem(storageKey, JSON.stringify(state));
+      try {
+        localStorage.setItem(storageKey, JSON.stringify(state));
+      } catch {
+        // Large proof images can exceed browser storage; keep remote saving alive.
+      }
       if (!currentAuth || !remoteStateReady || suppressRemoteSave) return;
       clearTimeout(saveTimer);
       saveTimer = setTimeout(() => {
@@ -2708,7 +2745,11 @@
     };
 
     const icons = {
-      check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M20 6 9 17l-5-5"/></svg>'
+      check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M20 6 9 17l-5-5"/></svg>',
+      camera: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3Z"/><circle cx="12" cy="13" r="3"/></svg>',
+      mic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/></svg>',
+      paperclip: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m21.44 11.05-8.49 8.49a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.19 9.19a2 2 0 0 1-2.83-2.83l8.49-8.49"/></svg>',
+      stop: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="7" y="7" width="10" height="10" rx="1"/></svg>'
     };
 
     const els = {
@@ -3003,18 +3044,13 @@
     }
 
     function updateOrderFundingMode() {
-      const isCredit = document.getElementById("orderFundingType").value === "credit";
       const actor = selectedActor();
-      const hidePayoutAgent = isCredit || ["Broker", "Special Broker"].includes(actor?.role);
+      const hidePayoutAgent = ["Broker", "Special Broker"].includes(actor?.role);
       document.querySelectorAll("[data-credit-optional]").forEach((field) => {
-        field.classList.toggle("hidden", isCredit);
+        field.classList.remove("hidden");
       });
       document.getElementById("agent")?.closest(".field")?.classList.toggle("hidden", hidePayoutAgent);
-      if (isCredit) {
-        document.getElementById("rate").disabled = true;
-      } else {
-        applyFixedOrderRate();
-      }
+      applyFixedOrderRate();
       buildJournalPreview();
     }
 
@@ -3208,11 +3244,12 @@
       }, 1);
     }
 
-    function buildReceivableRecord(input) {
+    function buildReceivableRecord(input, order, existing = null) {
       const borrower = activeActors().find((actor) => actor.name === input.broker);
       const now = new Date().toISOString();
       return {
-        id: nextReceivableId(),
+        id: existing?.id || nextReceivableId(),
+        orderId: order?.id || existing?.orderId || "",
         borrower: input.broker,
         borrowerActorId: borrower?.id || "",
         currency: input.sourceCurrency,
@@ -3222,11 +3259,29 @@
         accountNumber: input.accountNumber,
         phoneNumber: input.phoneNumber,
         remarks: input.remarks,
-        createdAt: now,
+        createdAt: existing?.createdAt || now,
         updatedAt: now,
-        createdBy: selectedActor()?.name || input.broker,
-        payments: []
+        createdBy: existing?.createdBy || selectedActor()?.name || input.broker,
+        payments: existing?.payments || []
       };
+    }
+
+    function recordCreditReceivable(input, order) {
+      const existingIndex = state.receivables.findIndex((item) => item.orderId === order.id);
+      if (input.fundingType !== "credit") {
+        if (existingIndex >= 0 && receivablePaidMinor(state.receivables[existingIndex]) === 0) {
+          state.receivables.splice(existingIndex, 1);
+        }
+        return null;
+      }
+      const existing = existingIndex >= 0 ? state.receivables[existingIndex] : null;
+      const receivable = buildReceivableRecord(input, order, existing);
+      if (existingIndex >= 0) {
+        state.receivables.splice(existingIndex, 1, receivable);
+      } else {
+        state.receivables.unshift(receivable);
+      }
+      return receivable;
     }
 
     function nextOrderNumberFromOrders() {
@@ -3251,19 +3306,6 @@
       const hasReceiver = input.receiverFields.some((value) => value.trim().length > 0);
       els.receiverError.textContent = "At least one receiver detail is required.";
       els.receiverError.classList.toggle("visible", !hasReceiver && state.orderValidationVisible);
-      if (input.fundingType === "credit") {
-        els.journalPreview.innerHTML = `
-          <div class="line-item">
-            <b>Credit</b>
-            <span>Receivable for ${escapeHtml(input.broker || "Borrower")}</span>
-            <div class="amount">${money(input.sourceCurrency || "USD", input.sourceAmountMinor || 0)}</div>
-          </div>
-        `;
-        els.journalStatus.textContent = "Receivable";
-        els.journalStatus.className = "state-pill warn";
-        return { input, lines: [], hasReceiver, balanced: true };
-      }
-
       const lines = [
         { direction: "Debit", account: input.broker + " ACTOR_CLEARING", currency: input.sourceCurrency, amountMinor: input.sourceAmountMinor },
         { direction: "Debit", account: input.broker + " ACTOR_CLEARING", currency: input.sourceCurrency, amountMinor: input.commissionMinor },
@@ -3818,6 +3860,37 @@
         };
         reader.readAsDataURL(file);
       });
+    }
+
+    function updatePaymentProofStatus(input) {
+      const actionBox = input?.closest(".order-actions");
+      const progress = actionBox?.querySelector(".proof-progress");
+      const file = input?.files?.[0] || null;
+      const orderId = input?.dataset?.id || "";
+      if (!progress) return;
+      if (!file) {
+        if (orderId) pendingProofFiles.delete(orderId);
+        progress.textContent = "";
+        return;
+      }
+      if (file.size > maxProofFileBytes) {
+        if (orderId) pendingProofFiles.delete(orderId);
+        input.value = "";
+        progress.textContent = "File too large";
+        showOrderError(`Payment proof is too large. Use an image under ${Math.round(maxProofFileBytes / 1024 / 1024)} MB.`);
+        return;
+      }
+      if (orderId) pendingProofFiles.set(orderId, file);
+      progress.textContent = `Attached: ${file.name || "payment proof"}`;
+    }
+
+    function setChatRecordButtonState(mode) {
+      const recording = mode === "recording";
+      const unavailable = mode === "unavailable";
+      els.chatRecordButton.classList.toggle("recording", recording);
+      els.chatRecordButton.innerHTML = recording ? icons.stop : icons.mic;
+      els.chatRecordButton.title = unavailable ? "Microphone unavailable" : recording ? "Stop recording" : "Voice";
+      els.chatRecordButton.setAttribute("aria-label", els.chatRecordButton.title);
     }
 
     function directChatWithMaster(actorName) {
@@ -4486,14 +4559,15 @@
         `;
       }
       if (canPay) {
+        const pendingProof = pendingProofFiles.get(order.id);
         return `
           <div class="order-actions">
-            <label class="btn secondary proof-upload">
-              Attach proof
+            <span class="proof-upload-row">
+              <button class="btn secondary attach-proof" data-id="${order.id}" type="button">${icons.paperclip}Attach</button>
               <input class="payment-proof-input hidden" data-id="${order.id}" type="file" accept="image/*">
-            </label>
-            <span class="muted proof-progress" data-id="${order.id}"></span>
-            <button class="btn primary pay-order" data-id="${order.id}" type="button" onclick="event.stopPropagation(); openMarkPaidConfirmation(this);">${icons.check}Mark Paid</button>
+              <span class="muted proof-progress" data-id="${order.id}">${pendingProof ? `Attached: ${escapeHtml(pendingProof.name || "payment proof")}` : ""}</span>
+            </span>
+            <button class="btn primary pay-order" data-id="${order.id}" type="button">${icons.check}Mark Paid</button>
             <button class="btn secondary return-order" data-id="${order.id}" type="button">Return</button>
           </div>
         `;
@@ -5835,7 +5909,7 @@
     function openMarkPaidConfirmation(payButton) {
       const orderId = payButton?.dataset?.id;
       const order = state.orders.find((item) => item.id === orderId);
-      const proofFile = payButton?.closest(".order-actions")?.querySelector(".payment-proof-input")?.files?.[0] || null;
+      const proofFile = pendingProofFiles.get(orderId) || payButton?.closest(".order-actions")?.querySelector(".payment-proof-input")?.files?.[0] || null;
       if (!order) {
         showOrderError("Order was not found. Refresh and try again.");
         return;
@@ -5845,6 +5919,7 @@
         return;
       }
       if (proofFile && proofFile.size > maxProofFileBytes) {
+        if (orderId) pendingProofFiles.delete(orderId);
         showOrderError(`Payment proof is too large. Use an image under ${Math.round(maxProofFileBytes / 1024 / 1024)} MB.`);
         return;
       }
@@ -5863,9 +5938,10 @@
       }
       const actor = actorForOrderPayment(order);
       const actionBox = payButton.closest(".order-actions");
-      const proofFile = actionBox?.querySelector(".payment-proof-input")?.files?.[0] || null;
+      const proofFile = pendingProofFiles.get(orderId) || actionBox?.querySelector(".payment-proof-input")?.files?.[0] || null;
       const progress = actionBox?.querySelector(".proof-progress");
       if (proofFile && proofFile.size > maxProofFileBytes) {
+        pendingProofFiles.delete(orderId);
         showOrderError(`Payment proof is too large. Use an image under ${Math.round(maxProofFileBytes / 1024 / 1024)} MB.`);
         return;
       }
@@ -5904,6 +5980,7 @@
         order.paidAt = new Date().toISOString();
         order.updatedAt = order.paidAt;
         sendPaymentProofToMaster(order, actor, proof);
+        pendingProofFiles.delete(order.id);
         state.orderState = "Paid";
         els.orderState.textContent = "Paid";
         els.orderState.className = "state-pill good";
@@ -6156,6 +6233,11 @@
     });
 
     document.addEventListener("change", (event) => {
+      const proofInput = event.target.closest(".payment-proof-input");
+      if (proofInput) {
+        updatePaymentProofStatus(proofInput);
+        return;
+      }
       const checkbox = event.target.closest(".transfer-target-toggle");
       if (!checkbox || selectedActor()?.role !== "Master") return;
       const actor = state.actors.find((item) => item.id === checkbox.dataset.id);
@@ -6424,15 +6506,22 @@
     els.chatRecordButton.addEventListener("click", async () => {
       if (chatRecorder && chatRecorder.state === "recording") {
         chatRecorder.stop();
-        els.chatRecordButton.textContent = "Voice";
+        setChatRecordButtonState("idle");
         return;
       }
       if (!navigator.mediaDevices || !window.MediaRecorder) {
-        els.chatRecordButton.textContent = "No mic";
-        setTimeout(() => els.chatRecordButton.textContent = "Voice", 1200);
+        setChatRecordButtonState("unavailable");
+        setTimeout(() => setChatRecordButtonState("idle"), 1200);
         return;
       }
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch {
+        setChatRecordButtonState("unavailable");
+        setTimeout(() => setChatRecordButtonState("idle"), 1200);
+        return;
+      }
       chatAudioChunks = [];
       chatRecorder = new MediaRecorder(stream);
       chatRecorder.ondataavailable = (event) => {
@@ -6446,7 +6535,7 @@
         reader.readAsDataURL(blob);
       };
       chatRecorder.start();
-      els.chatRecordButton.textContent = "Stop";
+      setChatRecordButtonState("recording");
     });
 
     els.ledgerActorSelect.addEventListener("change", () => {
@@ -6575,17 +6664,6 @@
         showOrderError("Enter a source amount greater than zero.");
         return;
       }
-      if (input.fundingType === "credit") {
-        confirmAction("Register this order as a credit receivable?", () => {
-          const receivable = buildReceivableRecord(input);
-          state.receivables.unshift(receivable);
-          clearOrderDetails();
-          notifyEvent("Receivable registered", `${receivable.id} recorded for ${receivable.borrower}.`);
-          setView("receivables");
-          renderAll();
-        });
-        return;
-      }
       if (input.broker === input.agent) {
         showOrderError("Broker and payout actor must be different.");
         return;
@@ -6604,11 +6682,13 @@
           ...buildOrderRecord(input, "Assigned"),
           agent: input.agent
         };
+        const receivable = recordCreditReceivable(input, order);
         state.orders.unshift(order);
         state.orderState = "Assigned";
         els.orderState.textContent = "Assigned";
         els.orderState.className = "state-pill";
         clearOrderDetails();
+        if (receivable) notifyEvent("Receivable registered", `${receivable.id} recorded for ${receivable.borrower}.`);
         notifyEvent("New order", `${order.id} assigned to ${order.agent}.`);
         renderAll();
       });
@@ -6632,21 +6712,6 @@
         showOrderError("Enter a source amount greater than zero.");
         return;
       }
-      if (input.fundingType === "credit") {
-        confirmAction("Register this order as a credit receivable?", () => {
-          const receivable = buildReceivableRecord(input);
-          state.receivables.unshift(receivable);
-          clearOrderDetails();
-          notifyEvent("Receivable registered", `${receivable.id} recorded for ${receivable.borrower}.`);
-          setView("receivables");
-          renderAll();
-        });
-        return;
-      }
-      if (input.broker === input.agent) {
-        showOrderError("Broker and payout actor must be different.");
-        return;
-      }
       const brokerActor = activeActors().find((actor) => actor.name === input.broker);
       if (brokerActor && ["Broker", "Special Broker"].includes(brokerActor.role) && brokerActor.orderMultiCurrencyEnabled !== true && input.sourceCurrency !== brokerActor.currency) {
         showOrderError("This broker is restricted to orders in their base currency.");
@@ -6655,6 +6720,7 @@
 
       confirmAction("Send this order to Master for routing?", () => {
         const order = buildOrderRecord(input, "Pending Forward");
+        const receivable = recordCreditReceivable(input, order);
         const existingIndex = state.orders.findIndex((item) => item.id === state.editingOrderId);
         if (existingIndex >= 0) {
           state.orders.splice(existingIndex, 1, order);
@@ -6666,6 +6732,7 @@
         els.orderState.className = "state-pill warn";
         els.voidButton.disabled = true;
         clearOrderDetails();
+        if (receivable) notifyEvent("Receivable registered", `${receivable.id} recorded for ${receivable.borrower}.`);
         notifyEvent("New order", `${order.id} sent to Master for routing.`);
         renderAll();
       });
@@ -7154,6 +7221,13 @@
         els.orderState.textContent = "Cancelled";
         els.orderState.className = "state-pill danger";
         renderAll();
+        return;
+      }
+
+      const attachProofButton = event.target.closest(".attach-proof");
+      if (attachProofButton) {
+        const actionBox = attachProofButton.closest(".order-actions");
+        actionBox?.querySelector(".payment-proof-input")?.click();
         return;
       }
 
