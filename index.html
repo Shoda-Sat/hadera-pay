@@ -610,6 +610,39 @@
       display: none;
     }
 
+    .trial-balance-section {
+      border-top: 1px solid var(--line);
+    }
+
+    .trial-balance-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .trial-balance-head h3 {
+      margin: 0;
+      font-size: 14px;
+      letter-spacing: 0;
+    }
+
+    .trial-balance-note {
+      display: block;
+      margin-top: 3px;
+      font-size: 11px;
+      font-weight: 700;
+      color: inherit;
+      opacity: 0.82;
+      white-space: nowrap;
+    }
+
+    .trial-balance-total td {
+      border-top: 2px solid var(--line);
+      background: var(--panel-2);
+    }
+
     .profit-positive {
       color: var(--good);
       font-weight: 900;
@@ -1392,6 +1425,32 @@
       </div>
     </div>
   </div>
+  <div class="confirm-shade" id="passwordShade" role="dialog" aria-modal="true" aria-labelledby="passwordTitle">
+    <div class="confirm-box">
+      <h2 id="passwordTitle">Reset Password</h2>
+      <form id="passwordForm">
+        <div class="form-grid">
+          <div class="field full">
+            <label for="currentPassword">Current password</label>
+            <input id="currentPassword" type="password" autocomplete="current-password">
+          </div>
+          <div class="field">
+            <label for="newPassword">New password</label>
+            <input id="newPassword" type="password" autocomplete="new-password">
+          </div>
+          <div class="field">
+            <label for="confirmPassword">Confirm password</label>
+            <input id="confirmPassword" type="password" autocomplete="new-password">
+          </div>
+        </div>
+        <span class="field-error" id="passwordError"></span>
+        <div class="confirm-actions">
+          <button class="btn primary" type="submit">Save Password</button>
+          <button class="btn secondary" id="passwordCancel" type="button">Cancel</button>
+        </div>
+      </form>
+    </div>
+  </div>
   <div class="notification-stack" id="notificationStack" aria-live="polite"></div>
   <div class="auth-screen" id="authScreen">
     <div class="auth-card">
@@ -1479,6 +1538,10 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M7 7h11l-3-3"/><path d="M17 17H6l3 3"/><path d="M18 7l-3 3"/><path d="M6 17l3-3"/></svg>
           Transfers
         </button>
+        <button data-view="receivables" type="button" aria-label="Receivables">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M6 3h12v18H6z"/><path d="M9 7h6"/><path d="M9 11h6"/><path d="M9 15h3"/></svg>
+          Receivables
+        </button>
         <button data-view="chat" type="button" aria-label="Chat">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg>
           Chat
@@ -1534,6 +1597,7 @@
           <span class="badge" id="currencyBadge">USD / ETB / EUR / ERN</span>
           <span class="badge" id="profileBadge">Master</span>
           <span class="badge" id="accountBadge">Not logged in</span>
+          <button class="btn secondary" id="passwordButton" type="button">Password</button>
           <button class="btn secondary" id="logoutButton" type="button">Logout</button>
         </div>
       </header>
@@ -1622,7 +1686,7 @@
                       <label for="broker">Broker</label>
                       <select id="broker"></select>
                     </div>
-                    <div class="field">
+                    <div class="field" data-credit-optional>
                       <label for="payoutCurrency">Payout currency</label>
                       <select id="payoutCurrency"></select>
                     </div>
@@ -1634,21 +1698,29 @@
                       <label for="sourceCurrency">Source currency</label>
                       <select id="sourceCurrency"></select>
                     </div>
-                    <div class="field hidden">
+                    <div class="field hidden" data-credit-optional>
                       <label for="agent">Payout Agent</label>
                       <select id="agent"></select>
                     </div>
-                    <div class="field">
+                    <div class="field" data-credit-optional>
                       <label for="rate">Exchange rate</label>
                       <input id="rate" inputmode="decimal" value="56.50">
                     </div>
-                    <div class="field">
+                    <div class="field" data-credit-optional>
                       <label for="totalPayout">Total payout</label>
                       <input id="totalPayout" inputmode="decimal" placeholder="0.00">
                     </div>
-                    <div class="field">
+                    <div class="field" data-credit-optional>
                       <label for="commission">Commission %</label>
                       <input id="commission" inputmode="decimal" value="1.50">
+                    </div>
+                    <div class="field">
+                      <label for="orderFundingType">Payment type</label>
+                      <select id="orderFundingType">
+                        <option value="">Choose Cash or Credit</option>
+                        <option value="cash">Cash</option>
+                        <option value="credit">Credit</option>
+                      </select>
                     </div>
                     <div class="field">
                       <label for="senderName">Sender name</label>
@@ -1784,6 +1856,23 @@
           </div>
         </section>
 
+        <section class="view" id="receivables">
+          <div class="panel">
+            <div class="panel-header">
+              <h2>Receivables</h2>
+              <span class="state-pill">Credit Orders</span>
+            </div>
+            <div class="panel-body table-wrap">
+              <table>
+                <thead>
+                  <tr><th>Date</th><th>Reference</th><th>Borrower</th><th>Details</th><th>Principal</th><th>Collected</th><th>Balance</th><th>Collection</th></tr>
+                </thead>
+                <tbody id="receivableRows"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
         <section class="view" id="chat">
           <div class="chat-shell">
             <aside class="chat-list-panel">
@@ -1846,6 +1935,20 @@
                 </thead>
                 <tbody id="ledgerRows"></tbody>
               </table>
+            </div>
+            <div class="panel-body trial-balance-section" id="trialBalanceSection" data-master-action>
+              <div class="trial-balance-head">
+                <h3>Trial Balance</h3>
+                <span class="state-pill">Master</span>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr><th>Actor</th><th>Role</th><th>USD</th><th>ETB</th><th>EUR</th><th>ERN</th><th>Running Position</th></tr>
+                  </thead>
+                  <tbody id="trialBalanceRows"></tbody>
+                </table>
+              </div>
             </div>
             <div class="panel-body income-section collapsed" id="incomeStatementSection">
               <button class="income-toggle" id="incomeStatementToggle" type="button">
@@ -2183,6 +2286,21 @@
       return normalized;
     }
 
+    function normalizedTransferMode(actor = {}) {
+      if (actor.role === "Master") return "both";
+      if (actor.transferEnabled === false || actor.transferMode === "none") return "none";
+      if (actor.transferMode === "both" || actor.transferMode === "actors") return "both";
+      if (actor.transferMode === "actor") return "actor";
+      return "master";
+    }
+
+    function transferModeFromTargets(toMaster, toActors) {
+      if (toMaster && toActors) return "both";
+      if (toActors) return "actor";
+      if (toMaster) return "master";
+      return "none";
+    }
+
     const defaultState = {
       activeView: "dashboard",
       orderState: "Draft",
@@ -2197,6 +2315,7 @@
       incomeStatementExpanded: false,
       journalCounter: 0,
       orderCounter: 0,
+      receivableCounter: 0,
       transferCounter: 0,
       actorCounter: 5,
       chatCounter: 0,
@@ -2213,6 +2332,7 @@
         { id: "ACT-5", name: "Multi-Currency Agent", role: "Special Agent", currency: "USD", workingCurrencies: ["USD", "ETB", "EUR"], active: true, transferEnabled: true }
       ],
       orders: [],
+      receivables: [],
       transfers: [],
       ledger: [],
       settlements: [],
@@ -2229,6 +2349,7 @@
           ...saved,
           actors: normalizeActors(Array.isArray(saved.actors) ? saved.actors : structuredClone(defaultState.actors)),
           orders: Array.isArray(saved.orders) ? saved.orders : [],
+          receivables: Array.isArray(saved.receivables) ? saved.receivables : [],
           transfers: normalizeTransfers(Array.isArray(saved.transfers) ? saved.transfers : []),
           ledger: Array.isArray(saved.ledger) ? saved.ledger : [],
           settlements: Array.isArray(saved.settlements) ? saved.settlements : [],
@@ -2303,8 +2424,8 @@
             : false,
           orderFixedRates: ["Broker", "Special Broker"].includes(actor.role) ? orderFixedRates : {},
           active: actor.role === "Master" ? true : actor.active !== false,
-          transferEnabled: actor.role === "Master" ? true : actor.transferEnabled !== false,
-          transferMode: actor.role === "Master" ? "actors" : actor.transferMode === "actors" ? "actors" : "master",
+          transferEnabled: actor.role === "Master" ? true : normalizedTransferMode(actor) !== "none",
+          transferMode: normalizedTransferMode(actor),
           incomeStatementVisible: actor.role === "Master" ? true : actor.incomeStatementVisible !== false
         };
       });
@@ -2431,16 +2552,31 @@
       });
     }
 
+    function mergeReceivables(existingItems = [], incomingItems = []) {
+      const merged = mergeById(existingItems, incomingItems);
+      return merged.map((receivable) => {
+        const current = existingItems.find((item) => item.id === receivable.id);
+        const incoming = incomingItems.find((item) => item.id === receivable.id);
+        return {
+          ...receivable,
+          payments: mergeById(current?.payments || [], incoming?.payments || [])
+            .sort((a, b) => new Date(a.paidAt || 0).getTime() - new Date(b.paidAt || 0).getTime())
+        };
+      });
+    }
+
     function mergeSharedState(remoteState) {
       if (!remoteState || typeof remoteState !== "object") return false;
       state.actors = normalizeActors(mergeById(state.actors, remoteState.actors || []));
       state.orders = mergeOrders(state.orders, remoteState.orders || []);
+      state.receivables = mergeReceivables(state.receivables, remoteState.receivables || []);
       state.transfers = normalizeTransfers(mergeById(state.transfers, remoteState.transfers || []));
       state.ledger = mergeLedgerLines(state.ledger, remoteState.ledger || []);
       state.settlements = Array.isArray(remoteState.settlements) ? remoteState.settlements : state.settlements;
       state.archives = mergeById(state.archives, remoteState.archives || []);
       state.chatConversations = mergeChatConversations(state.chatConversations, remoteState.chatConversations || []);
       state.orderCounter = Math.max(Number(state.orderCounter || 0), nextOrderNumberFromOrders() - 1, Number(remoteState.orderCounter || 0));
+      state.receivableCounter = Math.max(Number(state.receivableCounter || 0), nextReceivableNumberFromReceivables() - 1, Number(remoteState.receivableCounter || 0));
       return true;
     }
 
@@ -2519,9 +2655,11 @@
         ...structuredClone(defaultState),
         ...nextState,
         actors: normalizeActors(Array.isArray(nextState.actors) ? nextState.actors : structuredClone(defaultState.actors)),
+        receivables: Array.isArray(nextState.receivables) ? nextState.receivables : [],
         transfers: normalizeTransfers(Array.isArray(nextState.transfers) ? nextState.transfers : []),
       });
       state.orderCounter = Math.max(Number(state.orderCounter || 0), nextOrderNumberFromOrders() - 1);
+      state.receivableCounter = Math.max(Number(state.receivableCounter || 0), nextReceivableNumberFromReceivables() - 1);
       ensureSessionActor();
       remoteStateReady = true;
       startRemoteRefresh();
@@ -2538,6 +2676,7 @@
       dashboard: ["Dashboard", "Live operating view for the local ledger app."],
       orders: ["Orders", "Create, assign, pay, and void routed payment orders."],
       transfers: ["Transfers", "Create internal transfers and approve pending requests."],
+      receivables: ["Receivables", "Credit orders and collections outside the ledger."],
       chat: ["Chat", "Master-only direct chats and Master-created groups."],
       ledger: ["Ledger", "Immutable journal lines with debit-credit balance."],
       settlement: ["Settlement", "Net actor positions against Master cash."],
@@ -2559,6 +2698,11 @@
       confirmYes: document.getElementById("confirmYes"),
       confirmNo: document.getElementById("confirmNo"),
       confirmCancel: document.getElementById("confirmCancel"),
+      passwordShade: document.getElementById("passwordShade"),
+      passwordForm: document.getElementById("passwordForm"),
+      passwordButton: document.getElementById("passwordButton"),
+      passwordCancel: document.getElementById("passwordCancel"),
+      passwordError: document.getElementById("passwordError"),
       authScreen: document.getElementById("authScreen"),
       showLogin: document.getElementById("showLogin"),
       showSignup: document.getElementById("showSignup"),
@@ -2578,7 +2722,10 @@
       logoutButton: document.getElementById("logoutButton"),
       orderRows: document.getElementById("orderRows"),
       dashboardOrderRows: document.getElementById("dashboardOrderRows"),
+      receivableRows: document.getElementById("receivableRows"),
       ledgerRows: document.getElementById("ledgerRows"),
+      trialBalanceSection: document.getElementById("trialBalanceSection"),
+      trialBalanceRows: document.getElementById("trialBalanceRows"),
       ledgerActorSelect: document.getElementById("ledgerActorSelect"),
       incomeStatementSection: document.getElementById("incomeStatementSection"),
       incomeStatementToggle: document.getElementById("incomeStatementToggle"),
@@ -2816,6 +2963,19 @@
       }
     }
 
+    function updateOrderFundingMode() {
+      const isCredit = document.getElementById("orderFundingType").value === "credit";
+      document.querySelectorAll("[data-credit-optional]").forEach((field) => {
+        field.classList.toggle("hidden", isCredit);
+      });
+      if (isCredit) {
+        document.getElementById("rate").disabled = true;
+      } else {
+        applyFixedOrderRate();
+      }
+      buildJournalPreview();
+    }
+
     function getOrderInput() {
       const sourceCurrency = document.getElementById("sourceCurrency").value;
       const payoutCurrency = document.getElementById("payoutCurrency").value;
@@ -2846,6 +3006,7 @@
         remarks: text(document.getElementById("remarks").value),
         rate: effectiveRate,
         commissionPercent,
+        fundingType: document.getElementById("orderFundingType").value,
         receiverFields: [
           document.getElementById("receiverName").value,
           document.getElementById("accountNumber").value,
@@ -2937,6 +3098,7 @@
         phoneNumber: input.phoneNumber,
         remarks: input.remarks,
         amount: money(input.sourceCurrency, input.sourceAmountMinor),
+        fundingType: input.fundingType || "cash",
         state: stateName,
         journal: "",
         createdAt: existingOrder?.createdAt || now,
@@ -2957,6 +3119,7 @@
       document.getElementById("rate").value = order.rate || "";
       document.getElementById("totalPayout").value = formatMinor(order.payoutAmountMinor || 0, order.payoutCurrency || order.sourceCurrency || "USD");
       document.getElementById("commission").value = order.commissionPercent || "";
+      document.getElementById("orderFundingType").value = order.fundingType || "cash";
       document.getElementById("senderName").value = order.senderName || "";
       document.getElementById("receiverName").value = order.receiverName || "";
       document.getElementById("accountNumber").value = order.accountNumber || "";
@@ -2975,6 +3138,7 @@
       document.getElementById("rate").value = "";
       document.getElementById("totalPayout").value = "";
       document.getElementById("commission").value = "";
+      document.getElementById("orderFundingType").value = "";
       document.getElementById("senderName").value = "";
       document.getElementById("receiverName").value = "";
       document.getElementById("accountNumber").value = "";
@@ -2988,6 +3152,39 @@
     function nextOrderId() {
       state.orderCounter = Math.max(Number(state.orderCounter || 0), nextOrderNumberFromOrders() - 1) + 1;
       return "ORD-" + state.orderCounter;
+    }
+
+    function nextReceivableId() {
+      state.receivableCounter = Math.max(Number(state.receivableCounter || 0), nextReceivableNumberFromReceivables() - 1) + 1;
+      return "REC-" + state.receivableCounter;
+    }
+
+    function nextReceivableNumberFromReceivables() {
+      return state.receivables.reduce((next, receivable) => {
+        const match = String(receivable?.id || "").match(/^REC-(\d+)$/);
+        return match ? Math.max(next, Number(match[1]) + 1) : next;
+      }, 1);
+    }
+
+    function buildReceivableRecord(input) {
+      const borrower = activeActors().find((actor) => actor.name === input.broker);
+      const now = new Date().toISOString();
+      return {
+        id: nextReceivableId(),
+        borrower: input.broker,
+        borrowerActorId: borrower?.id || "",
+        currency: input.sourceCurrency,
+        principalMinor: input.sourceAmountMinor,
+        senderName: input.senderName,
+        receiverName: input.receiverName,
+        accountNumber: input.accountNumber,
+        phoneNumber: input.phoneNumber,
+        remarks: input.remarks,
+        createdAt: now,
+        updatedAt: now,
+        createdBy: selectedActor()?.name || input.broker,
+        payments: []
+      };
     }
 
     function nextOrderNumberFromOrders() {
@@ -3012,6 +3209,18 @@
       const hasReceiver = input.receiverFields.some((value) => value.trim().length > 0);
       els.receiverError.textContent = "At least one receiver detail is required.";
       els.receiverError.classList.toggle("visible", !hasReceiver && state.orderValidationVisible);
+      if (input.fundingType === "credit") {
+        els.journalPreview.innerHTML = `
+          <div class="line-item">
+            <b>Credit</b>
+            <span>Receivable for ${escapeHtml(input.broker || "Borrower")}</span>
+            <div class="amount">${money(input.sourceCurrency || "USD", input.sourceAmountMinor || 0)}</div>
+          </div>
+        `;
+        els.journalStatus.textContent = "Receivable";
+        els.journalStatus.className = "state-pill warn";
+        return { input, lines: [], hasReceiver, balanced: true };
+      }
 
       const lines = [
         { direction: "Debit", account: input.broker + " ACTOR_CLEARING", currency: input.sourceCurrency, amountMinor: input.sourceAmountMinor },
@@ -3067,9 +3276,10 @@
 
     function privilegeViews(role, actor = selectedActor()) {
       if (role === "Owner") return ["owner"];
-      if (role === "Master") return ["dashboard", "orders", "transfers", "chat", "ledger", "settlement", "archive", "actors", "settings"];
+      if (role === "Master") return ["dashboard", "orders", "transfers", "receivables", "chat", "ledger", "settlement", "archive", "actors", "settings"];
       const views = ["dashboard", "orders", "chat", "ledger", "settlement", "archive"];
       if (actor?.transferEnabled !== false) views.splice(2, 0, "transfers");
+      if (["Broker", "Special Broker"].includes(role)) views.splice(views.indexOf("chat"), 0, "receivables");
       if (role === "Broker") return views;
       if (role === "Agent") return views;
       if (role === "Special Agent") return views;
@@ -3158,9 +3368,14 @@
         ? currentFrom
         : fromActors[0]?.name || "";
       const fromActor = actors.find((item) => item.name === fromName);
-      const toActors = actor?.role === "Master" || fromActor?.transferMode === "actors"
+      const transferMode = normalizedTransferMode(fromActor);
+      const toActors = actor?.role === "Master" || transferMode === "both"
         ? actors.filter((item) => item.name !== fromName)
-        : actors.filter((item) => item.name !== fromName && item.role === "Master");
+        : transferMode === "actor"
+          ? actors.filter((item) => item.name !== fromName && item.role !== "Master")
+          : transferMode === "master"
+            ? actors.filter((item) => item.name !== fromName && item.role === "Master")
+            : [];
 
       els.transferFrom.innerHTML = fromActors.map((item) => `<option>${item.name}</option>`).join("");
       els.transferTo.innerHTML = toActors.map((item) => `<option>${item.name}</option>`).join("");
@@ -3748,8 +3963,17 @@
       const rows = activeActors()
         .filter((actor) => actor.role !== "Master")
         .map((actor) => {
-          const transferMode = actor.transferMode === "actors" ? "actors" : "master";
-          const transferTargetLabel = transferMode === "actors" ? "Actors + Master" : "Master only";
+          const transferMode = normalizedTransferMode(actor);
+          const canTransferToMaster = transferMode === "master" || transferMode === "both";
+          const canTransferToActors = transferMode === "actor" || transferMode === "both";
+          const transferTargetLabel = transferMode === "both"
+            ? "Master + Actors"
+            : transferMode === "actor"
+              ? "Actors only"
+              : transferMode === "master"
+                ? "Master only"
+                : "None";
+          const transferStatusClass = transferMode === "none" ? "danger" : transferMode === "both" ? "good" : "warn";
           const incomeVisible = actor.incomeStatementVisible !== false;
           const orderMultiCurrency = actor.orderMultiCurrencyEnabled === true;
           const orderCurrencyControl = ["Broker", "Special Broker"].includes(actor.role)
@@ -3795,7 +4019,7 @@
               <td><strong>${escapeHtml(actor.name)}</strong></td>
               <td>${escapeHtml(actor.role)}</td>
               <td>${actor.role === "Special Agent" ? `${escapeHtml(actor.currency)} / ${(actor.workingCurrencies || [actor.currency]).map(escapeHtml).join(", ")}` : escapeHtml(actor.currency)}</td>
-              <td><span class="state-pill ${transferMode === "actors" ? "good" : "warn"}">${transferTargetLabel}</span></td>
+              <td><span class="state-pill ${transferStatusClass}">${transferTargetLabel}</span></td>
               <td>
                 <div class="setting-inline">
                   <span class="state-pill ${incomeVisible ? "good" : "danger"}">${incomeVisible ? "View" : "Hidden"}</span>
@@ -3807,9 +4031,14 @@
               <td>${orderCurrencyControl}</td>
               <td>${specialDividerControl}</td>
               <td>
-                <button class="btn ${transferMode === "actors" ? "danger" : "primary"} toggle-transfer-permission" data-id="${actor.id}" type="button">
-                  ${transferMode === "actors" ? "Master Only" : "Allow Actors"}
-                </button>
+                <label class="currency-check">
+                  <input class="transfer-target-toggle" type="checkbox" data-id="${actor.id}" data-target="master" ${canTransferToMaster ? "checked" : ""}>
+                  Master
+                </label>
+                <label class="currency-check">
+                  <input class="transfer-target-toggle" type="checkbox" data-id="${actor.id}" data-target="actor" ${canTransferToActors ? "checked" : ""}>
+                  Actors
+                </label>
               </td>
             </tr>
           `;
@@ -3986,6 +4215,7 @@
       const previousState = structuredClone(state);
       state.actors = state.actors.filter((item) => item.id !== actorId);
       state.settlements = state.settlements.filter((item) => item.actor !== actor.name);
+      state.receivables = state.receivables.filter((item) => item.borrower !== actor.name && item.borrowerActorId !== actorId);
       state.transfers = state.transfers.filter((item) => item.from !== actor.name && item.to !== actor.name);
       state.orders = state.orders.filter((item) => item.broker !== actor.name && item.agent !== actor.name);
       state.chatConversations = state.chatConversations
@@ -4009,11 +4239,13 @@
 
     function resetFinancialData() {
       state.orders = [];
+      state.receivables = [];
       state.transfers = [];
       state.ledger = [];
       state.archives = [];
       state.journalCounter = 0;
       state.orderCounter = 0;
+      state.receivableCounter = 0;
       state.transferCounter = 0;
       state.editingOrderId = "";
       state.editingTransferId = "";
@@ -4085,9 +4317,8 @@
 
     function orderActionsHtml(order, actor) {
       const canForward = actor?.role === "Master" && order.state === "Pending Forward";
-      const canActAsSelectedActor = selectedActorIsOwnLogin();
       const canPay = actorCanPayOrder(order, actor);
-      const canRequestVoid = canActAsSelectedActor && ["Agent", "Special Agent", "Special Broker"].includes(actor?.role) && order.state === "Paid" && order.agent === actor.name && !order.voidRequested && !order.locked;
+      const canRequestVoid = actorCanRequestVoidOrder(order, actor);
       const canApproveVoid = actor?.role === "Master" && order.state === "Void Requested";
       const canModify = ["Broker", "Special Broker"].includes(actor?.role) && order.state === "Returned" && order.broker === actor.name;
       const masterRateSetting = masterRateDivisorSettingFor(order.payoutCurrency || order.sourceCurrency || masterBaseCurrency());
@@ -4214,6 +4445,39 @@
           currency,
           netMinor: balances[item.name]?.[currency] || 0
         })).filter((row) => row.netMinor !== 0 || row.currency === item.currency));
+    }
+
+    function trialBalanceRowsFromLedger() {
+      const balances = actorBalancesFromLedger();
+      return activeActors()
+        .filter((actor) => actor.role !== "Master")
+        .map((actor) => ({
+          actor,
+          balances: supportedCurrencies.reduce((acc, currency) => {
+            acc[currency] = balances[actor.name]?.[currency] || 0;
+            return acc;
+          }, {})
+        }));
+    }
+
+    function trialBalancePosition(values) {
+      const hasActorOwes = values.some((value) => value > 0);
+      const hasMasterOwes = values.some((value) => value < 0);
+      if (hasActorOwes && hasMasterOwes) return { text: "Mixed", className: "" };
+      if (hasActorOwes) return { text: "Actor owes Master", className: "debit" };
+      if (hasMasterOwes) return { text: "Master owes Actor", className: "credit" };
+      return { text: "Zero", className: "" };
+    }
+
+    function trialBalanceAmountCell(currency, netMinor) {
+      if (!netMinor) return `<td>${money(currency, 0)}</td>`;
+      const actorOwes = netMinor > 0;
+      return `
+        <td class="${actorOwes ? "debit" : "credit"}">
+          <strong>${money(currency, Math.abs(netMinor))}</strong>
+          <span class="trial-balance-note">${actorOwes ? "Actor owes Master" : "Master owes Actor"}</span>
+        </td>
+      `;
     }
 
     function masterLedgerBalanceRows(lines) {
@@ -4648,8 +4912,10 @@
       const visibleOrders = actor?.role === "Master"
         ? state.orders
         : state.orders.filter((order) => order.broker === actor?.name || order.agent === actor?.name);
-      const activeOrders = visibleOrders.filter((order) => !["Paid", "Voided", "Cancelled"].includes(order.state) && order.locked !== true);
-      const orderbookOrders = actor?.role === "Master" ? visibleOrders : activeOrders;
+      const activeOrders = visibleOrders
+        .filter((order) => !["Voided", "Cancelled"].includes(order.state) && order.locked !== true)
+        .sort(newestOrderFirst);
+      const orderbookOrders = (actor?.role === "Master" ? visibleOrders : activeOrders).slice().sort(newestOrderFirst);
       const rowsForOrders = (orders) => orders.map((order) => {
         const className = order.state === "Paid"
           ? "good"
@@ -4674,10 +4940,136 @@
       els.dashboardOrderRows.innerHTML = activeOrders.length ? rowsForOrders(activeOrders) : emptyRows;
     }
 
+    function receivablePaidMinor(receivable) {
+      return (receivable.payments || []).reduce((sum, payment) => sum + Number(payment.amountMinor || 0), 0);
+    }
+
+    function visibleReceivablesFor(actor) {
+      return actor?.role === "Master"
+        ? state.receivables
+        : state.receivables.filter((item) => item.borrower === actor?.name || item.borrowerActorId === actor?.id);
+    }
+
+    function renderReceivables() {
+      const actor = selectedActor();
+      const rows = visibleReceivablesFor(actor)
+        .slice()
+        .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+      if (rows.length === 0) {
+        els.receivableRows.innerHTML = '<tr><td colspan="8">No credit receivables yet.</td></tr>';
+        return;
+      }
+      const bodyRows = rows.map((item) => {
+        const paidMinor = receivablePaidMinor(item);
+        const balanceMinor = Math.max(0, Number(item.principalMinor || 0) - paidMinor);
+        const canCollect = balanceMinor > 0 && (actor?.role === "Master" || item.borrower === actor?.name || item.borrowerActorId === actor?.id);
+        const paymentHistory = (item.payments || [])
+          .map((payment) => `${displayDate(payment.paidAt)} ${money(item.currency, payment.amountMinor)}`)
+          .join(" / ");
+        const details = [
+          item.senderName ? `Sender: ${item.senderName}` : "",
+          item.receiverName ? `Receiver: ${item.receiverName}` : "",
+          item.phoneNumber ? `Phone: ${item.phoneNumber}` : "",
+          item.accountNumber ? `Account: ${item.accountNumber}` : "",
+          item.remarks ? `Remarks: ${item.remarks}` : "",
+          paymentHistory ? `Payments: ${paymentHistory}` : ""
+        ].filter(Boolean).join(" - ");
+        return `
+          <tr>
+            <td>${escapeHtml(displayDate(item.createdAt))}</td>
+            <td><strong>${escapeHtml(item.id)}</strong></td>
+            <td>${escapeHtml(item.borrower)}</td>
+            <td>${escapeHtml(details || "Credit order")}</td>
+            <td>${money(item.currency, item.principalMinor || 0)}</td>
+            <td>${money(item.currency, paidMinor)}</td>
+            <td><strong>${money(item.currency, balanceMinor)}</strong></td>
+            <td>
+              ${canCollect ? `
+                <div class="setting-inline">
+                  <input class="receivable-payment" data-id="${item.id}" inputmode="decimal" placeholder="Amount">
+                  <button class="btn primary collect-receivable" data-id="${item.id}" type="button">Pay</button>
+                </div>
+              ` : `<span class="state-pill ${balanceMinor === 0 ? "good" : "warn"}">${balanceMinor === 0 ? "Paid" : "Open"}</span>`}
+            </td>
+          </tr>
+        `;
+      });
+      const totals = rows.reduce((acc, item) => {
+        const currency = item.currency || "USD";
+        acc[currency] ||= { principal: 0, paid: 0 };
+        acc[currency].principal += Number(item.principalMinor || 0);
+        acc[currency].paid += receivablePaidMinor(item);
+        return acc;
+      }, {});
+      const totalRows = Object.entries(totals).map(([currency, total]) => {
+        const balance = Math.max(0, total.principal - total.paid);
+        return `
+          <tr>
+            <td colspan="4"><strong>Total ${escapeHtml(currency)}</strong></td>
+            <td><strong>${money(currency, total.principal)}</strong></td>
+            <td><strong>${money(currency, total.paid)}</strong></td>
+            <td><strong>${money(currency, balance)}</strong></td>
+            <td></td>
+          </tr>
+        `;
+      });
+      els.receivableRows.innerHTML = [...bodyRows, ...totalRows].join("");
+    }
+
+    function newestOrderFirst(a, b) {
+      const timeA = Math.max(new Date(a?.sentAt || 0).getTime(), new Date(a?.createdAt || 0).getTime());
+      const timeB = Math.max(new Date(b?.sentAt || 0).getTime(), new Date(b?.createdAt || 0).getTime());
+      if (timeA !== timeB) return timeB - timeA;
+      const numberA = Number(String(a?.id || "").match(/^ORD-(\d+)$/)?.[1] || 0);
+      const numberB = Number(String(b?.id || "").match(/^ORD-(\d+)$/)?.[1] || 0);
+      return numberB - numberA;
+    }
+
+    function renderTrialBalance() {
+      const actor = selectedActor();
+      const masterView = actor?.role === "Master";
+      els.trialBalanceSection?.classList.toggle("hidden", !masterView);
+      if (!masterView) {
+        if (els.trialBalanceRows) els.trialBalanceRows.innerHTML = "";
+        return;
+      }
+      const rows = trialBalanceRowsFromLedger();
+      if (rows.length === 0) {
+        els.trialBalanceRows.innerHTML = '<tr><td colspan="7">No actors attached to Master.</td></tr>';
+        return;
+      }
+      const totals = supportedCurrencies.reduce((acc, currency) => {
+        acc[currency] = rows.reduce((sum, row) => sum + (row.balances[currency] || 0), 0);
+        return acc;
+      }, {});
+      const bodyRows = rows.map((row) => {
+        const values = supportedCurrencies.map((currency) => row.balances[currency] || 0);
+        const position = trialBalancePosition(values);
+        return `
+          <tr>
+            <td><strong>${escapeHtml(row.actor.name)}</strong></td>
+            <td>${escapeHtml(row.actor.role)}</td>
+            ${supportedCurrencies.map((currency) => trialBalanceAmountCell(currency, row.balances[currency] || 0)).join("")}
+            <td class="${position.className}"><strong>${position.text}</strong></td>
+          </tr>
+        `;
+      }).join("");
+      const totalValues = supportedCurrencies.map((currency) => totals[currency] || 0);
+      const totalPosition = trialBalancePosition(totalValues);
+      els.trialBalanceRows.innerHTML = `${bodyRows}
+        <tr class="trial-balance-total">
+          <td colspan="2"><strong>Total</strong></td>
+          ${supportedCurrencies.map((currency) => trialBalanceAmountCell(currency, totals[currency] || 0)).join("")}
+          <td class="${totalPosition.className}"><strong>${totalPosition.text === "Zero" ? "All Zero" : totalPosition.text}</strong></td>
+        </tr>
+      `;
+    }
+
     function renderLedger() {
       const { actor, ledgerActor, lines: visibleLines } = currentLedgerContext();
       els.exportLedgerExcelButton.disabled = !ledgerActor;
       els.exportLedgerPdfButton.disabled = !ledgerActor;
+      renderTrialBalance();
       renderIncomeStatement(visibleLines, ledgerActor);
       if (visibleLines.length === 0) {
         const emptyName = actor?.role === "Master" && ledgerActor ? `${escapeHtml(ledgerActor.name)} ledger is empty.` : "No journal entries posted. Ledger balance is zero.";
@@ -5230,6 +5622,20 @@
       return Boolean(assignedIdMatches || assignedNameMatches);
     }
 
+    function actorCanRequestVoidOrder(order, actor = selectedActor()) {
+      if (!order || order.state !== "Paid" || order.voidRequested || order.locked) return false;
+      if (!["Agent", "Special Agent", "Special Broker"].includes(actor?.role)) return false;
+      if (currentAuth?.membership?.role === "Master" || currentAuth?.membership?.role === "Owner") return false;
+      if (!currentAuth) return order.agent === actor.name || (order.agentActorId && order.agentActorId === actor.id);
+      if (order.agent === actor.name || (order.agentActorId && order.agentActorId === actor.id)) return true;
+      const membership = currentAuth.membership || {};
+      const role = membership.actorRole || actor?.role;
+      if (!["Agent", "Special Agent", "Special Broker"].includes(role)) return false;
+      const assignedIdMatches = order.agentActorId && order.agentActorId === membership.actorId;
+      const assignedNameMatches = [membership.actorName, currentAuth.user?.name, actor?.name].filter(Boolean).includes(order.agent);
+      return Boolean(assignedIdMatches || assignedNameMatches);
+    }
+
     function signedInActorCanPayOrder(order) {
       return actorCanPayOrder(order, selectedActor());
     }
@@ -5512,6 +5918,20 @@
       els.confirmShade.classList.remove("open");
     }
 
+    function closePasswordReset() {
+      els.passwordShade.classList.remove("open");
+      els.passwordForm.reset();
+      els.passwordError.classList.remove("visible");
+    }
+
+    function openPasswordReset() {
+      if (!currentAuth) return;
+      els.passwordForm.reset();
+      els.passwordError.classList.remove("visible");
+      els.passwordShade.classList.add("open");
+      document.getElementById("currentPassword").focus();
+    }
+
     function confirmAction(message, onYes, onNo = () => {}) {
       pendingConfirmation = { onYes, onNo };
       els.confirmMessage.textContent = message;
@@ -5543,8 +5963,54 @@
       renderAll();
     });
 
+    document.addEventListener("change", (event) => {
+      const checkbox = event.target.closest(".transfer-target-toggle");
+      if (!checkbox || selectedActor()?.role !== "Master") return;
+      const actor = state.actors.find((item) => item.id === checkbox.dataset.id);
+      if (!actor || actor.role === "Master") return;
+      const row = checkbox.closest("tr");
+      const toMaster = row?.querySelector('.transfer-target-toggle[data-target="master"]')?.checked === true;
+      const toActors = row?.querySelector('.transfer-target-toggle[data-target="actor"]')?.checked === true;
+      actor.transferMode = transferModeFromTargets(toMaster, toActors);
+      actor.transferEnabled = actor.transferMode !== "none";
+      if (state.selectedActorId === actor.id && state.activeView === "transfers" && actor.transferEnabled === false) {
+        state.activeView = "dashboard";
+      }
+      renderAll();
+    });
+
     els.menuButton.addEventListener("click", openDrawer);
     els.drawerShade.addEventListener("click", closeDrawer);
+    els.passwordButton.addEventListener("click", openPasswordReset);
+    els.passwordCancel.addEventListener("click", closePasswordReset);
+    els.passwordShade.addEventListener("click", (event) => {
+      if (event.target === els.passwordShade) closePasswordReset();
+    });
+    els.passwordForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const currentPassword = document.getElementById("currentPassword").value;
+      const newPassword = document.getElementById("newPassword").value;
+      const confirmPassword = document.getElementById("confirmPassword").value;
+      els.passwordError.classList.remove("visible");
+      if (newPassword.length < 6 || newPassword !== confirmPassword) {
+        els.passwordError.textContent = newPassword.length < 6
+          ? "Enter a new password of at least 6 characters."
+          : "New password and confirmation must match.";
+        els.passwordError.classList.add("visible");
+        return;
+      }
+      try {
+        await api("/api/auth/password", {
+          method: "POST",
+          body: { currentPassword, newPassword }
+        });
+        notifyEvent("Password updated", "Use the new password next time you log in.");
+        closePasswordReset();
+      } catch (error) {
+        els.passwordError.textContent = error.message;
+        els.passwordError.classList.add("visible");
+      }
+    });
 
     els.confirmYes.addEventListener("click", () => {
       const action = pendingConfirmation?.onYes;
@@ -5600,6 +6066,10 @@
 
     document.getElementById("orderForm").addEventListener("input", (event) => {
       state.orderValidationVisible = false;
+      if (event.target?.id === "orderFundingType") {
+        updateOrderFundingMode();
+        return;
+      }
       if (event.target?.id === "sourceAmount") {
         updateOrderPayout("source");
       }
@@ -5635,6 +6105,8 @@
       updateOrderPayout("rate", false);
       buildJournalPreview();
     });
+
+    document.getElementById("orderFundingType").addEventListener("change", updateOrderFundingMode);
 
     els.transferForm = document.getElementById("transferForm");
     els.transferForm.addEventListener("input", (event) => {
@@ -5860,6 +6332,25 @@
         buildJournalPreview();
         return;
       }
+      if (!input.fundingType) {
+        showOrderError("Choose whether this order is Cash or Credit.");
+        return;
+      }
+      if (input.sourceAmountMinor <= 0) {
+        showOrderError("Enter a source amount greater than zero.");
+        return;
+      }
+      if (input.fundingType === "credit") {
+        confirmAction("Register this order as a credit receivable?", () => {
+          const receivable = buildReceivableRecord(input);
+          state.receivables.unshift(receivable);
+          clearOrderDetails();
+          notifyEvent("Receivable registered", `${receivable.id} recorded for ${receivable.borrower}.`);
+          setView("receivables");
+          renderAll();
+        });
+        return;
+      }
       if (input.broker === input.agent) {
         showOrderError("Broker and payout actor must be different.");
         return;
@@ -6060,17 +6551,6 @@
       const removeActorButton = event.target.closest(".remove-actor");
       if (removeActorButton) {
         await removeActor(removeActorButton.dataset.id);
-        return;
-      }
-
-      const permissionButton = event.target.closest(".toggle-transfer-permission");
-      if (permissionButton) {
-        if (selectedActor()?.role !== "Master") return;
-        const actor = state.actors.find((item) => item.id === permissionButton.dataset.id);
-        if (!actor || actor.role === "Master") return;
-        actor.transferEnabled = true;
-        actor.transferMode = actor.transferMode === "actors" ? "master" : "actors";
-        renderAll();
         return;
       }
 
@@ -6446,11 +6926,41 @@
         return;
       }
 
+      const collectReceivableButton = event.target.closest(".collect-receivable");
+      if (collectReceivableButton) {
+        const actor = selectedActor();
+        const receivable = state.receivables.find((item) => item.id === collectReceivableButton.dataset.id);
+        if (!receivable) return;
+        const input = collectReceivableButton.closest(".setting-inline")?.querySelector(".receivable-payment");
+        const amountMinor = parseMoney(input?.value || "", receivable.currency || "USD");
+        const paidMinor = receivablePaidMinor(receivable);
+        const balanceMinor = Math.max(0, Number(receivable.principalMinor || 0) - paidMinor);
+        const canCollect = actor?.role === "Master" || receivable.borrower === actor?.name || receivable.borrowerActorId === actor?.id;
+        if (!canCollect) return;
+        if (amountMinor <= 0 || amountMinor > balanceMinor) {
+          input?.setCustomValidity(`Enter an amount up to ${formatMinor(balanceMinor, receivable.currency || "USD")}.`);
+          input?.reportValidity();
+          return;
+        }
+        input?.setCustomValidity("");
+        receivable.payments ||= [];
+        receivable.payments.push({
+          id: `PAY-${Date.now()}`,
+          amountMinor,
+          paidAt: new Date().toISOString(),
+          receivedBy: actor?.name || "Unknown"
+        });
+        receivable.updatedAt = new Date().toISOString();
+        notifyEvent("Receivable paid", `${money(receivable.currency || "USD", amountMinor)} collected for ${receivable.id}.`);
+        renderAll();
+        return;
+      }
+
       const requestVoidButton = event.target.closest(".request-void-order");
       if (requestVoidButton) {
         const actor = selectedActor();
         const order = state.orders.find((item) => item.id === requestVoidButton.dataset.id);
-        if (!order || order.locked || order.state !== "Paid" || order.agent !== actor?.name) return;
+        if (!actorCanRequestVoidOrder(order, actor)) return;
         confirmAction("Send a void request for this paid order?", () => {
           order.state = "Void Requested";
           order.voidRequested = true;
@@ -6604,12 +7114,13 @@
       renderInviteCodes();
       renderChat();
       renderOrders();
+      renderReceivables();
       renderTransfers();
       renderLedger();
       renderSettlements();
       renderArchive();
       renderMetrics();
-      buildJournalPreview();
+      updateOrderFundingMode();
       saveState();
     }
 

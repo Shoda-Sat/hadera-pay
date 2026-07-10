@@ -39,6 +39,7 @@ const blankDb = () => ({
   invites: [],
   sessions: [],
   appStates: {},
+  ownerPasswordHash: "",
 });
 
 async function readPersistedDb() {
@@ -353,6 +354,13 @@ function nextOrderNumberFromOrders(orders = []) {
   }, 1);
 }
 
+function nextReceivableNumberFromReceivables(receivables = []) {
+  return receivables.reduce((next, receivable) => {
+    const match = String(receivable?.id || "").match(/^REC-(\d+)$/);
+    return match ? Math.max(next, Number(match[1]) + 1) : next;
+  }, 1);
+}
+
 function mergeByKey(existingItems = [], incomingItems = [], keyForItem) {
   const merged = new Map();
   [...existingItems, ...incomingItems].forEach((item) => {
@@ -376,11 +384,24 @@ function mergeChatConversations(existingItems = [], incomingItems = []) {
   });
 }
 
+function mergeReceivables(existingItems = [], incomingItems = []) {
+  const merged = mergeById(existingItems, incomingItems);
+  return merged.map((receivable) => {
+    const existing = existingItems.find((item) => item.id === receivable.id);
+    const incoming = incomingItems.find((item) => item.id === receivable.id);
+    return {
+      ...receivable,
+      payments: mergeById(existing?.payments || [], incoming?.payments || []),
+    };
+  });
+}
+
 function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   const currentState = db.appStates[workspaceId] || {};
   const nextState = { ...currentState, ...incomingState };
   nextState.actors = mergeById(currentState.actors, incomingState.actors);
   nextState.orders = mergeOrders(currentState.orders, incomingState.orders);
+  nextState.receivables = mergeReceivables(currentState.receivables, incomingState.receivables);
   nextState.transfers = mergeById(currentState.transfers, incomingState.transfers);
   nextState.ledger = mergeByKey(currentState.ledger, incomingState.ledger, (line) =>
     [line.journal, line.source, line.account, line.direction, line.currency, line.amountMinor, line.postedAt].join(":")
@@ -391,6 +412,7 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   nextState.chatConversations = mergeChatConversations(currentState.chatConversations, incomingState.chatConversations);
   nextState.actors = mergeById(workspaceActors(db, workspaceId), nextState.actors);
   nextState.orderCounter = Math.max(Number(currentState.orderCounter || 0), Number(incomingState.orderCounter || 0), nextOrderNumberFromOrders(nextState.orders) - 1);
+  nextState.receivableCounter = Math.max(Number(currentState.receivableCounter || 0), Number(incomingState.receivableCounter || 0), nextReceivableNumberFromReceivables(nextState.receivables) - 1);
   return nextState;
 }
 
@@ -511,7 +533,10 @@ async function handleApi(request, response, url) {
     const body = await readJson(request);
     const rawLogin = String(body.email || body.username || "").trim();
     const rawPassword = String(body.password || "").trim();
-    if (rawLogin.toLowerCase() === ownerUser.toLowerCase() && rawPassword === ownerPassword) {
+    if (
+      rawLogin.toLowerCase() === ownerUser.toLowerCase() &&
+      (db.ownerPasswordHash ? verifyPassword(rawPassword, db.ownerPasswordHash) : rawPassword === ownerPassword)
+    ) {
       const session = createSession(db, "__owner", "__owner");
       await saveDb(db);
       response.setHeader("Set-Cookie", `hp_session=${encodeURIComponent(session.id)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=1209600`);
@@ -546,6 +571,29 @@ async function handleApi(request, response, url) {
 
   const session = await requireSession(request, response, db);
   if (!session) return;
+
+  if (url.pathname === "/api/auth/password" && method === "POST") {
+    const body = await readJson(request);
+    const currentPassword = String(body.currentPassword || "");
+    const newPassword = String(body.newPassword || "");
+    if (newPassword.length < 6) return sendJson(response, 400, { error: "Enter a new password of at least 6 characters." });
+    if (session.user.id === "__owner") {
+      const ownerMatches = db.ownerPasswordHash
+        ? verifyPassword(currentPassword, db.ownerPasswordHash)
+        : currentPassword === ownerPassword;
+      if (!ownerMatches) return sendJson(response, 401, { error: "Current password is incorrect." });
+      db.ownerPasswordHash = hashPassword(newPassword);
+      await saveDb(db);
+      sendJson(response, 200, { ok: true });
+      return;
+    }
+    const user = db.users.find((item) => item.id === session.user.id);
+    if (!user || !verifyPassword(currentPassword, user.passwordHash)) return sendJson(response, 401, { error: "Current password is incorrect." });
+    user.passwordHash = hashPassword(newPassword);
+    await saveDb(db);
+    sendJson(response, 200, { ok: true });
+    return;
+  }
 
   if (url.pathname === "/api/owner/masters" && method === "GET") {
     if (!requireOwner(session, response)) return;
@@ -695,6 +743,7 @@ async function handleApi(request, response, url) {
     const nextState = { ...currentState };
     nextState.actors = (currentState.actors || []).filter((actor) => actor?.id !== actorId);
     nextState.settlements = (currentState.settlements || []).filter((item) => item?.actor !== actorName);
+    nextState.receivables = (currentState.receivables || []).filter((item) => item?.borrower !== actorName && item?.borrowerActorId !== actorId);
     nextState.transfers = (currentState.transfers || []).filter((item) => item?.from !== actorName && item?.to !== actorName);
     nextState.orders = (currentState.orders || []).filter((item) => item?.broker !== actorName && item?.agent !== actorName);
     nextState.chatConversations = (currentState.chatConversations || [])
