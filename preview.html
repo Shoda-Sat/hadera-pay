@@ -2582,21 +2582,19 @@
     function mergeSharedState(remoteState) {
       if (!remoteState || typeof remoteState !== "object") return false;
       const deletedActorIds = new Set(remoteState.deletedActorIds || []);
-      const deletedActorNames = new Set(remoteState.deletedActorNames || []);
+      const remoteActors = Array.isArray(remoteState.actors) ? remoteState.actors : [];
       state.actors = normalizeActors(mergeById(state.actors, remoteState.actors || []));
-      state.actors = state.actors.filter((actor) => !deletedActorIds.has(actor.id) && !deletedActorNames.has(actor.name));
+      state.actors = state.actors.filter((actor) => !deletedActorIds.has(actor.id) || remoteActors.some((remoteActor) => remoteActor?.id === actor.id));
       state.orders = mergeOrders(state.orders, remoteState.orders || []);
-      state.orders = state.orders.filter((order) => !deletedActorNames.has(order.broker) && !deletedActorNames.has(order.agent));
       state.receivables = mergeReceivables(state.receivables, remoteState.receivables || []);
-      state.receivables = state.receivables.filter((item) => !deletedActorIds.has(item.borrowerActorId) && !deletedActorNames.has(item.borrower));
+      state.receivables = state.receivables.filter((item) => !deletedActorIds.has(item.borrowerActorId));
       state.transfers = normalizeTransfers(mergeById(state.transfers, remoteState.transfers || []));
-      state.transfers = state.transfers.filter((item) => !deletedActorNames.has(item.from) && !deletedActorNames.has(item.to));
       state.ledger = mergeLedgerLines(state.ledger, remoteState.ledger || []);
       state.settlements = Array.isArray(remoteState.settlements) ? remoteState.settlements : state.settlements;
       state.archives = mergeById(state.archives, remoteState.archives || []);
       state.chatConversations = mergeChatConversations(state.chatConversations, remoteState.chatConversations || []);
       state.deletedActorIds = Array.from(deletedActorIds);
-      state.deletedActorNames = Array.from(deletedActorNames);
+      state.deletedActorNames = [];
       state.buyingRates = normalizeBuyingRates(remoteState.buyingRates || { eurToUsdDivider: remoteState.eurToUsdDivider });
       state.orderCounter = Math.max(Number(state.orderCounter || 0), nextOrderNumberFromOrders() - 1, Number(remoteState.orderCounter || 0));
       state.receivableCounter = Math.max(Number(state.receivableCounter || 0), nextReceivableNumberFromReceivables() - 1, Number(remoteState.receivableCounter || 0));
@@ -2654,17 +2652,10 @@
       }
       const exists = state.actors.some((actor) => actor.id === membership.actorId);
       if (!exists) {
-        state.actors.push({
-          id: membership.actorId,
-          name: membership.actorName,
-          role: membership.actorRole,
-          currency: membership.currency || "USD",
-          workingCurrencies: membership.actorRole === "Special Agent" ? membership.workingCurrencies || [membership.currency || "USD"] : [],
-          active: true,
-          transferEnabled: true,
-          transferMode: "master"
-        });
+        state.actors.push(sessionActorProfile());
       }
+      state.deletedActorIds = (state.deletedActorIds || []).filter((id) => id !== membership.actorId);
+      state.deletedActorNames = (state.deletedActorNames || []).filter((name) => name !== membership.actorName);
       state.selectedActorId = membership.actorId;
     }
 
@@ -3284,10 +3275,27 @@
       return state.actors.filter((actor) => actor.active !== false);
     }
 
+    function sessionActorProfile() {
+      const membership = currentAuth?.membership;
+      if (!membership || membership.role === "Master" || membership.role === "Owner") return null;
+      return {
+        id: membership.actorId,
+        name: membership.actorName,
+        role: membership.actorRole,
+        currency: membership.currency || "USD",
+        workingCurrencies: membership.actorRole === "Special Agent" ? membership.workingCurrencies || [membership.currency || "USD"] : [],
+        active: true,
+        transferEnabled: true,
+        transferMode: "master",
+        incomeStatementVisible: true
+      };
+    }
+
     function availableProfiles() {
       const actors = activeActors();
       if (!currentAuth || currentAuth.membership?.role === "Master") return actors;
-      return actors.filter((actor) => actor.id === currentAuth.membership.actorId);
+      const actorProfiles = actors.filter((actor) => actor.id === currentAuth.membership.actorId);
+      return actorProfiles.length ? actorProfiles : [sessionActorProfile()].filter(Boolean);
     }
 
     function selectedActor() {

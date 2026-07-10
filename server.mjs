@@ -399,16 +399,16 @@ function mergeReceivables(existingItems = [], incomingItems = []) {
 function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   const currentState = db.appStates[workspaceId] || {};
   const nextState = { ...currentState, ...incomingState };
+  const membershipActors = workspaceActors(db, workspaceId);
+  const activeActorIds = new Set(membershipActors.map((actor) => actor.id));
   const deletedActorIds = new Set([...(currentState.deletedActorIds || []), ...(incomingState.deletedActorIds || [])]);
-  const deletedActorNames = new Set([...(currentState.deletedActorNames || []), ...(incomingState.deletedActorNames || [])]);
+  activeActorIds.forEach((actorId) => deletedActorIds.delete(actorId));
   nextState.actors = mergeById(currentState.actors, incomingState.actors);
-  nextState.actors = nextState.actors.filter((actor) => !deletedActorIds.has(actor?.id) && !deletedActorNames.has(actor?.name));
+  nextState.actors = nextState.actors.filter((actor) => !deletedActorIds.has(actor?.id));
   nextState.orders = mergeOrders(currentState.orders, incomingState.orders);
-  nextState.orders = nextState.orders.filter((order) => !deletedActorNames.has(order?.broker) && !deletedActorNames.has(order?.agent));
   nextState.receivables = mergeReceivables(currentState.receivables, incomingState.receivables);
-  nextState.receivables = nextState.receivables.filter((item) => !deletedActorIds.has(item?.borrowerActorId) && !deletedActorNames.has(item?.borrower));
+  nextState.receivables = nextState.receivables.filter((item) => !deletedActorIds.has(item?.borrowerActorId));
   nextState.transfers = mergeById(currentState.transfers, incomingState.transfers);
-  nextState.transfers = nextState.transfers.filter((item) => !deletedActorNames.has(item?.from) && !deletedActorNames.has(item?.to));
   nextState.ledger = mergeByKey(currentState.ledger, incomingState.ledger, (line) =>
     [line.journal, line.source, line.account, line.direction, line.currency, line.amountMinor, line.postedAt].join(":")
   );
@@ -416,10 +416,10 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
     archive.id || [archive.actor, archive.closedAt, archive.closedBy].join(":")
   );
   nextState.chatConversations = mergeChatConversations(currentState.chatConversations, incomingState.chatConversations);
-  nextState.actors = mergeById(workspaceActors(db, workspaceId), nextState.actors);
-  nextState.actors = nextState.actors.filter((actor) => !deletedActorIds.has(actor?.id) && !deletedActorNames.has(actor?.name));
+  nextState.actors = mergeById(membershipActors, nextState.actors);
+  nextState.actors = nextState.actors.filter((actor) => activeActorIds.has(actor?.id) || !deletedActorIds.has(actor?.id));
   nextState.deletedActorIds = Array.from(deletedActorIds);
-  nextState.deletedActorNames = Array.from(deletedActorNames);
+  nextState.deletedActorNames = [];
   nextState.orderCounter = Math.max(Number(currentState.orderCounter || 0), Number(incomingState.orderCounter || 0), nextOrderNumberFromOrders(nextState.orders) - 1);
   nextState.receivableCounter = Math.max(Number(currentState.receivableCounter || 0), Number(incomingState.receivableCounter || 0), nextReceivableNumberFromReceivables(nextState.receivables) - 1);
   return nextState;
