@@ -416,6 +416,55 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   return nextState;
 }
 
+function resetWorkspaceState(db, workspaceId, scope = "data") {
+  const currentState = db.appStates[workspaceId] || {};
+  const allActors = mergeById(workspaceActors(db, workspaceId), currentState.actors || []);
+  const masterActor = allActors.find((actor) => actor?.role === "Master") || {
+    id: "ACT-0",
+    name: "Master",
+    role: "Master",
+    currency: "USD",
+    active: true,
+    transferEnabled: true,
+    transferMode: "both",
+  };
+  const actors = scope === "wipe"
+    ? [{ ...masterActor, id: "ACT-0", name: "Master", role: "Master", active: true, transferEnabled: true, transferMode: "both" }]
+    : allActors;
+  const nextState = {
+    ...currentState,
+    actors,
+    orders: [],
+    receivables: [],
+    transfers: [],
+    ledger: [],
+    archives: [],
+    settlements: scope === "wipe"
+      ? []
+      : actors
+        .filter((actor) => actor?.role !== "Master")
+        .map((actor) => ({ actor: actor.name, currency: actor.currency || "USD", netMinor: 0 })),
+    journalCounter: 0,
+    orderCounter: 0,
+    receivableCounter: 0,
+    transferCounter: 0,
+    editingOrderId: "",
+    editingTransferId: "",
+    selectedLedgerActor: "",
+    expandedFixedRateActorId: "",
+    expandedSpecialDividerActorId: "",
+    orderState: "Draft",
+  };
+  if (scope === "wipe") {
+    nextState.actorCounter = 0;
+    nextState.selectedActorId = "ACT-0";
+    nextState.chatConversations = [];
+    nextState.chatCounter = 0;
+    nextState.messageCounter = 0;
+  }
+  return nextState;
+}
+
 async function requireSession(request, response, db) {
   const session = publicSession(db, parseCookies(request).hp_session);
   if (!session) {
@@ -752,6 +801,29 @@ async function handleApi(request, response, url) {
     if (nextState.selectedLedgerActor === actorName) nextState.selectedLedgerActor = "";
     if (nextState.expandedFixedRateActorId === actorId) nextState.expandedFixedRateActorId = "";
     if (nextState.expandedSpecialDividerActorId === actorId) nextState.expandedSpecialDividerActorId = "";
+    db.appStates[session.workspace.id] = nextState;
+    await saveDb(db);
+    sendJson(response, 200, { ok: true, state: nextState });
+    return;
+  }
+
+  if (url.pathname === "/api/app-state/reset" && method === "POST") {
+    if (session.membership.role !== "Master") return sendJson(response, 403, { error: "Only Master can reset workspace data." });
+    const body = await readJson(request);
+    const scope = body.scope === "wipe" ? "wipe" : "data";
+    if (scope === "wipe") {
+      const removedActorUserIds = db.memberships
+        .filter((membership) => membership.workspaceId === session.workspace.id && membership.role !== "Master")
+        .map((membership) => membership.userId);
+      db.memberships = db.memberships.filter((membership) =>
+        membership.workspaceId !== session.workspace.id || membership.role === "Master"
+      );
+      db.invites = db.invites.filter((invite) => invite.workspaceId !== session.workspace.id);
+      db.sessions = db.sessions.filter((item) =>
+        item.workspaceId !== session.workspace.id || !removedActorUserIds.includes(item.userId)
+      );
+    }
+    const nextState = resetWorkspaceState(db, session.workspace.id, scope);
     db.appStates[session.workspace.id] = nextState;
     await saveDb(db);
     sendJson(response, 200, { ok: true, state: nextState });

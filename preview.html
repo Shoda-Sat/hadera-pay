@@ -2087,36 +2087,6 @@
                 </table>
               </div>
             </div>
-
-            <div class="panel span-12">
-              <div class="panel-header">
-                <h2>Master Reset Permit</h2>
-                <span class="state-pill danger">Restricted</span>
-              </div>
-              <div class="panel-body">
-                <form id="resetForm">
-                  <div class="form-grid">
-                    <div class="field">
-                      <label for="resetPermit">Permit phrase</label>
-                      <input id="resetPermit" placeholder="MASTER-RESET">
-                      <span class="field-error" id="resetError">Enter MASTER-RESET to clear financial data.</span>
-                    </div>
-                    <div class="field">
-                      <label for="resetScope">Reset scope</label>
-                      <select id="resetScope">
-                        <option>Financial data only</option>
-                      </select>
-                    </div>
-                  </div>
-                  <div class="actions">
-                    <button class="btn danger" type="submit">
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v5"/><path d="M14 11v5"/></svg>
-                      Reset To Zero
-                    </button>
-                  </div>
-                </form>
-              </div>
-            </div>
           </div>
         </section>
 
@@ -2181,10 +2151,40 @@
             <div class="panel-body table-wrap">
               <table>
                 <thead>
-                  <tr><th>Actor</th><th>Role</th><th>Currency</th><th>Transfer Access</th><th>Income Statement</th><th>Order Currency Access</th><th>Special Agent Divisor / %</th><th>Action</th></tr>
+                  <tr><th>Actor</th><th>Role</th><th>Currency</th><th>Transfer Access</th><th>Action</th><th>Income Statement</th><th>Order Currency Access</th><th>Special Agent Divisor / %</th></tr>
                 </thead>
                 <tbody id="permissionRows"></tbody>
               </table>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-header">
+              <h2>Master Reset Permit</h2>
+              <span class="state-pill danger">Restricted</span>
+            </div>
+            <div class="panel-body">
+              <form id="resetForm">
+                <div class="form-grid">
+                  <div class="field">
+                    <label for="resetPermit">Permit phrase</label>
+                    <input id="resetPermit" placeholder="MASTER-RESET">
+                    <span class="field-error" id="resetError">Enter MASTER-RESET to continue.</span>
+                  </div>
+                  <div class="field">
+                    <label for="resetScope">Reset scope</label>
+                    <select id="resetScope">
+                      <option value="data">Erase data - data only</option>
+                      <option value="wipe">Wipe data - data and all Actors</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="actions">
+                  <button class="btn danger" type="submit">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v5"/><path d="M14 11v5"/></svg>
+                    Apply Reset
+                  </button>
+                </div>
+              </form>
             </div>
           </div>
           <div class="panel">
@@ -2750,6 +2750,7 @@
       profileBadge: document.getElementById("profileBadge"),
       actorRows: document.getElementById("actorRows"),
       permissionRows: document.getElementById("permissionRows"),
+      resetScope: document.getElementById("resetScope"),
       subscriptionRows: document.getElementById("subscriptionRows"),
       subscriptionError: document.getElementById("subscriptionError"),
       inviteRows: document.getElementById("inviteRows"),
@@ -4021,16 +4022,6 @@
               <td>${actor.role === "Special Agent" ? `${escapeHtml(actor.currency)} / ${(actor.workingCurrencies || [actor.currency]).map(escapeHtml).join(", ")}` : escapeHtml(actor.currency)}</td>
               <td><span class="state-pill ${transferStatusClass}">${transferTargetLabel}</span></td>
               <td>
-                <div class="setting-inline">
-                  <span class="state-pill ${incomeVisible ? "good" : "danger"}">${incomeVisible ? "View" : "Hidden"}</span>
-                  <button class="btn ${incomeVisible ? "danger" : "primary"} toggle-income-permission" data-id="${actor.id}" type="button">
-                    ${incomeVisible ? "Hide" : "View"}
-                  </button>
-                </div>
-              </td>
-              <td>${orderCurrencyControl}</td>
-              <td>${specialDividerControl}</td>
-              <td>
                 <label class="currency-check">
                   <input class="transfer-target-toggle" type="checkbox" data-id="${actor.id}" data-target="master" ${canTransferToMaster ? "checked" : ""}>
                   Master
@@ -4040,6 +4031,16 @@
                   Actors
                 </label>
               </td>
+              <td>
+                <div class="setting-inline">
+                  <span class="state-pill ${incomeVisible ? "good" : "danger"}">${incomeVisible ? "View" : "Hidden"}</span>
+                  <button class="btn ${incomeVisible ? "danger" : "primary"} toggle-income-permission" data-id="${actor.id}" type="button">
+                    ${incomeVisible ? "Hide" : "View"}
+                  </button>
+                </div>
+              </td>
+              <td>${orderCurrencyControl}</td>
+              <td>${specialDividerControl}</td>
             </tr>
           `;
         });
@@ -4237,7 +4238,7 @@
       }
     }
 
-    function resetFinancialData() {
+    function resetFinancialData(render = true) {
       state.orders = [];
       state.receivables = [];
       state.transfers = [];
@@ -4258,7 +4259,22 @@
       els.orderState.textContent = "Draft";
       els.orderState.className = "state-pill warn";
       els.voidButton.disabled = true;
-      renderAll();
+      if (render) renderAll();
+    }
+
+    function wipeActorData() {
+      const masterActor = state.actors.find((actor) => actor.role === "Master") ||
+        structuredClone(defaultState.actors.find((actor) => actor.role === "Master"));
+      state.actors = [{ ...masterActor, id: "ACT-0", name: "Master", role: "Master", active: true, transferEnabled: true, transferMode: "both" }];
+      state.actorCounter = 0;
+      state.selectedActorId = "ACT-0";
+      state.selectedLedgerActor = "";
+      state.expandedFixedRateActorId = "";
+      state.expandedSpecialDividerActorId = "";
+      state.chatConversations = [];
+      state.chatCounter = 0;
+      state.messageCounter = 0;
+      state.settlements = [];
     }
 
     function ensureZeroSettlementRows() {
@@ -6312,15 +6328,40 @@
       renderAll();
     });
 
-    document.getElementById("resetForm").addEventListener("submit", (event) => {
+    document.getElementById("resetForm").addEventListener("submit", async (event) => {
       event.preventDefault();
+      els.resetError.textContent = "Enter MASTER-RESET to continue.";
       const allowed = els.resetPermit.value.trim() === "MASTER-RESET";
       els.resetError.classList.toggle("visible", !allowed);
       if (!allowed) return;
-      resetFinancialData();
-      els.resetPermit.value = "";
-      els.resetError.classList.remove("visible");
-      setView("dashboard");
+      const scope = els.resetScope.value === "wipe" ? "wipe" : "data";
+      try {
+        if (currentAuth && remoteStateReady) {
+          const result = await api("/api/app-state/reset", { method: "POST", body: { scope } });
+          const nextState = result.state || {};
+          replaceState({
+            ...structuredClone(defaultState),
+            ...nextState,
+            actors: normalizeActors(Array.isArray(nextState.actors) ? nextState.actors : structuredClone(defaultState.actors)),
+            receivables: Array.isArray(nextState.receivables) ? nextState.receivables : [],
+            transfers: normalizeTransfers(Array.isArray(nextState.transfers) ? nextState.transfers : [])
+          });
+          state.orderCounter = Math.max(Number(state.orderCounter || 0), nextOrderNumberFromOrders() - 1);
+          state.receivableCounter = Math.max(Number(state.receivableCounter || 0), nextReceivableNumberFromReceivables() - 1);
+          ensureSessionActor();
+        } else {
+          resetFinancialData(false);
+          if (scope === "wipe") wipeActorData();
+        }
+        els.resetPermit.value = "";
+        els.resetError.classList.remove("visible");
+        notifyEvent("Settings reset", scope === "wipe" ? "Data and actors were wiped." : "Data was erased.");
+        setView("dashboard");
+        renderAll();
+      } catch (error) {
+        els.resetError.textContent = error.message;
+        els.resetError.classList.add("visible");
+      }
     });
 
     document.getElementById("assignButton").addEventListener("click", () => {
