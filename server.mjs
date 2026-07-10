@@ -343,6 +343,10 @@ function mergeOrders(existingItems = [], incomingItems = []) {
     if (item.paidAt && !next.paidAt) next.paidAt = item.paidAt;
     if (previous.voidJournal && !next.voidJournal) next.voidJournal = previous.voidJournal;
     if (item.voidJournal && !next.voidJournal) next.voidJournal = item.voidJournal;
+    if (previous.voidedAt && !next.voidedAt) next.voidedAt = previous.voidedAt;
+    if (item.voidedAt && !next.voidedAt) next.voidedAt = item.voidedAt;
+    if (previous.voidedBy && !next.voidedBy) next.voidedBy = previous.voidedBy;
+    if (item.voidedBy && !next.voidedBy) next.voidedBy = item.voidedBy;
     if (previous.state === "Voided" || item.state === "Voided") next.state = "Voided";
     merged.set(item.id, next);
   });
@@ -391,10 +395,16 @@ function mergeReceivables(existingItems = [], incomingItems = []) {
   return merged.map((receivable) => {
     const existing = existingItems.find((item) => item.id === receivable.id);
     const incoming = incomingItems.find((item) => item.id === receivable.id);
-    return {
+    const next = {
       ...receivable,
       payments: mergeById(existing?.payments || [], incoming?.payments || []),
     };
+    if (existing?.voided || incoming?.voided) next.voided = true;
+    if (existing?.voidedAt && !next.voidedAt) next.voidedAt = existing.voidedAt;
+    if (incoming?.voidedAt && !next.voidedAt) next.voidedAt = incoming.voidedAt;
+    if (existing?.voidedBy && !next.voidedBy) next.voidedBy = existing.voidedBy;
+    if (incoming?.voidedBy && !next.voidedBy) next.voidedBy = incoming.voidedBy;
+    return next;
   });
 }
 

@@ -2582,6 +2582,10 @@
         if (item.paidAt && !next.paidAt) next.paidAt = item.paidAt;
         if (previous.voidJournal && !next.voidJournal) next.voidJournal = previous.voidJournal;
         if (item.voidJournal && !next.voidJournal) next.voidJournal = item.voidJournal;
+        if (previous.voidedAt && !next.voidedAt) next.voidedAt = previous.voidedAt;
+        if (item.voidedAt && !next.voidedAt) next.voidedAt = item.voidedAt;
+        if (previous.voidedBy && !next.voidedBy) next.voidedBy = previous.voidedBy;
+        if (item.voidedBy && !next.voidedBy) next.voidedBy = item.voidedBy;
         if (previous.state === "Voided" || item.state === "Voided") next.state = "Voided";
         merged.set(item.id, next);
       });
@@ -2616,11 +2620,17 @@
       return merged.map((receivable) => {
         const current = existingItems.find((item) => item.id === receivable.id);
         const incoming = incomingItems.find((item) => item.id === receivable.id);
-        return {
+        const next = {
           ...receivable,
           payments: mergeById(current?.payments || [], incoming?.payments || [])
             .sort((a, b) => new Date(a.paidAt || 0).getTime() - new Date(b.paidAt || 0).getTime())
         };
+        if (current?.voided || incoming?.voided) next.voided = true;
+        if (current?.voidedAt && !next.voidedAt) next.voidedAt = current.voidedAt;
+        if (incoming?.voidedAt && !next.voidedAt) next.voidedAt = incoming.voidedAt;
+        if (current?.voidedBy && !next.voidedBy) next.voidedBy = current.voidedBy;
+        if (incoming?.voidedBy && !next.voidedBy) next.voidedBy = incoming.voidedBy;
+        return next;
       });
     }
 
@@ -2647,7 +2657,7 @@
 
     function settingsRateInputIsFocused() {
       return Boolean(document.activeElement?.closest?.(
-        ".fixed-order-rate, .special-agent-divider, .special-agent-percent, .master-rate-divider, .master-rate-percent, .buying-rate-input, .forward-agent, .forward-payout-divider, .forward-payout-percent"
+        ".fixed-order-rate, .special-agent-divider, .special-agent-percent, .master-rate-divider, .master-rate-percent, .buying-rate-input, .forward-agent, .forward-payout-divider, .forward-payout-percent, .receivable-payment"
       ));
     }
 
@@ -5197,6 +5207,31 @@
       return (receivable.payments || []).reduce((sum, payment) => sum + Number(payment.amountMinor || 0), 0);
     }
 
+    function receivableIsVoided(receivable) {
+      return receivable?.voided === true || Boolean(receivable?.voidedAt);
+    }
+
+    function receivableForOrder(order) {
+      if (!order?.id) return null;
+      return state.receivables.find((item) => item.orderId === order.id) || null;
+    }
+
+    function markReceivableVoidedForOrder(order, actorName = "Master") {
+      const receivable = receivableForOrder(order);
+      if (!receivable || receivableIsVoided(receivable)) return;
+      const voidedAt = order.voidedAt || new Date().toISOString();
+      receivable.voided = true;
+      receivable.voidedAt = voidedAt;
+      receivable.voidedBy = actorName;
+      receivable.updatedAt = voidedAt;
+    }
+
+    function syncVoidedReceivablesFromOrders() {
+      state.orders
+        .filter((order) => order?.state === "Voided" || order?.voidJournal)
+        .forEach((order) => markReceivableVoidedForOrder(order, order.voidedBy || "Master"));
+    }
+
     function visibleReceivablesFor(actor) {
       return actor?.role === "Master"
         ? state.receivables
@@ -5205,6 +5240,7 @@
 
     function renderReceivables() {
       const actor = selectedActor();
+      syncVoidedReceivablesFromOrders();
       const rows = visibleReceivablesFor(actor)
         .slice()
         .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
@@ -5213,9 +5249,10 @@
         return;
       }
       const bodyRows = rows.map((item) => {
+        const isVoided = receivableIsVoided(item);
         const paidMinor = receivablePaidMinor(item);
         const balanceMinor = Math.max(0, Number(item.principalMinor || 0) - paidMinor);
-        const canCollect = balanceMinor > 0 && (actor?.role === "Master" || item.borrower === actor?.name || item.borrowerActorId === actor?.id);
+        const canCollect = !isVoided && balanceMinor > 0 && (actor?.role === "Master" || item.borrower === actor?.name || item.borrowerActorId === actor?.id);
         const paymentHistory = (item.payments || [])
           .map((payment) => `${displayDate(payment.paidAt)} ${money(item.currency, payment.amountMinor)}`)
           .join(" / ");
@@ -5225,10 +5262,11 @@
           item.phoneNumber ? `Phone: ${item.phoneNumber}` : "",
           item.accountNumber ? `Account: ${item.accountNumber}` : "",
           item.remarks ? `Remarks: ${item.remarks}` : "",
+          isVoided ? `Voided: ${displayDate(item.voidedAt)}` : "",
           paymentHistory ? `Payments: ${paymentHistory}` : ""
         ].filter(Boolean).join(" - ");
         return `
-          <tr>
+          <tr class="${isVoided ? "void-row" : ""}">
             <td>${escapeHtml(displayDate(item.createdAt))}</td>
             <td><strong>${escapeHtml(item.id)}</strong></td>
             <td>${escapeHtml(item.borrower)}</td>
@@ -5242,7 +5280,7 @@
                   <input class="receivable-payment" data-id="${item.id}" inputmode="decimal" placeholder="Amount">
                   <button class="btn primary collect-receivable" data-id="${item.id}" type="button">Pay</button>
                 </div>
-              ` : `<span class="state-pill ${balanceMinor === 0 ? "good" : "warn"}">${balanceMinor === 0 ? "Paid" : "Open"}</span>`}
+              ` : `<span class="state-pill ${isVoided ? "danger" : balanceMinor === 0 ? "good" : "warn"}">${isVoided ? "Voided" : balanceMinor === 0 ? "Paid" : "Open"}</span>`}
             </td>
           </tr>
         `;
@@ -5250,6 +5288,7 @@
       const totals = rows.reduce((acc, item) => {
         const currency = item.currency || "USD";
         acc[currency] ||= { principal: 0, paid: 0 };
+        if (receivableIsVoided(item)) return acc;
         acc[currency].principal += Number(item.principalMinor || 0);
         acc[currency].paid += receivablePaidMinor(item);
         return acc;
@@ -5752,7 +5791,7 @@
       return true;
     }
 
-    function approveOrderVoid(order) {
+    function approveOrderVoid(order, actorName = "Master") {
       if (!order?.journal || order.voidJournal) return;
       const paidLines = state.ledger.filter((line) => line.source === "ORDER_PAYMENT" && line.journal === order.journal);
       if (paidLines.length === 0) return;
@@ -5773,7 +5812,9 @@
       order.voidJournal = journalId;
       order.voidRequested = false;
       order.voidedAt = postedAt;
+      order.voidedBy = actorName;
       order.updatedAt = postedAt;
+      markReceivableVoidedForOrder(order, actorName);
       syncSettlementsFromLedger();
     }
 
@@ -7332,7 +7373,7 @@
         const order = state.orders.find((item) => item.id === approveVoidButton.dataset.id);
         if (!order || actor?.role !== "Master" || order.state !== "Void Requested") return;
         confirmAction("Approve this void request?", () => {
-          approveOrderVoid(order);
+          approveOrderVoid(order, actor.name);
           state.orderState = "Voided";
           els.orderState.textContent = "Voided";
           els.orderState.className = "state-pill danger";
