@@ -99,10 +99,12 @@ async function loadDb() {
   }
 }
 
-async function saveDb(db) {
+async function saveDb(db, options = {}) {
   const write = async () => {
     await mkdir(dataDir, { recursive: true });
-    const nextDb = mergeDatabase(await readPersistedDb(), db);
+    const nextDb = options.replace === true
+      ? { ...blankDb(), ...db }
+      : mergeDatabase(await readPersistedDb(), db);
     const tempPath = `${dbPath}.${process.pid}.${Date.now()}.tmp`;
     await writeFile(tempPath, JSON.stringify(nextDb, null, 2));
     await rename(tempPath, dbPath);
@@ -518,7 +520,7 @@ async function handleApi(request, response, url) {
   const method = request.method || "GET";
   const removedExpiredInvites = purgeExpiredInvites(db);
   const addedMissingSubscriptions = ensureMasterSubscriptions(db);
-  if (removedExpiredInvites || addedMissingSubscriptions) await saveDb(db);
+  if (removedExpiredInvites || addedMissingSubscriptions) await saveDb(db, { replace: removedExpiredInvites });
 
   if (url.pathname === "/api/session" && method === "GET") {
     sendJson(response, 200, { session: publicSession(db, parseCookies(request).hp_session) });
@@ -623,7 +625,7 @@ async function handleApi(request, response, url) {
   if (url.pathname === "/api/auth/logout" && method === "POST") {
     const sessionId = parseCookies(request).hp_session;
     const nextDb = { ...db, sessions: db.sessions.filter((item) => item.id !== sessionId) };
-    await saveDb(nextDb);
+    await saveDb(nextDb, { replace: true });
     response.setHeader("Set-Cookie", "hp_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0");
     sendJson(response, 200, { ok: true });
     return;
@@ -831,7 +833,7 @@ async function handleApi(request, response, url) {
     if (nextState.expandedFixedRateActorId === actorId) nextState.expandedFixedRateActorId = "";
     if (nextState.expandedSpecialDividerActorId === actorId) nextState.expandedSpecialDividerActorId = "";
     db.appStates[session.workspace.id] = nextState;
-    await saveDb(db);
+    await saveDb(db, { replace: true });
     sendJson(response, 200, { ok: true, state: nextState });
     return;
   }
@@ -854,7 +856,7 @@ async function handleApi(request, response, url) {
     }
     const nextState = resetWorkspaceState(db, session.workspace.id, scope);
     db.appStates[session.workspace.id] = nextState;
-    await saveDb(db);
+    await saveDb(db, { replace: scope === "wipe" });
     sendJson(response, 200, { ok: true, state: nextState });
     return;
   }
