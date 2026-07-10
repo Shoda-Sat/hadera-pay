@@ -4086,7 +4086,7 @@
     function orderActionsHtml(order, actor) {
       const canForward = actor?.role === "Master" && order.state === "Pending Forward";
       const canActAsSelectedActor = selectedActorIsOwnLogin();
-      const canPay = signedInActorCanPayOrder(order);
+      const canPay = actorCanPayOrder(order, actor);
       const canRequestVoid = canActAsSelectedActor && ["Agent", "Special Agent", "Special Broker"].includes(actor?.role) && order.state === "Paid" && order.agent === actor.name && !order.voidRequested && !order.locked;
       const canApproveVoid = actor?.role === "Master" && order.state === "Void Requested";
       const canModify = ["Broker", "Special Broker"].includes(actor?.role) && order.state === "Returned" && order.broker === actor.name;
@@ -5216,17 +5216,22 @@
         selectedActor();
     }
 
-    function signedInActorCanPayOrder(order) {
+    function actorCanPayOrder(order, actor = selectedActor()) {
       if (!order || order.state !== "Assigned" || order.journal) return false;
-      const actor = selectedActor();
-      if (!currentAuth) return ["Agent", "Special Agent", "Special Broker"].includes(actor?.role) && order.agent === actor?.name;
+      if (!["Agent", "Special Agent", "Special Broker"].includes(actor?.role)) return false;
+      if (currentAuth?.membership?.role === "Master" || currentAuth?.membership?.role === "Owner") return false;
+      if (!currentAuth) return order.agent === actor.name || (order.agentActorId && order.agentActorId === actor.id);
+      if (order.agent === actor.name || (order.agentActorId && order.agentActorId === actor.id)) return true;
       const membership = currentAuth.membership || {};
-      if (membership.role === "Master" || membership.role === "Owner") return false;
       const role = membership.actorRole || actor?.role;
       if (!["Agent", "Special Agent", "Special Broker"].includes(role)) return false;
       const assignedIdMatches = order.agentActorId && order.agentActorId === membership.actorId;
       const assignedNameMatches = [membership.actorName, currentAuth.user?.name, actor?.name].filter(Boolean).includes(order.agent);
       return Boolean(assignedIdMatches || assignedNameMatches);
+    }
+
+    function signedInActorCanPayOrder(order) {
+      return actorCanPayOrder(order, selectedActor());
     }
 
     function openMarkPaidConfirmation(payButton) {
