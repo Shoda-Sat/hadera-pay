@@ -294,6 +294,7 @@ function workspaceActors(db, workspaceId) {
       workingCurrencies: membership.workingCurrencies || [],
       active: true,
       transferEnabled: true,
+      transferMode: "master",
       incomeStatementVisible: true,
     }));
 }
@@ -345,6 +346,13 @@ function mergeOrders(existingItems = [], incomingItems = []) {
   return Array.from(merged.values());
 }
 
+function nextOrderNumberFromOrders(orders = []) {
+  return orders.reduce((next, order) => {
+    const match = String(order?.id || "").match(/^ORD-(\d+)$/);
+    return match ? Math.max(next, Number(match[1]) + 1) : next;
+  }, 1);
+}
+
 function mergeByKey(existingItems = [], incomingItems = [], keyForItem) {
   const merged = new Map();
   [...existingItems, ...incomingItems].forEach((item) => {
@@ -382,6 +390,7 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   );
   nextState.chatConversations = mergeChatConversations(currentState.chatConversations, incomingState.chatConversations);
   nextState.actors = mergeById(workspaceActors(db, workspaceId), nextState.actors);
+  nextState.orderCounter = Math.max(Number(currentState.orderCounter || 0), Number(incomingState.orderCounter || 0), nextOrderNumberFromOrders(nextState.orders) - 1);
   return nextState;
 }
 

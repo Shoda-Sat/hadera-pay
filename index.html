@@ -2166,6 +2166,7 @@
     let suppressRemoteSave = false;
     let remoteRefreshTimer = null;
     const processingOrderIds = new Set();
+    const processingTransferIds = new Set();
     const maxProofFileBytes = 4 * 1024 * 1024;
     const supportedCurrencies = ["USD", "ETB", "EUR", "ERN"];
 
@@ -2303,6 +2304,7 @@
           orderFixedRates: ["Broker", "Special Broker"].includes(actor.role) ? orderFixedRates : {},
           active: actor.role === "Master" ? true : actor.active !== false,
           transferEnabled: actor.role === "Master" ? true : actor.transferEnabled !== false,
+          transferMode: actor.role === "Master" ? "actors" : actor.transferMode === "actors" ? "actors" : "master",
           incomeStatementVisible: actor.role === "Master" ? true : actor.incomeStatementVisible !== false
         };
       });
@@ -2438,12 +2440,13 @@
       state.settlements = Array.isArray(remoteState.settlements) ? remoteState.settlements : state.settlements;
       state.archives = mergeById(state.archives, remoteState.archives || []);
       state.chatConversations = mergeChatConversations(state.chatConversations, remoteState.chatConversations || []);
+      state.orderCounter = Math.max(Number(state.orderCounter || 0), nextOrderNumberFromOrders() - 1, Number(remoteState.orderCounter || 0));
       return true;
     }
 
     function settingsRateInputIsFocused() {
       return Boolean(document.activeElement?.closest?.(
-        ".fixed-order-rate, .special-agent-divider, .special-agent-percent, .master-rate-divider, .master-rate-percent, .forward-payout-divider, .forward-payout-percent"
+        ".fixed-order-rate, .special-agent-divider, .special-agent-percent, .master-rate-divider, .master-rate-percent, .forward-agent, .forward-payout-divider, .forward-payout-percent"
       ));
     }
 
@@ -2499,7 +2502,8 @@
           currency: membership.currency || "USD",
           workingCurrencies: membership.actorRole === "Special Agent" ? membership.workingCurrencies || [membership.currency || "USD"] : [],
           active: true,
-          transferEnabled: true
+          transferEnabled: true,
+          transferMode: "master"
         });
       }
       state.selectedActorId = membership.actorId;
@@ -2517,6 +2521,7 @@
         actors: normalizeActors(Array.isArray(nextState.actors) ? nextState.actors : structuredClone(defaultState.actors)),
         transfers: normalizeTransfers(Array.isArray(nextState.transfers) ? nextState.transfers : []),
       });
+      state.orderCounter = Math.max(Number(state.orderCounter || 0), nextOrderNumberFromOrders() - 1);
       ensureSessionActor();
       remoteStateReady = true;
       startRemoteRefresh();
@@ -2980,8 +2985,15 @@
     }
 
     function nextOrderId() {
-      state.orderCounter = Number(state.orderCounter || 0) + 1;
+      state.orderCounter = Math.max(Number(state.orderCounter || 0), nextOrderNumberFromOrders() - 1) + 1;
       return "ORD-" + state.orderCounter;
+    }
+
+    function nextOrderNumberFromOrders() {
+      return state.orders.reduce((next, order) => {
+        const match = String(order?.id || "").match(/^ORD-(\d+)$/);
+        return match ? Math.max(next, Number(match[1]) + 1) : next;
+      }, 1);
     }
 
     function nextJournalId() {
@@ -3144,7 +3156,10 @@
       const fromName = fromActors.some((item) => item.name === currentFrom)
         ? currentFrom
         : fromActors[0]?.name || "";
-      const toActors = actors.filter((item) => item.name !== fromName);
+      const fromActor = actors.find((item) => item.name === fromName);
+      const toActors = actor?.role === "Master" || fromActor?.transferMode === "actors"
+        ? actors.filter((item) => item.name !== fromName)
+        : actors.filter((item) => item.name !== fromName && item.role === "Master");
 
       els.transferFrom.innerHTML = fromActors.map((item) => `<option>${item.name}</option>`).join("");
       els.transferTo.innerHTML = toActors.map((item) => `<option>${item.name}</option>`).join("");
@@ -3152,7 +3167,6 @@
       if (fromName) els.transferFrom.value = fromName;
       if (toActors.some((item) => item.name === currentTo)) els.transferTo.value = currentTo;
       if (!els.transferTo.value && toActors[0]) els.transferTo.value = toActors[0].name;
-      const fromActor = actors.find((item) => item.name === fromName);
       const toActor = actors.find((item) => item.name === els.transferTo.value);
       const previousSourceCurrency = els.transferSourceCurrency.value;
       const previousPayoutCurrency = els.transferCurrency.value;
@@ -3733,7 +3747,8 @@
       const rows = activeActors()
         .filter((actor) => actor.role !== "Master")
         .map((actor) => {
-          const allowed = actor.transferEnabled !== false;
+          const transferMode = actor.transferMode === "actors" ? "actors" : "master";
+          const transferTargetLabel = transferMode === "actors" ? "Actors + Master" : "Master only";
           const incomeVisible = actor.incomeStatementVisible !== false;
           const orderMultiCurrency = actor.orderMultiCurrencyEnabled === true;
           const orderCurrencyControl = ["Broker", "Special Broker"].includes(actor.role)
@@ -3779,7 +3794,7 @@
               <td><strong>${escapeHtml(actor.name)}</strong></td>
               <td>${escapeHtml(actor.role)}</td>
               <td>${actor.role === "Special Agent" ? `${escapeHtml(actor.currency)} / ${(actor.workingCurrencies || [actor.currency]).map(escapeHtml).join(", ")}` : escapeHtml(actor.currency)}</td>
-              <td><span class="state-pill ${allowed ? "good" : "danger"}">${allowed ? "Allowed" : "Restricted"}</span></td>
+              <td><span class="state-pill ${transferMode === "actors" ? "good" : "warn"}">${transferTargetLabel}</span></td>
               <td>
                 <div class="setting-inline">
                   <span class="state-pill ${incomeVisible ? "good" : "danger"}">${incomeVisible ? "View" : "Hidden"}</span>
@@ -3791,8 +3806,8 @@
               <td>${orderCurrencyControl}</td>
               <td>${specialDividerControl}</td>
               <td>
-                <button class="btn ${allowed ? "danger" : "primary"} toggle-transfer-permission" data-id="${actor.id}" type="button">
-                  ${allowed ? "Restrict" : "Grant"}
+                <button class="btn ${transferMode === "actors" ? "danger" : "primary"} toggle-transfer-permission" data-id="${actor.id}" type="button">
+                  ${transferMode === "actors" ? "Master Only" : "Allow Actors"}
                 </button>
               </td>
             </tr>
@@ -4037,6 +4052,7 @@
       const masterCanSeePayoutRates = viewer?.role === "Master";
       const bits = [
         order.id ? `Order Number: ${escapeHtml(order.id)}` : "",
+        viewer?.role === "Master" && order.broker ? `Ordering Actor: ${escapeHtml(order.broker)}` : "",
         order.senderName ? `Sender: ${escapeHtml(order.senderName)}` : "",
         order.receiverName ? `Receiver: ${escapeHtml(order.receiverName)}` : "",
         order.phoneNumber ? `Phone: ${escapeHtml(order.phoneNumber)}` : "",
@@ -4083,7 +4099,7 @@
         return `
           <div class="order-actions">
             <select class="forward-agent" data-id="${order.id}">
-              ${matchedAgents.map((item) => `<option>${escapeHtml(item.name)}</option>`).join("")}
+              ${matchedAgents.map((item) => `<option ${item.name === order.agent ? "selected" : ""}>${escapeHtml(item.name)}</option>`).join("")}
             </select>
             <div class="manual-divider-field">
               <label for="forwardDivider-${order.id}">Payout divisor</label>
@@ -4626,17 +4642,14 @@
     }
 
     function renderOrders() {
+      if (document.activeElement?.closest?.(".forward-agent, .forward-payout-divider, .forward-payout-percent")) return;
       const actor = selectedActor();
       const visibleOrders = actor?.role === "Master"
         ? state.orders
         : state.orders.filter((order) => order.broker === actor?.name || order.agent === actor?.name);
-      if (visibleOrders.length === 0) {
-        const emptyRows = '<tr><td colspan="6">No orders yet. New payment orders will appear here.</td></tr>';
-        els.orderRows.innerHTML = emptyRows;
-        els.dashboardOrderRows.innerHTML = emptyRows;
-        return;
-      }
-      const rows = visibleOrders.map((order) => {
+      const activeOrders = visibleOrders.filter((order) => !["Paid", "Voided", "Cancelled"].includes(order.state) && order.locked !== true);
+      const orderbookOrders = actor?.role === "Master" ? visibleOrders : activeOrders;
+      const rowsForOrders = (orders) => orders.map((order) => {
         const className = order.state === "Paid"
           ? "good"
           : order.state === "Cancelled" || order.state === "Voided"
@@ -4647,7 +4660,7 @@
         return `
           <tr>
             <td><strong>${order.id}</strong>${orderDetailsHtml(order, actor)}</td>
-            <td>${escapeHtml(order.broker)}</td>
+            <td>${actor?.role === "Master" || order.broker === actor?.name ? escapeHtml(order.broker) : '<span class="muted">Master assigned</span>'}</td>
             <td>${escapeHtml(order.agent)}</td>
             <td>${money(order.sourceCurrency || "USD", order.sourceAmountMinor || 0)}</td>
             <td><span class="state-pill ${className}">${order.state}</span></td>
@@ -4655,8 +4668,9 @@
           </tr>
         `;
       }).join("");
-      els.orderRows.innerHTML = rows;
-      els.dashboardOrderRows.innerHTML = rows;
+      const emptyRows = '<tr><td colspan="6">No active orders.</td></tr>';
+      els.orderRows.innerHTML = orderbookOrders.length ? rowsForOrders(orderbookOrders) : emptyRows;
+      els.dashboardOrderRows.innerHTML = activeOrders.length ? rowsForOrders(activeOrders) : emptyRows;
     }
 
     function renderLedger() {
@@ -4767,7 +4781,7 @@
         const actionHtml = canApprove
           ? `
             <div class="order-actions">
-              <button class="btn secondary approve-transfer" data-id="${transfer.id}" type="button">Approve</button>
+              <button class="btn secondary approve-transfer" data-id="${transfer.id}" type="button" ${processingTransferIds.has(transfer.id) ? "disabled" : ""}>Approve</button>
               <button class="btn danger reject-transfer" data-id="${transfer.id}" type="button">Reject</button>
               <button class="btn secondary return-transfer" data-id="${transfer.id}" type="button">Return Back</button>
             </div>
@@ -4963,6 +4977,24 @@
         { journal: journalId, transferId: transfer.id, source: "TRANSFER", account: transfer.from, direction: "Credit", currency: sourceCurrency, amountMinor: sourceAmountMinor, postedAt }
       );
       syncSettlementsFromLedger();
+    }
+
+    function approveTransferOnce(transfer, actorName = "Master") {
+      if (!transfer || transfer.state !== "Pending Approval" || transfer.journal || processingTransferIds.has(transfer.id)) return false;
+      processingTransferIds.add(transfer.id);
+      try {
+        transfer.state = "Approved";
+        transfer.returnedBy = "";
+        transfer.returnedReason = "";
+        transfer.approvedAt = new Date().toISOString();
+        transfer.returnedAt = "";
+        transfer.rejectedAt = "";
+        postTransferLedger(transfer);
+        notifyEvent("New transfer", `${transfer.id} approved by ${actorName} and sent to ${transfer.to}.`);
+        return true;
+      } finally {
+        processingTransferIds.delete(transfer.id);
+      }
     }
 
     function payingActorStatement(order) {
@@ -5174,6 +5206,65 @@
       state.orderValidationVisible = true;
       els.receiverError.textContent = message;
       els.receiverError.classList.add("visible");
+    }
+
+    async function markOrderPaidFromButton(payButton) {
+      const orderId = payButton?.dataset?.id;
+      if (!orderId || payButton.disabled || processingOrderIds.has(orderId)) return;
+      const actor = selectedActor();
+      const order = state.orders.find((item) => item.id === orderId);
+      if (!selectedActorIsOwnLogin() || !order || order.state !== "Assigned" || order.agent !== actor?.name) return;
+      const actionBox = payButton.closest(".order-actions");
+      const proofFile = actionBox?.querySelector(".payment-proof-input")?.files?.[0] || null;
+      const progress = actionBox?.querySelector(".proof-progress");
+      if (proofFile && proofFile.size > maxProofFileBytes) {
+        showOrderError(`Payment proof is too large. Use an image under ${Math.round(maxProofFileBytes / 1024 / 1024)} MB.`);
+        return;
+      }
+      processingOrderIds.add(order.id);
+      payButton.disabled = true;
+      if (progress) progress.textContent = proofFile ? "Uploading 0%" : "Posting payment...";
+      let proof = null;
+      if (proofFile) {
+        try {
+          proof = {
+            media: await readFileAsDataUrl(proofFile, (percent) => {
+              if (progress) progress.textContent = `Uploading ${percent}%`;
+            }),
+            fileName: proofFile.name || `${order.id}-payment-proof.png`
+          };
+        } catch {
+          processingOrderIds.delete(order.id);
+          payButton.disabled = false;
+          if (progress) progress.textContent = "";
+          showOrderError("Could not attach the payment proof. Try another screenshot.");
+          return;
+        }
+      }
+      if (progress) progress.textContent = "Posting payment...";
+      try {
+        if (order.state !== "Assigned" || order.journal) {
+          renderAll();
+          return;
+        }
+        const posted = postOrderPayment(order);
+        if (!posted) {
+          renderAll();
+          return;
+        }
+        order.state = "Paid";
+        order.paidAt = new Date().toISOString();
+        order.updatedAt = order.paidAt;
+        sendPaymentProofToMaster(order, actor, proof);
+        state.orderState = "Paid";
+        els.orderState.textContent = "Paid";
+        els.orderState.className = "state-pill good";
+        els.voidButton.disabled = false;
+        renderAll();
+        await saveStateNow();
+      } finally {
+        processingOrderIds.delete(order.id);
+      }
     }
 
     function setView(viewId) {
@@ -5683,6 +5774,7 @@
         currency: currencyInput.value,
         active: true,
         transferEnabled: true,
+        transferMode: "master",
         incomeStatementVisible: true,
         workingCurrencies,
         specialPayoutDivider: roleInput.value === "Special Agent" ? 1 : undefined,
@@ -5926,10 +6018,8 @@
         if (selectedActor()?.role !== "Master") return;
         const actor = state.actors.find((item) => item.id === permissionButton.dataset.id);
         if (!actor || actor.role === "Master") return;
-        actor.transferEnabled = actor.transferEnabled === false;
-        if (state.selectedActorId === actor.id && state.activeView === "transfers" && actor.transferEnabled === false) {
-          state.activeView = "dashboard";
-        }
+        actor.transferEnabled = true;
+        actor.transferMode = actor.transferMode === "actors" ? "master" : "actors";
         renderAll();
         return;
       }
@@ -6261,62 +6351,7 @@
 
       const payButton = event.target.closest(".pay-order");
       if (payButton) {
-        const orderId = payButton.dataset.id;
-        if (payButton.disabled || processingOrderIds.has(orderId)) return;
-        const actor = selectedActor();
-        const order = state.orders.find((item) => item.id === orderId);
-        if (!selectedActorIsOwnLogin() || !order || order.state !== "Assigned" || order.agent !== actor?.name) return;
-        const actionBox = payButton.closest(".order-actions");
-        const proofFile = actionBox?.querySelector(".payment-proof-input")?.files?.[0] || null;
-        const progress = actionBox?.querySelector(".proof-progress");
-        if (proofFile && proofFile.size > maxProofFileBytes) {
-          showOrderError(`Payment proof is too large. Use an image under ${Math.round(maxProofFileBytes / 1024 / 1024)} MB.`);
-          return;
-        }
-        processingOrderIds.add(order.id);
-        payButton.disabled = true;
-        if (progress) progress.textContent = proofFile ? "Uploading 0%" : "Posting payment...";
-        let proof = null;
-        if (proofFile) {
-          try {
-            proof = {
-              media: await readFileAsDataUrl(proofFile, (percent) => {
-                if (progress) progress.textContent = `Uploading ${percent}%`;
-              }),
-              fileName: proofFile.name || `${order.id}-payment-proof.png`
-            };
-          } catch {
-            processingOrderIds.delete(order.id);
-            payButton.disabled = false;
-            if (progress) progress.textContent = "";
-            showOrderError("Could not attach the payment proof. Try another screenshot.");
-            return;
-          }
-        }
-        if (progress) progress.textContent = "Posting payment...";
-        try {
-          if (order.state !== "Assigned" || order.journal) {
-            renderAll();
-            return;
-          }
-          const posted = postOrderPayment(order);
-          if (!posted) {
-            renderAll();
-            return;
-          }
-          order.state = "Paid";
-          order.paidAt = new Date().toISOString();
-          order.updatedAt = order.paidAt;
-          sendPaymentProofToMaster(order, actor, proof);
-          state.orderState = "Paid";
-          els.orderState.textContent = "Paid";
-          els.orderState.className = "state-pill good";
-          els.voidButton.disabled = false;
-          renderAll();
-          await saveStateNow();
-        } finally {
-          processingOrderIds.delete(order.id);
-        }
+        await markOrderPaidFromButton(payButton);
         return;
       }
 
@@ -6480,24 +6515,19 @@
       if (!target) return;
       const actor = selectedActor();
       const transfer = state.transfers.find((item) => item.id === target.dataset.id);
-      if (!transfer || transfer.state === "Approved") return;
-      confirmAction("Approve this transfer?", () => {
-        transfer.state = "Approved";
-        transfer.returnedBy = "";
-        transfer.returnedReason = "";
-        transfer.approvedAt = new Date().toISOString();
-        transfer.returnedAt = "";
-        transfer.rejectedAt = "";
-        postTransferLedger(transfer);
-        notifyEvent("New transfer", `${transfer.id} approved and sent to ${transfer.to}.`);
+      if (!transfer || actor?.role !== "Master" || transfer.state !== "Pending Approval" || processingTransferIds.has(transfer.id)) return;
+      target.disabled = true;
+      if (approveTransferOnce(transfer, actor.name)) {
         renderAll();
-      }, () => {
-        transfer.state = "Rejected";
-        transfer.rejectedBy = actor?.name || "Master";
-        transfer.rejectedAt = new Date().toISOString();
-        notifyEvent("Transfer rejected", `${transfer.id} returned to ${transfer.from}.`);
-        renderAll();
-      });
+        await saveStateNow();
+      }
+    });
+
+    document.addEventListener("pointerdown", (event) => {
+      const payButton = event.target.closest(".pay-order");
+      if (!payButton) return;
+      event.preventDefault();
+      markOrderPaidFromButton(payButton);
     });
 
     document.getElementById("settleButton").addEventListener("click", () => {
