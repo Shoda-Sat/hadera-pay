@@ -5235,7 +5235,7 @@
 
     function transferForLedgerLine(line) {
       if (!line || line.source !== "TRANSFER") return null;
-      return state.transfers.find((transfer) => transfer.journal === line.journal) || null;
+      return state.transfers.find((transfer) => transfer.journal === line.journal || transfer.id === line.transferId) || null;
     }
 
     function transferLedgerDetails(transfer) {
@@ -5250,6 +5250,17 @@
         transfer.remarks ? `Remarks: ${transfer.remarks}` : ""
       ];
       return bits.filter(Boolean).join(" - ");
+    }
+
+    function syncTransferLedgerDetails(transfer) {
+      if (!transfer?.journal) return;
+      const details = transferLedgerDetails(transfer);
+      if (!details) return;
+      state.ledger = state.ledger.map((line) =>
+        line.source === "TRANSFER" && (line.journal === transfer.journal || line.transferId === transfer.id)
+          ? { ...line, details }
+          : line
+      );
     }
 
     function ledgerReferenceNumber(line) {
@@ -5412,7 +5423,7 @@
     function ledgerLineDetails(line, viewer) {
       if (line.source === "PREVIOUS_CLOSE") return line.details || "Previous Close";
       const transfer = transferForLedgerLine(line);
-      if (transfer) return line.details || transferLedgerDetails(transfer);
+      if (transfer) return transferLedgerDetails(transfer) || line.details || "";
       const order = orderForLedgerLine(line);
       if (!order) return line.details || "";
       const bits = [
@@ -6105,7 +6116,10 @@
     }
 
     function postTransferLedger(transfer) {
-      if (transfer.journal) return;
+      if (transfer.journal) {
+        syncTransferLedgerDetails(transfer);
+        return;
+      }
       const journalId = nextJournalId();
       transfer.journal = journalId;
       const postedAt = new Date().toISOString();
@@ -6121,6 +6135,7 @@
         { journal: journalId, transferId: transfer.id, source: "TRANSFER", account: "MASTER_FX_CLEARING", direction: "Debit", currency: sourceCurrency, amountMinor: sourceAmountMinor, details, postedAt },
         { journal: journalId, transferId: transfer.id, source: "TRANSFER", account: transfer.from, direction: "Credit", currency: sourceCurrency, amountMinor: sourceAmountMinor, details, postedAt }
       );
+      syncTransferLedgerDetails(transfer);
       syncSettlementsFromLedger();
     }
 
