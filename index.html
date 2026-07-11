@@ -2314,7 +2314,7 @@
                     <label for="resetScope">Reset scope</label>
                     <select id="resetScope">
                       <option value="data">Erase data - data only</option>
-                      <option value="wipe">Wipe data - data and all Actors</option>
+                      <option value="wipe">Wipe data - data, all Actors, and actor logins</option>
                     </select>
                   </div>
                 </div>
@@ -7234,7 +7234,7 @@
         }
         els.resetPermit.value = "";
         els.resetError.classList.remove("visible");
-        notifyEvent("Settings reset", scope === "wipe" ? "Data and actors were wiped." : "Data was erased.");
+        notifyEvent("Settings reset", scope === "wipe" ? "Data, actors, and actor logins were wiped." : "Data was erased.");
         setView("dashboard");
         renderAll();
       } catch (error) {

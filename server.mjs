@@ -919,19 +919,36 @@ async function handleApi(request, response, url) {
     if (session.membership.role !== "Master") return sendJson(response, 403, { error: "Only Master can reset workspace data." });
     const body = await readJson(request);
     const scope = body.scope === "wipe" ? "wipe" : "data";
+    let removedActorIds = [];
+    let removedActorNames = [];
     if (scope === "wipe") {
-      const removedActorUserIds = db.memberships
-        .filter((membership) => membership.workspaceId === session.workspace.id && membership.role !== "Master")
-        .map((membership) => membership.userId);
+      const removedActorMemberships = db.memberships
+        .filter((membership) => membership.workspaceId === session.workspace.id && membership.role !== "Master");
+      const removedActorInvites = db.invites.filter((invite) => invite.workspaceId === session.workspace.id);
+      const removedActorUserIds = Array.from(new Set([
+        ...removedActorMemberships.map((membership) => membership.userId),
+        ...removedActorInvites.map((invite) => invite.acceptedByUserId).filter(Boolean)
+      ]));
+      removedActorIds = Array.from(new Set([
+        ...removedActorMemberships.map((membership) => membership.actorId).filter(Boolean),
+        ...removedActorInvites.map((invite) => invite.actorId).filter(Boolean)
+      ]));
+      removedActorNames = removedActorMemberships.map((membership) => membership.actorName).filter(Boolean);
       db.memberships = db.memberships.filter((membership) =>
         membership.workspaceId !== session.workspace.id || membership.role === "Master"
       );
       db.invites = db.invites.filter((invite) => invite.workspaceId !== session.workspace.id);
+      db.users = db.users.filter((user) => !removedActorUserIds.includes(user.id));
       db.sessions = db.sessions.filter((item) =>
         item.workspaceId !== session.workspace.id || !removedActorUserIds.includes(item.userId)
       );
     }
     const nextState = resetWorkspaceState(db, session.workspace.id, scope);
+    if (scope === "wipe") {
+      nextState.deletedActorIds = Array.from(new Set([...(nextState.deletedActorIds || []), ...removedActorIds]));
+      nextState.deletedActorNames = Array.from(new Set([...(nextState.deletedActorNames || []), ...removedActorNames]));
+      nextState.actors = (nextState.actors || []).filter((actor) => actor?.role === "Master");
+    }
     db.appStates[session.workspace.id] = nextState;
     await saveDb(db, { replace: scope === "wipe" });
     sendJson(response, 200, { ok: true, state: nextState });
