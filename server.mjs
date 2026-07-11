@@ -319,6 +319,9 @@ function recordTimestamp(item = {}) {
     new Date(item.updatedAt || 0).getTime(),
     new Date(item.paidAt || 0).getTime(),
     new Date(item.assignedAt || 0).getTime(),
+    new Date(item.approvedAt || 0).getTime(),
+    new Date(item.paidOutAt || 0).getTime(),
+    new Date(item.rejectedAt || 0).getTime(),
     new Date(item.returnedAt || 0).getTime(),
     new Date(item.sentAt || 0).getTime(),
     new Date(item.createdAt || 0).getTime(),
@@ -353,6 +356,29 @@ function mergeOrders(existingItems = [], incomingItems = []) {
   return Array.from(merged.values());
 }
 
+function mergeTransfers(existingItems = [], incomingItems = []) {
+  const merged = new Map();
+  [...existingItems, ...incomingItems].forEach((item) => {
+    if (!item || typeof item !== "object" || !item.id) return;
+    const previous = merged.get(item.id);
+    if (!previous) {
+      merged.set(item.id, item);
+      return;
+    }
+    const itemIsNewer = recordTimestamp(item) >= recordTimestamp(previous);
+    const next = itemIsNewer ? { ...previous, ...item } : { ...item, ...previous };
+    if (previous.journal && !next.journal) next.journal = previous.journal;
+    if (item.journal && !next.journal) next.journal = item.journal;
+    if (previous.approvedAt && !next.approvedAt) next.approvedAt = previous.approvedAt;
+    if (item.approvedAt && !next.approvedAt) next.approvedAt = item.approvedAt;
+    if (previous.paidOutAt && !next.paidOutAt) next.paidOutAt = previous.paidOutAt;
+    if (item.paidOutAt && !next.paidOutAt) next.paidOutAt = item.paidOutAt;
+    if ((previous.state === "Approved" || item.state === "Approved") && next.journal) next.state = "Approved";
+    merged.set(item.id, next);
+  });
+  return Array.from(merged.values());
+}
+
 function nextOrderNumberFromOrders(orders = []) {
   return orders.reduce((next, order) => {
     const match = String(order?.id || "").match(/^ORD-(\d+)$/);
@@ -364,6 +390,20 @@ function nextReceivableNumberFromReceivables(receivables = []) {
   return receivables.reduce((next, receivable) => {
     const match = String(receivable?.id || "").match(/^REC-(\d+)$/);
     return match ? Math.max(next, Number(match[1]) + 1) : next;
+  }, 1);
+}
+
+function nextTransferNumberFromTransfers(transfers = []) {
+  return transfers.reduce((next, transfer) => {
+    const match = String(transfer?.id || "").match(/^TRF-(\d+)$/);
+    return match ? Math.max(next, Number(match[1]) + 1) : next;
+  }, 1);
+}
+
+function nextJournalNumberFromLedger(ledger = []) {
+  return ledger.reduce((next, line) => {
+    const match = String(line?.journal || "").match(/^JRN-(\d+)$/);
+    return match ? Math.max(next, Number(match[1]) - 999) : next;
   }, 1);
 }
 
@@ -420,7 +460,7 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   nextState.actors = nextState.actors.filter((actor) => !deletedActorIds.has(actor?.id));
   nextState.orders = mergeOrders(currentState.orders, incomingState.orders);
   nextState.receivables = mergeReceivables(currentState.receivables, incomingState.receivables);
-  nextState.transfers = mergeById(currentState.transfers, incomingState.transfers);
+  nextState.transfers = mergeTransfers(currentState.transfers, incomingState.transfers);
   nextState.ledger = mergeByKey(currentState.ledger, incomingState.ledger, (line) =>
     [line.journal, line.source, line.account, line.direction, line.currency, line.amountMinor, line.postedAt].join(":")
   );
@@ -436,6 +476,8 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   nextState.deletedChatIds = Array.from(deletedChatIds);
   nextState.orderCounter = Math.max(Number(currentState.orderCounter || 0), Number(incomingState.orderCounter || 0), nextOrderNumberFromOrders(nextState.orders) - 1);
   nextState.receivableCounter = Math.max(Number(currentState.receivableCounter || 0), Number(incomingState.receivableCounter || 0), nextReceivableNumberFromReceivables(nextState.receivables) - 1);
+  nextState.transferCounter = Math.max(Number(currentState.transferCounter || 0), Number(incomingState.transferCounter || 0), nextTransferNumberFromTransfers(nextState.transfers) - 1);
+  nextState.journalCounter = Math.max(Number(currentState.journalCounter || 0), Number(incomingState.journalCounter || 0), nextJournalNumberFromLedger(nextState.ledger) - 1);
   return nextState;
 }
 

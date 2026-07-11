@@ -2664,6 +2664,9 @@
         new Date(item.updatedAt || 0).getTime(),
         new Date(item.paidAt || 0).getTime(),
         new Date(item.assignedAt || 0).getTime(),
+        new Date(item.approvedAt || 0).getTime(),
+        new Date(item.paidOutAt || 0).getTime(),
+        new Date(item.rejectedAt || 0).getTime(),
         new Date(item.returnedAt || 0).getTime(),
         new Date(item.sentAt || 0).getTime(),
         new Date(item.createdAt || 0).getTime(),
@@ -2693,6 +2696,29 @@
         if (previous.voidedBy && !next.voidedBy) next.voidedBy = previous.voidedBy;
         if (item.voidedBy && !next.voidedBy) next.voidedBy = item.voidedBy;
         if (previous.state === "Voided" || item.state === "Voided") next.state = "Voided";
+        merged.set(item.id, next);
+      });
+      return Array.from(merged.values());
+    }
+
+    function mergeTransfers(existingItems = [], incomingItems = []) {
+      const merged = new Map();
+      [...existingItems, ...incomingItems].forEach((item) => {
+        if (!item || typeof item !== "object" || !item.id) return;
+        const previous = merged.get(item.id);
+        if (!previous) {
+          merged.set(item.id, item);
+          return;
+        }
+        const itemIsNewer = recordTimestamp(item) >= recordTimestamp(previous);
+        const next = itemIsNewer ? { ...previous, ...item } : { ...item, ...previous };
+        if (previous.journal && !next.journal) next.journal = previous.journal;
+        if (item.journal && !next.journal) next.journal = item.journal;
+        if (previous.approvedAt && !next.approvedAt) next.approvedAt = previous.approvedAt;
+        if (item.approvedAt && !next.approvedAt) next.approvedAt = item.approvedAt;
+        if (previous.paidOutAt && !next.paidOutAt) next.paidOutAt = previous.paidOutAt;
+        if (item.paidOutAt && !next.paidOutAt) next.paidOutAt = item.paidOutAt;
+        if ((previous.state === "Approved" || item.state === "Approved") && next.journal) next.state = "Approved";
         merged.set(item.id, next);
       });
       return Array.from(merged.values());
@@ -2749,7 +2775,7 @@
       state.actors = state.actors.filter((actor) => !deletedActorIds.has(actor.id) || remoteActors.some((remoteActor) => remoteActor?.id === actor.id));
       state.orders = mergeOrders(state.orders, remoteState.orders || []);
       state.receivables = mergeReceivables(state.receivables, remoteState.receivables || []);
-      state.transfers = normalizeTransfers(mergeById(state.transfers, remoteState.transfers || []));
+      state.transfers = normalizeTransfers(mergeTransfers(state.transfers, remoteState.transfers || []));
       state.ledger = mergeLedgerLines(state.ledger, remoteState.ledger || []);
       state.settlements = Array.isArray(remoteState.settlements) ? remoteState.settlements : state.settlements;
       state.archives = mergeById(state.archives, remoteState.archives || []);
@@ -2761,6 +2787,8 @@
       state.buyingRates = normalizeBuyingRates(remoteState.buyingRates || { eurToUsdDivider: remoteState.eurToUsdDivider });
       state.orderCounter = Math.max(Number(state.orderCounter || 0), nextOrderNumberFromOrders() - 1, Number(remoteState.orderCounter || 0));
       state.receivableCounter = Math.max(Number(state.receivableCounter || 0), nextReceivableNumberFromReceivables() - 1, Number(remoteState.receivableCounter || 0));
+      state.transferCounter = Math.max(Number(state.transferCounter || 0), nextTransferNumberFromTransfers() - 1, Number(remoteState.transferCounter || 0));
+      state.journalCounter = Math.max(Number(state.journalCounter || 0), nextJournalNumberFromLedger() - 1, Number(remoteState.journalCounter || 0));
       return true;
     }
 
@@ -2837,6 +2865,8 @@
       });
       state.orderCounter = Math.max(Number(state.orderCounter || 0), nextOrderNumberFromOrders() - 1);
       state.receivableCounter = Math.max(Number(state.receivableCounter || 0), nextReceivableNumberFromReceivables() - 1);
+      state.transferCounter = Math.max(Number(state.transferCounter || 0), nextTransferNumberFromTransfers() - 1);
+      state.journalCounter = Math.max(Number(state.journalCounter || 0), nextJournalNumberFromLedger() - 1);
       ensureSessionActor();
       remoteStateReady = true;
       startRemoteRefresh();
@@ -3427,13 +3457,27 @@
       }, 1);
     }
 
+    function nextTransferNumberFromTransfers() {
+      return state.transfers.reduce((next, transfer) => {
+        const match = String(transfer?.id || "").match(/^TRF-(\d+)$/);
+        return match ? Math.max(next, Number(match[1]) + 1) : next;
+      }, 1);
+    }
+
+    function nextJournalNumberFromLedger() {
+      return state.ledger.reduce((next, line) => {
+        const match = String(line?.journal || "").match(/^JRN-(\d+)$/);
+        return match ? Math.max(next, Number(match[1]) - 999) : next;
+      }, 1);
+    }
+
     function nextJournalId() {
-      state.journalCounter = Number(state.journalCounter || 0) + 1;
+      state.journalCounter = Math.max(Number(state.journalCounter || 0), nextJournalNumberFromLedger() - 1) + 1;
       return "JRN-" + String(1000 + state.journalCounter);
     }
 
     function nextTransferId() {
-      state.transferCounter = Number(state.transferCounter || 0) + 1;
+      state.transferCounter = Math.max(Number(state.transferCounter || 0), nextTransferNumberFromTransfers() - 1) + 1;
       return "TRF-" + state.transferCounter;
     }
 
@@ -5194,6 +5238,20 @@
       return state.transfers.find((transfer) => transfer.journal === line.journal) || null;
     }
 
+    function transferLedgerDetails(transfer) {
+      if (!transfer) return "";
+      const sourceCurrency = transfer.sourceCurrency || transfer.currency || "USD";
+      const payoutCurrency = transfer.currency || sourceCurrency;
+      const bits = [
+        `${transfer.from || "Unknown"} -> ${transfer.to || "Unknown"}`,
+        `Source: ${money(sourceCurrency, transfer.sourceAmountMinor || transfer.amountMinor || 0)}`,
+        `Payout: ${money(payoutCurrency, transfer.amountMinor || 0)}`,
+        `Rate: ${formatRate(transfer.rate || 1)}`,
+        transfer.remarks ? `Remarks: ${transfer.remarks}` : ""
+      ];
+      return bits.filter(Boolean).join(" - ");
+    }
+
     function ledgerReferenceNumber(line) {
       if (line.orderId) return line.orderId;
       if (line.transferId) return line.transferId;
@@ -5353,6 +5411,8 @@
 
     function ledgerLineDetails(line, viewer) {
       if (line.source === "PREVIOUS_CLOSE") return line.details || "Previous Close";
+      const transfer = transferForLedgerLine(line);
+      if (transfer) return line.details || transferLedgerDetails(transfer);
       const order = orderForLedgerLine(line);
       if (!order) return line.details || "";
       const bits = [
@@ -6054,11 +6114,12 @@
       const sourceCurrency = transfer.sourceCurrency || transfer.currency;
       const sourceAmountMinor = Number(transfer.sourceAmountMinor || transfer.amountMinor);
       const payoutAmountMinor = Number(transfer.amountMinor || 0);
+      const details = transferLedgerDetails(transfer);
       state.ledger.unshift(
-        { journal: journalId, transferId: transfer.id, source: "TRANSFER", account: transfer.to, direction: "Debit", currency: transfer.currency, amountMinor: payoutAmountMinor, postedAt },
-        { journal: journalId, transferId: transfer.id, source: "TRANSFER", account: "MASTER_FX_CLEARING", direction: "Credit", currency: transfer.currency, amountMinor: payoutAmountMinor, postedAt },
-        { journal: journalId, transferId: transfer.id, source: "TRANSFER", account: "MASTER_FX_CLEARING", direction: "Debit", currency: sourceCurrency, amountMinor: sourceAmountMinor, postedAt },
-        { journal: journalId, transferId: transfer.id, source: "TRANSFER", account: transfer.from, direction: "Credit", currency: sourceCurrency, amountMinor: sourceAmountMinor, postedAt }
+        { journal: journalId, transferId: transfer.id, source: "TRANSFER", account: transfer.to, direction: "Debit", currency: transfer.currency, amountMinor: payoutAmountMinor, details, postedAt },
+        { journal: journalId, transferId: transfer.id, source: "TRANSFER", account: "MASTER_FX_CLEARING", direction: "Credit", currency: transfer.currency, amountMinor: payoutAmountMinor, details, postedAt },
+        { journal: journalId, transferId: transfer.id, source: "TRANSFER", account: "MASTER_FX_CLEARING", direction: "Debit", currency: sourceCurrency, amountMinor: sourceAmountMinor, details, postedAt },
+        { journal: journalId, transferId: transfer.id, source: "TRANSFER", account: transfer.from, direction: "Credit", currency: sourceCurrency, amountMinor: sourceAmountMinor, details, postedAt }
       );
       syncSettlementsFromLedger();
     }
@@ -7105,6 +7166,8 @@
           });
           state.orderCounter = Math.max(Number(state.orderCounter || 0), nextOrderNumberFromOrders() - 1);
           state.receivableCounter = Math.max(Number(state.receivableCounter || 0), nextReceivableNumberFromReceivables() - 1);
+          state.transferCounter = Math.max(Number(state.transferCounter || 0), nextTransferNumberFromTransfers() - 1);
+          state.journalCounter = Math.max(Number(state.journalCounter || 0), nextJournalNumberFromLedger() - 1);
           ensureSessionActor();
         } else {
           resetFinancialData(false);
@@ -7276,6 +7339,7 @@
           ? `${transfer.id} sent to Master for approval.`
           : `${transfer.id} sent to ${transfer.to}.`);
         renderAll();
+        if (transfer.state === "Approved") saveStateNow();
       });
     });
 
