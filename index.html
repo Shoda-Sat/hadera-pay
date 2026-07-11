@@ -1078,10 +1078,16 @@
       min-height: 0;
     }
 
+    .chat-list-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: stretch;
+      border-bottom: 1px solid var(--line);
+    }
+
     .chat-item {
       width: 100%;
       border: 0;
-      border-bottom: 1px solid var(--line);
       background: transparent;
       padding: 12px;
       text-align: left;
@@ -1120,6 +1126,22 @@
     .chat-item span {
       color: var(--muted);
       font-size: 12px;
+    }
+
+    .chat-delete-group {
+      width: 42px;
+      border: 0;
+      border-left: 1px solid var(--line);
+      background: #ffffff;
+      color: var(--danger);
+      display: grid;
+      place-items: center;
+    }
+
+    .chat-delete-group svg {
+      width: 17px;
+      height: 17px;
+      stroke-width: 2.2;
     }
 
     .chat-panel {
@@ -2458,6 +2480,7 @@
       selectedChatId: "",
       chatReplyTo: "",
       chatConversations: [],
+      deletedChatIds: [],
       actors: [
         { id: "ACT-0", name: "Master", role: "Master", currency: "USD", active: true, transferEnabled: true },
         { id: "ACT-1", name: "Eastline Broker", role: "Broker", currency: "USD", active: true, transferEnabled: true },
@@ -2491,7 +2514,8 @@
           masterRateDivisorSettings: normalizeCurrencyRateSettings(saved.masterRateDivisorSettings || {}),
           buyingRates: normalizeBuyingRates(saved.buyingRates || { eurToUsdDivider: saved.eurToUsdDivider }),
           archives: Array.isArray(saved.archives) ? saved.archives : [],
-          chatConversations: Array.isArray(saved.chatConversations) ? saved.chatConversations : []
+          chatConversations: Array.isArray(saved.chatConversations) ? saved.chatConversations : [],
+          deletedChatIds: Array.isArray(saved.deletedChatIds) ? saved.deletedChatIds : []
         };
       } catch {
         return structuredClone(defaultState);
@@ -2718,6 +2742,7 @@
     function mergeSharedState(remoteState) {
       if (!remoteState || typeof remoteState !== "object") return false;
       const deletedActorIds = new Set(remoteState.deletedActorIds || []);
+      const deletedChatIds = new Set([...(state.deletedChatIds || []), ...(remoteState.deletedChatIds || [])]);
       const remoteActors = Array.isArray(remoteState.actors) ? remoteState.actors : [];
       state.actors = normalizeActors(mergeById(state.actors, remoteState.actors || []));
       state.actors = state.actors.filter((actor) => !deletedActorIds.has(actor.id) || remoteActors.some((remoteActor) => remoteActor?.id === actor.id));
@@ -2727,9 +2752,11 @@
       state.ledger = mergeLedgerLines(state.ledger, remoteState.ledger || []);
       state.settlements = Array.isArray(remoteState.settlements) ? remoteState.settlements : state.settlements;
       state.archives = mergeById(state.archives, remoteState.archives || []);
-      state.chatConversations = mergeChatConversations(state.chatConversations, remoteState.chatConversations || []);
+      state.chatConversations = mergeChatConversations(state.chatConversations, remoteState.chatConversations || [])
+        .filter((chat) => !deletedChatIds.has(chat.id));
       state.deletedActorIds = Array.from(deletedActorIds);
       state.deletedActorNames = [];
+      state.deletedChatIds = Array.from(deletedChatIds);
       state.buyingRates = normalizeBuyingRates(remoteState.buyingRates || { eurToUsdDivider: remoteState.eurToUsdDivider });
       state.orderCounter = Math.max(Number(state.orderCounter || 0), nextOrderNumberFromOrders() - 1, Number(remoteState.orderCounter || 0));
       state.receivableCounter = Math.max(Number(state.receivableCounter || 0), nextReceivableNumberFromReceivables() - 1, Number(remoteState.receivableCounter || 0));
@@ -2840,7 +2867,8 @@
       camera: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3Z"/><circle cx="12" cy="13" r="3"/></svg>',
       mic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/></svg>',
       paperclip: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m21.44 11.05-8.49 8.49a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.19 9.19a2 2 0 0 1-2.83-2.83l8.49-8.49"/></svg>',
-      stop: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="7" y="7" width="10" height="10" rx="1"/></svg>'
+      stop: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="7" y="7" width="10" height="10" rx="1"/></svg>',
+      trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v5"/><path d="M14 11v5"/></svg>'
     };
 
     const els = {
@@ -3410,6 +3438,8 @@
     function buildJournalPreview() {
       const input = getOrderInput();
       const hasReceiver = input.receiverFields.some((value) => value.trim().length > 0);
+      const actor = selectedActor();
+      const showGenericPayer = ["Broker", "Special Broker"].includes(actor?.role);
       els.receiverError.textContent = "At least one receiver detail is required.";
       els.receiverError.classList.toggle("visible", !hasReceiver && state.orderValidationVisible);
       const lines = [
@@ -3418,13 +3448,19 @@
         { direction: "Credit", account: "MASTER_FX_CLEARING", currency: input.sourceCurrency, amountMinor: input.sourceAmountMinor },
         { direction: "Credit", account: "MASTER_FEE_REVENUE", currency: input.sourceCurrency, amountMinor: input.commissionMinor },
         { direction: "Debit", account: "MASTER_FX_CLEARING", currency: input.payoutCurrency, amountMinor: input.payoutAmountMinor },
-        { direction: "Credit", account: input.agent + " ACTOR_CLEARING", currency: input.payoutCurrency, amountMinor: input.payoutAmountMinor }
+        {
+          direction: "Credit",
+          account: input.agent + " ACTOR_CLEARING",
+          displayAccount: showGenericPayer ? "Payer ACTOR_CLEARING" : input.agent + " ACTOR_CLEARING",
+          currency: input.payoutCurrency,
+          amountMinor: input.payoutAmountMinor
+        }
       ].filter((line) => line.amountMinor > 0);
 
       els.journalPreview.innerHTML = lines.map((line) => `
         <div class="line-item">
           <b class="${toneClass(line.direction.toLowerCase())}">${line.direction}</b>
-          <span>${line.account}</span>
+          <span>${line.displayAccount || line.account}</span>
           <div class="amount">${money(line.currency, line.amountMinor)}</div>
         </div>
       `).join("");
@@ -3933,6 +3969,18 @@
       return chats.find((chat) => chat.id === state.selectedChatId);
     }
 
+    function deleteChatGroup(chatId) {
+      const chat = state.chatConversations.find((item) => item.id === chatId);
+      if (!chat || chat.type !== "group" || selectedActor()?.role !== "Master") return;
+      state.deletedChatIds = Array.from(new Set([...(state.deletedChatIds || []), chatId]));
+      state.chatConversations = state.chatConversations.filter((item) => item.id !== chatId);
+      if (state.selectedChatId === chatId) state.selectedChatId = "";
+      state.chatReplyTo = "";
+      notifyEvent("Group deleted", `${chat.name || "Group"} was removed.`);
+      renderChat();
+      saveState();
+    }
+
     function messageSummary(message) {
       if (!message) return "";
       if (message.kind === "photo") return message.text || "Photo";
@@ -4006,11 +4054,15 @@
         ? chats.map((item) => {
           const last = item.messages[item.messages.length - 1];
           const unread = unreadCount(item, actor?.name);
+          const canDeleteGroup = actor?.role === "Master" && item.type === "group";
           return `
-            <button class="chat-item ${item.id === state.selectedChatId ? "active" : ""}" type="button" data-chat-id="${item.id}">
-              <span class="chat-item-title"><strong>${escapeHtml(item.type === "group" ? item.name : chatTitle(item))}</strong>${unread ? `<b class="unread-badge">${unread}</b>` : ""}</span>
-              <span>${escapeHtml(last ? `${last.from}: ${messageSummary(last)}` : item.type === "group" ? "Group chat" : "Master direct chat")}</span>
-            </button>
+            <div class="chat-list-row">
+              <button class="chat-item ${item.id === state.selectedChatId ? "active" : ""}" type="button" data-chat-id="${item.id}">
+                <span class="chat-item-title"><strong>${escapeHtml(item.type === "group" ? item.name : chatTitle(item))}</strong>${unread ? `<b class="unread-badge">${unread}</b>` : ""}</span>
+                <span>${escapeHtml(last ? `${last.from}: ${messageSummary(last)}` : item.type === "group" ? "Group chat" : "Master direct chat")}</span>
+              </button>
+              ${canDeleteGroup ? `<button class="chat-delete-group" data-chat-id="${item.id}" type="button" aria-label="Delete group" title="Delete group">${icons.trash}</button>` : ""}
+            </div>
           `;
         }).join("")
         : '<div class="empty">No chats available.</div>';
@@ -6773,6 +6825,13 @@
     });
 
     els.chatConversationList.addEventListener("click", (event) => {
+      const deleteButton = event.target.closest(".chat-delete-group");
+      if (deleteButton) {
+        const chat = state.chatConversations.find((item) => item.id === deleteButton.dataset.chatId);
+        if (!chat || selectedActor()?.role !== "Master") return;
+        confirmAction(`Delete group "${chat.name || "Group"}"?`, () => deleteChatGroup(chat.id));
+        return;
+      }
       const button = event.target.closest(".chat-item");
       if (!button) return;
       state.selectedChatId = button.dataset.chatId;

@@ -414,6 +414,7 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   const membershipActors = workspaceActors(db, workspaceId);
   const activeActorIds = new Set(membershipActors.map((actor) => actor.id));
   const deletedActorIds = new Set([...(currentState.deletedActorIds || []), ...(incomingState.deletedActorIds || [])]);
+  const deletedChatIds = new Set([...(currentState.deletedChatIds || []), ...(incomingState.deletedChatIds || [])]);
   activeActorIds.forEach((actorId) => deletedActorIds.delete(actorId));
   nextState.actors = mergeById(currentState.actors, incomingState.actors);
   nextState.actors = nextState.actors.filter((actor) => !deletedActorIds.has(actor?.id));
@@ -426,11 +427,13 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   nextState.archives = mergeByKey(currentState.archives, incomingState.archives, (archive) =>
     archive.id || [archive.actor, archive.closedAt, archive.closedBy].join(":")
   );
-  nextState.chatConversations = mergeChatConversations(currentState.chatConversations, incomingState.chatConversations);
+  nextState.chatConversations = mergeChatConversations(currentState.chatConversations, incomingState.chatConversations)
+    .filter((chat) => !deletedChatIds.has(chat?.id));
   nextState.actors = mergeById(membershipActors, nextState.actors);
   nextState.actors = nextState.actors.filter((actor) => activeActorIds.has(actor?.id) || !deletedActorIds.has(actor?.id));
   nextState.deletedActorIds = Array.from(deletedActorIds);
   nextState.deletedActorNames = [];
+  nextState.deletedChatIds = Array.from(deletedChatIds);
   nextState.orderCounter = Math.max(Number(currentState.orderCounter || 0), Number(incomingState.orderCounter || 0), nextOrderNumberFromOrders(nextState.orders) - 1);
   nextState.receivableCounter = Math.max(Number(currentState.receivableCounter || 0), Number(incomingState.receivableCounter || 0), nextReceivableNumberFromReceivables(nextState.receivables) - 1);
   return nextState;
