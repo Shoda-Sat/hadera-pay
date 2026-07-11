@@ -2065,7 +2065,7 @@
             <div class="panel-body table-wrap">
               <table>
                 <thead>
-                  <tr><th>Date</th><th>Journal</th><th>Order / Transfer No.</th><th>Source</th><th>Details</th><th>Account</th><th>Direction</th><th>USD</th><th>ETB</th><th>EUR</th><th>ERN</th></tr>
+                  <tr id="ledgerHeadRow"><th>Date</th><th>Journal</th><th>Order / Transfer No.</th><th>Source</th><th>Details</th><th>Account</th><th>Direction</th><th>USD</th><th>ETB</th><th>EUR</th><th>ERN</th></tr>
                 </thead>
                 <tbody id="ledgerRows"></tbody>
               </table>
@@ -2906,6 +2906,7 @@
       dashboardOrderRows: document.getElementById("dashboardOrderRows"),
       receivableRows: document.getElementById("receivableRows"),
       ledgerRows: document.getElementById("ledgerRows"),
+      ledgerHeadRow: document.getElementById("ledgerHeadRow"),
       trialBalanceSection: document.getElementById("trialBalanceSection"),
       trialBalanceToggle: document.getElementById("trialBalanceToggle"),
       trialBalanceToggleText: document.getElementById("trialBalanceToggleText"),
@@ -5127,8 +5128,9 @@
       }, {});
     }
 
-    function ledgerBalanceRows(lines, actor) {
+    function ledgerBalanceRows(lines, actor, showOrderInfo = false) {
       if (!actor || actor.role === "Master") return "";
+      const orderInfoSpacer = showOrderInfo ? '<td colspan="5"></td>' : "";
       const totals = lines.reduce((acc, line) => {
         const sign = line.direction === "Debit" ? 1 : -1;
         acc[line.currency] = (acc[line.currency] || 0) + sign * line.amountMinor;
@@ -5142,6 +5144,7 @@
           return `
             <tr>
               <td colspan="5"><strong>${escapeHtml(actor.name)} balance</strong></td>
+              ${orderInfoSpacer}
               <td></td>
               <td class="${toneClass(net > 0 ? "debit" : "credit")}"><strong>${direction}</strong></td>
               ${currencyCells(currency, Math.abs(net))}
@@ -5152,6 +5155,7 @@
         return `
           <tr>
             <td colspan="5"><strong>${escapeHtml(actor.name)} balance</strong></td>
+            ${orderInfoSpacer}
             <td></td>
             <td><strong>Zero</strong></td>
             ${currencyCells(actor.currency, 0)}
@@ -5199,6 +5203,49 @@
       const transfer = transferForLedgerLine(line);
       if (transfer) return transfer.id;
       return "";
+    }
+
+    function showMasterOrderInfoColumns(viewer, ledgerActor) {
+      return viewer?.role === "Master" && ["Agent", "Special Agent"].includes(ledgerActor?.role);
+    }
+
+    function ledgerColumnCount(showOrderInfo) {
+      return 7 + supportedCurrencies.length + (showOrderInfo ? 5 : 0);
+    }
+
+    function renderLedgerHeader(showOrderInfo) {
+      const headers = ["Date", "Journal", "Order / Transfer No.", "Source", "Details"];
+      if (showOrderInfo) {
+        headers.push("Ordering Broker", "Ordered Amount", "Rate", "%", "Payout Currency");
+      }
+      headers.push("Account", "Direction", ...supportedCurrencies);
+      els.ledgerHeadRow.innerHTML = headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("");
+    }
+
+    function ledgerOrderPercent(order) {
+      if (Object.prototype.hasOwnProperty.call(order, "forwardedPayoutPercent")) {
+        const forwardedPercent = Number(order.forwardedPayoutPercent);
+        if (Number.isFinite(forwardedPercent)) return forwardedPercent;
+      }
+      const commissionPercent = Number(order.commissionPercent);
+      return Number.isFinite(commissionPercent) ? commissionPercent : null;
+    }
+
+    function ledgerOrderInfoCells(line) {
+      const order = orderForLedgerLine(line);
+      if (!order) return "<td></td><td></td><td></td><td></td><td></td>";
+      const sourceCurrency = order.sourceCurrency || "USD";
+      const sourceAmount = `${formatMinor(order.sourceAmountMinor || 0, sourceCurrency)} ${sourceCurrency}`;
+      const rate = Number(order.rate || 0);
+      const percent = ledgerOrderPercent(order);
+      const payoutCurrency = order.payoutCurrency || sourceCurrency;
+      return `
+        <td>${escapeHtml(order.broker || "")}</td>
+        <td>${escapeHtml(sourceAmount)}</td>
+        <td>${Number.isFinite(rate) && rate > 0 ? escapeHtml(formatRate(rate)) : ""}</td>
+        <td>${percent === null ? "" : `${escapeHtml(formatRate(percent))}%`}</td>
+        <td>${escapeHtml(payoutCurrency)}</td>
+      `;
     }
 
     function masterIncomeAmountForOrder(order, journalLines) {
@@ -5703,13 +5750,15 @@
 
     function renderLedger() {
       const { actor, ledgerActor, lines: visibleLines } = currentLedgerContext();
+      const showOrderInfo = showMasterOrderInfoColumns(actor, ledgerActor);
+      renderLedgerHeader(showOrderInfo);
       els.exportLedgerExcelButton.disabled = !ledgerActor;
       els.exportLedgerPdfButton.disabled = !ledgerActor;
       renderTrialBalance();
       renderIncomeStatement(visibleLines, ledgerActor);
       if (visibleLines.length === 0) {
         const emptyName = actor?.role === "Master" && ledgerActor ? `${escapeHtml(ledgerActor.name)} ledger is empty.` : "No journal entries posted. Ledger balance is zero.";
-        els.ledgerRows.innerHTML = `<tr><td colspan="11">${emptyName}</td></tr>`;
+        els.ledgerRows.innerHTML = `<tr><td colspan="${ledgerColumnCount(showOrderInfo)}">${emptyName}</td></tr>`;
         els.metricLines.textContent = "0";
         return;
       }
@@ -5720,12 +5769,13 @@
           <td>${escapeHtml(ledgerReferenceNumber(line))}</td>
           <td>${line.source}</td>
           <td>${escapeHtml(ledgerLineDetails(line, actor))}</td>
+          ${showOrderInfo ? ledgerOrderInfoCells(line) : ""}
           <td>${line.account}</td>
           <td class="${toneClass(line.direction.toLowerCase())}"><strong>${line.direction}</strong></td>
           ${currencyCells(line.currency, line.amountMinor)}
         </tr>
       `).join("");
-      els.ledgerRows.innerHTML = lineRows + ledgerBalanceRows(visibleLines, ledgerActor);
+      els.ledgerRows.innerHTML = lineRows + ledgerBalanceRows(visibleLines, ledgerActor, showOrderInfo);
       els.metricLines.textContent = String(visibleLines.length);
     }
 
