@@ -2411,11 +2411,13 @@
     let saveTimer = null;
     let suppressRemoteSave = false;
     let remoteRefreshTimer = null;
+    let inactivityCheckTimer = null;
     const processingOrderIds = new Set();
     const pendingProofFiles = new Map();
     const pendingProofUploads = new Map();
     const processingTransferIds = new Set();
     const receivablePaymentDrafts = new Map();
+    const authIdleMs = 1000 * 60 * 60 * 3;
     const maxProofFileBytes = 4 * 1024 * 1024;
     const supportedCurrencies = ["USD", "ETB", "EUR", "ERN"];
 
@@ -2842,6 +2844,74 @@
       return session?.workspace?.id ? `haderapay.workspace.${session.workspace.id}` : "haderapay.local.state.v1";
     }
 
+    function authActivityKey(session = currentAuth) {
+      return session?.workspace?.id && session?.user?.id
+        ? `haderapay.auth.activity.${session.workspace.id}.${session.user.id}`
+        : "haderapay.auth.activity";
+    }
+
+    function lastAuthActivity(session = currentAuth) {
+      try {
+        return Number(localStorage.getItem(authActivityKey(session)) || 0);
+      } catch {
+        return 0;
+      }
+    }
+
+    function rememberAuthActivity(session = currentAuth) {
+      if (!session) return;
+      try {
+        localStorage.setItem(authActivityKey(session), String(Date.now()));
+      } catch {
+        // Local storage may be unavailable; the server-side session timeout still applies.
+      }
+    }
+
+    function forgetAuthActivity(session = currentAuth) {
+      if (!session) return;
+      try {
+        localStorage.removeItem(authActivityKey(session));
+      } catch {
+        // Ignore storage cleanup failures.
+      }
+    }
+
+    function authSessionIsIdle(session = currentAuth) {
+      const lastActivity = lastAuthActivity(session);
+      return lastActivity > 0 && Date.now() - lastActivity >= authIdleMs;
+    }
+
+    function noteUserActivity() {
+      if (!currentAuth) return;
+      rememberAuthActivity(currentAuth);
+    }
+
+    function stopInactivityWatch() {
+      if (inactivityCheckTimer) clearInterval(inactivityCheckTimer);
+      inactivityCheckTimer = null;
+    }
+
+    function startInactivityWatch() {
+      stopInactivityWatch();
+      inactivityCheckTimer = setInterval(() => {
+        if (authSessionIsIdle()) endAuthSession({ notify: true });
+      }, 60000);
+    }
+
+    async function endAuthSession({ notify = false } = {}) {
+      const session = currentAuth;
+      await api("/api/auth/logout", { method: "POST" }).catch(() => {});
+      forgetAuthActivity(session);
+      currentAuth = null;
+      remoteStateReady = false;
+      if (remoteRefreshTimer) clearInterval(remoteRefreshTimer);
+      remoteRefreshTimer = null;
+      stopInactivityWatch();
+      els.authScreen.classList.remove("hidden");
+      els.accountBadge.textContent = "Not logged in";
+      if (notify) showAuthError(els.loginError, "You were logged out after 3 hours of inactivity.");
+    }
+
     function signedInRole() {
       return currentAuth?.membership?.role || "";
     }
@@ -2874,6 +2944,7 @@
 
     async function applyAuthSession(session) {
       currentAuth = session;
+      rememberAuthActivity(session);
       remoteStateReady = false;
       storageKey = authStorageKey(session);
       const remote = await api("/api/app-state").catch(() => ({ state: null }));
@@ -2892,6 +2963,7 @@
       ensureSessionActor();
       remoteStateReady = true;
       startRemoteRefresh();
+      startInactivityWatch();
       els.authScreen.classList.add("hidden");
       renderAll();
     }
@@ -6621,14 +6693,10 @@
       }
     });
 
-    els.logoutButton.addEventListener("click", async () => {
-      await api("/api/auth/logout", { method: "POST" }).catch(() => {});
-      currentAuth = null;
-      remoteStateReady = false;
-      if (remoteRefreshTimer) clearInterval(remoteRefreshTimer);
-      remoteRefreshTimer = null;
-      els.authScreen.classList.remove("hidden");
-      els.accountBadge.textContent = "Not logged in";
+    els.logoutButton.addEventListener("click", () => endAuthSession());
+
+    ["pointerdown", "keydown", "input", "touchstart", "scroll"].forEach((eventName) => {
+      window.addEventListener(eventName, noteUserActivity, { passive: true, capture: true });
     });
 
     els.ownerMasterForm.addEventListener("submit", async (event) => {
@@ -8134,7 +8202,15 @@
     async function initApp() {
       const { session } = await api("/api/session").catch(() => ({ session: null }));
       if (session) {
-        await applyAuthSession(session);
+        if (authSessionIsIdle(session)) {
+          await api("/api/auth/logout", { method: "POST" }).catch(() => {});
+          forgetAuthActivity(session);
+          els.authScreen.classList.remove("hidden");
+          els.accountBadge.textContent = "Not logged in";
+          showAuthError(els.loginError, "You were logged out after 3 hours of inactivity.");
+        } else {
+          await applyAuthSession(session);
+        }
       } else {
         els.authScreen.classList.remove("hidden");
         renderAll();

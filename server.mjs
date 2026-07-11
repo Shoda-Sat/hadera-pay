@@ -13,6 +13,8 @@ const inviteTtlMs = 1000 * 60 * 60;
 const ownerUser = process.env.OWNER_USER ?? "Owner";
 const ownerPassword = process.env.OWNER_PASSWORD ?? "1453@Siem#";
 let saveQueue = Promise.resolve();
+const sessionIdleMs = 1000 * 60 * 60 * 3;
+const sessionCookieMaxAgeSeconds = Math.floor(sessionIdleMs / 1000);
 const subscriptionPlans = new Map([
   ["one_day", { label: "1 day", days: 1 }],
   ["three_days", { label: "3 days", days: 3 }],
@@ -248,8 +250,39 @@ async function readJson(request) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
 }
 
-function publicSession(db, sessionId) {
-  const session = db.sessions.find((item) => item.id === sessionId && new Date(item.expiresAt).getTime() > Date.now());
+function sessionIsExpired(session, now = Date.now()) {
+  const expiresAt = new Date(session?.expiresAt || 0).getTime();
+  if (!Number.isFinite(expiresAt) || expiresAt <= now) return true;
+  const lastActivityAt = new Date(session?.lastActivityAt || 0).getTime();
+  return Number.isFinite(lastActivityAt) && lastActivityAt > 0 && now - lastActivityAt >= sessionIdleMs;
+}
+
+function activeSessionRecord(db, sessionId, now = Date.now()) {
+  const session = db.sessions.find((item) => item.id === sessionId);
+  return session && !sessionIsExpired(session, now) ? session : null;
+}
+
+function touchSession(session, now = Date.now()) {
+  const timestamp = new Date(now).toISOString();
+  session.lastActivityAt = timestamp;
+  session.expiresAt = new Date(now + sessionIdleMs).toISOString();
+}
+
+function setSessionCookie(response, sessionId) {
+  response.setHeader("Set-Cookie", `hp_session=${encodeURIComponent(sessionId)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${sessionCookieMaxAgeSeconds}`);
+}
+
+function clearSessionCookie(response) {
+  response.setHeader("Set-Cookie", "hp_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0");
+}
+
+function purgeExpiredSessions(db) {
+  const before = db.sessions.length;
+  db.sessions = db.sessions.filter((session) => !sessionIsExpired(session));
+  return db.sessions.length !== before;
+}
+
+function publicSessionForRecord(db, session) {
   if (!session) return null;
   if (session.userId === "__owner") {
     return {
@@ -284,6 +317,10 @@ function publicSession(db, sessionId) {
       workingCurrencies: membership.workingCurrencies || [],
     },
   };
+}
+
+function publicSession(db, sessionId) {
+  return publicSessionForRecord(db, activeSessionRecord(db, sessionId));
 }
 
 function workspaceActors(db, workspaceId) {
@@ -556,8 +593,11 @@ function resetWorkspaceState(db, workspaceId, scope = "data") {
 }
 
 async function requireSession(request, response, db) {
-  const session = publicSession(db, parseCookies(request).hp_session);
+  const sessionId = parseCookies(request).hp_session;
+  const sessionRecord = activeSessionRecord(db, sessionId);
+  const session = publicSessionForRecord(db, sessionRecord);
   if (!session) {
+    clearSessionCookie(response);
     sendJson(response, 401, { error: "Please log in." });
     return null;
   }
@@ -569,6 +609,9 @@ async function requireSession(request, response, db) {
     sendJson(response, 403, { error: "This workspace is inactive." });
     return null;
   }
+  touchSession(sessionRecord);
+  setSessionCookie(response, sessionRecord.id);
+  await saveDb(db);
   return session;
 }
 
@@ -581,12 +624,15 @@ function requireOwner(session, response) {
 }
 
 function createSession(db, userId, workspaceId) {
+  const now = Date.now();
+  const timestamp = new Date(now).toISOString();
   const session = {
     id: id("sess"),
     userId,
     workspaceId,
-    createdAt: new Date().toISOString(),
-    expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 14).toISOString(),
+    createdAt: timestamp,
+    lastActivityAt: timestamp,
+    expiresAt: new Date(now + sessionIdleMs).toISOString(),
   };
   db.sessions.push(session);
   return session;
@@ -596,11 +642,24 @@ async function handleApi(request, response, url) {
   const db = await loadDb();
   const method = request.method || "GET";
   const removedExpiredInvites = purgeExpiredInvites(db);
+  const removedExpiredSessions = purgeExpiredSessions(db);
   const addedMissingSubscriptions = ensureMasterSubscriptions(db);
-  if (removedExpiredInvites || addedMissingSubscriptions) await saveDb(db, { replace: removedExpiredInvites });
+  if (removedExpiredInvites || removedExpiredSessions || addedMissingSubscriptions) {
+    await saveDb(db, { replace: removedExpiredInvites || removedExpiredSessions });
+  }
 
   if (url.pathname === "/api/session" && method === "GET") {
-    sendJson(response, 200, { session: publicSession(db, parseCookies(request).hp_session) });
+    const sessionId = parseCookies(request).hp_session;
+    const sessionRecord = activeSessionRecord(db, sessionId);
+    const session = publicSessionForRecord(db, sessionRecord);
+    if (sessionRecord && session) {
+      touchSession(sessionRecord);
+      setSessionCookie(response, sessionRecord.id);
+      await saveDb(db);
+    } else {
+      clearSessionCookie(response);
+    }
+    sendJson(response, 200, { session });
     return;
   }
 
@@ -663,7 +722,7 @@ async function handleApi(request, response, url) {
     db.memberships.push(membership);
     const session = createSession(db, user.id, workspace.id);
     await saveDb(db);
-    response.setHeader("Set-Cookie", `hp_session=${encodeURIComponent(session.id)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=1209600`);
+    setSessionCookie(response, session.id);
     sendJson(response, 200, { session: publicSession(db, session.id) });
     return;
   }
@@ -678,7 +737,7 @@ async function handleApi(request, response, url) {
     ) {
       const session = createSession(db, "__owner", "__owner");
       await saveDb(db);
-      response.setHeader("Set-Cookie", `hp_session=${encodeURIComponent(session.id)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=1209600`);
+      setSessionCookie(response, session.id);
       sendJson(response, 200, { session: publicSession(db, session.id) });
       return;
     }
@@ -694,7 +753,7 @@ async function handleApi(request, response, url) {
     if (subscription.expired) return sendJson(response, 402, { error: "This workspace subscription has expired." });
     const session = createSession(db, user.id, membership.workspaceId);
     await saveDb(db);
-    response.setHeader("Set-Cookie", `hp_session=${encodeURIComponent(session.id)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=1209600`);
+    setSessionCookie(response, session.id);
     sendJson(response, 200, { session: publicSession(db, session.id) });
     return;
   }
@@ -703,7 +762,7 @@ async function handleApi(request, response, url) {
     const sessionId = parseCookies(request).hp_session;
     const nextDb = { ...db, sessions: db.sessions.filter((item) => item.id !== sessionId) };
     await saveDb(nextDb, { replace: true });
-    response.setHeader("Set-Cookie", "hp_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0");
+    clearSessionCookie(response);
     sendJson(response, 200, { ok: true });
     return;
   }
