@@ -1881,6 +1881,86 @@
                 </form>
               </div>
             </div>
+            <div class="panel span-6" data-master-action>
+              <div class="panel-header">
+                <h2>Journal</h2>
+                <span class="state-pill good">Actor Ledger</span>
+              </div>
+              <div class="panel-body">
+                <form id="ledgerJournalForm">
+                  <div class="form-grid">
+                    <div class="field">
+                      <label for="ledgerJournalActor">Actor</label>
+                      <select id="ledgerJournalActor" class="ledger-tool-input"></select>
+                    </div>
+                    <div class="field">
+                      <label for="ledgerJournalSourceCurrency">Source currency</label>
+                      <select id="ledgerJournalSourceCurrency" class="ledger-tool-input"></select>
+                    </div>
+                    <div class="field">
+                      <label for="ledgerJournalSourceAmount">Source amount</label>
+                      <input id="ledgerJournalSourceAmount" class="ledger-tool-input" inputmode="decimal" placeholder="0.00">
+                    </div>
+                    <div class="field">
+                      <label for="ledgerJournalRate">Rate</label>
+                      <input id="ledgerJournalRate" class="ledger-tool-input" inputmode="decimal" value="1.00">
+                    </div>
+                    <div class="field">
+                      <label for="ledgerJournalCurrency">Ledger currency</label>
+                      <select id="ledgerJournalCurrency" class="ledger-tool-input"></select>
+                    </div>
+                    <div class="field">
+                      <label for="ledgerJournalAmount">Ledger amount</label>
+                      <input id="ledgerJournalAmount" class="ledger-tool-input" inputmode="decimal" placeholder="0.00">
+                    </div>
+                    <div class="field full">
+                      <label for="ledgerJournalRemarks">Remarks</label>
+                      <textarea id="ledgerJournalRemarks" class="ledger-tool-input" placeholder="Add journal notes"></textarea>
+                    </div>
+                    <div class="field full">
+                      <span class="field-error" id="ledgerJournalError">Choose an actor and enter an amount.</span>
+                    </div>
+                  </div>
+                  <div class="actions">
+                    <button class="btn primary" type="submit">Post Journal</button>
+                  </div>
+                </form>
+              </div>
+            </div>
+            <div class="panel span-6" data-master-action>
+              <div class="panel-header">
+                <h2>Withdrawal</h2>
+                <span class="state-pill warn">Balanced</span>
+              </div>
+              <div class="panel-body">
+                <form id="ledgerWithdrawalForm">
+                  <div class="form-grid">
+                    <div class="field">
+                      <label for="ledgerWithdrawalActor">Actor</label>
+                      <select id="ledgerWithdrawalActor" class="ledger-tool-input"></select>
+                    </div>
+                    <div class="field">
+                      <label for="ledgerWithdrawalCurrency">Currency</label>
+                      <select id="ledgerWithdrawalCurrency" class="ledger-tool-input"></select>
+                    </div>
+                    <div class="field">
+                      <label for="ledgerWithdrawalAmount">Amount</label>
+                      <input id="ledgerWithdrawalAmount" class="ledger-tool-input" inputmode="decimal" placeholder="0.00">
+                    </div>
+                    <div class="field full">
+                      <label for="ledgerWithdrawalRemarks">Remarks</label>
+                      <textarea id="ledgerWithdrawalRemarks" class="ledger-tool-input" placeholder="Add withdrawal notes"></textarea>
+                    </div>
+                    <div class="field full">
+                      <span class="field-error" id="ledgerWithdrawalError">Choose an actor and enter a withdrawal amount.</span>
+                    </div>
+                  </div>
+                  <div class="actions">
+                    <button class="btn primary" type="submit">Record Withdrawal</button>
+                  </div>
+                </form>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -2311,6 +2391,7 @@
     let remoteRefreshTimer = null;
     const processingOrderIds = new Set();
     const pendingProofFiles = new Map();
+    const pendingProofUploads = new Map();
     const processingTransferIds = new Set();
     const maxProofFileBytes = 4 * 1024 * 1024;
     const supportedCurrencies = ["USD", "ETB", "EUR", "ERN"];
@@ -2657,7 +2738,7 @@
 
     function settingsRateInputIsFocused() {
       return Boolean(document.activeElement?.closest?.(
-        ".fixed-order-rate, .special-agent-divider, .special-agent-percent, .master-rate-divider, .master-rate-percent, .buying-rate-input, .forward-agent, .forward-payout-divider, .forward-payout-percent, .receivable-payment"
+        ".fixed-order-rate, .special-agent-divider, .special-agent-percent, .master-rate-divider, .master-rate-percent, .buying-rate-input, .forward-agent, .forward-payout-divider, .forward-payout-percent, .receivable-payment, .ledger-tool-input"
       ));
     }
 
@@ -2869,6 +2950,21 @@
       transferRemarks: document.getElementById("transferRemarks"),
       transferError: document.getElementById("transferError"),
       transferMode: document.getElementById("transferMode"),
+      ledgerJournalForm: document.getElementById("ledgerJournalForm"),
+      ledgerJournalActor: document.getElementById("ledgerJournalActor"),
+      ledgerJournalSourceCurrency: document.getElementById("ledgerJournalSourceCurrency"),
+      ledgerJournalSourceAmount: document.getElementById("ledgerJournalSourceAmount"),
+      ledgerJournalRate: document.getElementById("ledgerJournalRate"),
+      ledgerJournalCurrency: document.getElementById("ledgerJournalCurrency"),
+      ledgerJournalAmount: document.getElementById("ledgerJournalAmount"),
+      ledgerJournalRemarks: document.getElementById("ledgerJournalRemarks"),
+      ledgerJournalError: document.getElementById("ledgerJournalError"),
+      ledgerWithdrawalForm: document.getElementById("ledgerWithdrawalForm"),
+      ledgerWithdrawalActor: document.getElementById("ledgerWithdrawalActor"),
+      ledgerWithdrawalCurrency: document.getElementById("ledgerWithdrawalCurrency"),
+      ledgerWithdrawalAmount: document.getElementById("ledgerWithdrawalAmount"),
+      ledgerWithdrawalRemarks: document.getElementById("ledgerWithdrawalRemarks"),
+      ledgerWithdrawalError: document.getElementById("ledgerWithdrawalError"),
       chatConversationList: document.getElementById("chatConversationList"),
       chatMessages: document.getElementById("chatMessages"),
       chatComposer: document.getElementById("chatComposer"),
@@ -3601,6 +3697,123 @@
       }
     }
 
+    function ledgerToolActors() {
+      return activeActors().filter((actor) => actor.role !== "Master");
+    }
+
+    function renderLedgerToolControls() {
+      if (!els.ledgerJournalActor || !els.ledgerWithdrawalActor) return;
+      const actors = ledgerToolActors();
+      const actorOptions = actors.map((actor) => `<option value="${escapeHtml(actor.name)}">${escapeHtml(actor.name)}</option>`).join("");
+      const currencyOptions = supportedCurrencies.map((currency) => `<option>${currency}</option>`).join("");
+      const previousJournalActor = els.ledgerJournalActor.value;
+      const previousWithdrawalActor = els.ledgerWithdrawalActor.value;
+      const previousJournalSourceCurrency = els.ledgerJournalSourceCurrency.value || "USD";
+      const previousJournalCurrency = els.ledgerJournalCurrency.value || "USD";
+      const previousWithdrawalCurrency = els.ledgerWithdrawalCurrency.value || "USD";
+
+      els.ledgerJournalActor.innerHTML = actorOptions;
+      els.ledgerWithdrawalActor.innerHTML = actorOptions;
+      els.ledgerJournalSourceCurrency.innerHTML = currencyOptions;
+      els.ledgerJournalCurrency.innerHTML = currencyOptions;
+      els.ledgerWithdrawalCurrency.innerHTML = currencyOptions;
+
+      if (actors.some((actor) => actor.name === previousJournalActor)) els.ledgerJournalActor.value = previousJournalActor;
+      if (!els.ledgerJournalActor.value && actors[0]) els.ledgerJournalActor.value = actors[0].name;
+      if (actors.some((actor) => actor.name === previousWithdrawalActor)) els.ledgerWithdrawalActor.value = previousWithdrawalActor;
+      if (!els.ledgerWithdrawalActor.value && actors[0]) els.ledgerWithdrawalActor.value = actors[0].name;
+      els.ledgerJournalSourceCurrency.value = supportedCurrencies.includes(previousJournalSourceCurrency) ? previousJournalSourceCurrency : "USD";
+      els.ledgerJournalCurrency.value = supportedCurrencies.includes(previousJournalCurrency) ? previousJournalCurrency : "USD";
+      els.ledgerWithdrawalCurrency.value = supportedCurrencies.includes(previousWithdrawalCurrency) ? previousWithdrawalCurrency : "USD";
+      updateJournalConversion("rate", false);
+    }
+
+    function updateJournalConversion(changedField, recordTouch = true) {
+      const field = changedField === "amount" ? "source" : changedField;
+      if (recordTouch && ["source", "rate", "payout"].includes(field)) {
+        journalConversionTouches = journalConversionTouches.filter((item) => item !== field);
+        journalConversionTouches.push(field);
+        journalConversionTouches = journalConversionTouches.slice(-2);
+      }
+      const rate = Number(els.ledgerJournalRate.value) || 0;
+      const sourceCurrency = els.ledgerJournalSourceCurrency.value || "USD";
+      const ledgerCurrency = els.ledgerJournalCurrency.value || sourceCurrency;
+      const sourceMinor = parseMoney(els.ledgerJournalSourceAmount.value, sourceCurrency);
+      const ledgerMinor = parseMoney(els.ledgerJournalAmount.value, ledgerCurrency);
+      const sourceMajor = majorAmount(sourceMinor, sourceCurrency);
+      const ledgerMajor = majorAmount(ledgerMinor, ledgerCurrency);
+      const hasSource = sourceMinor > 0;
+      const hasRate = rate > 0;
+      const hasLedger = ledgerMinor > 0;
+      const touched = new Set(journalConversionTouches);
+      const touchedSourceLedger = touched.has("source") && touched.has("payout");
+      const touchedRateLedger = touched.has("rate") && touched.has("payout");
+      const touchedSourceRate = touched.has("source") && touched.has("rate");
+      if (touchedSourceLedger && hasSource && hasLedger) {
+        els.ledgerJournalRate.value = formatRate(ledgerMajor / sourceMajor);
+        return;
+      }
+      if (touchedRateLedger && hasRate && hasLedger) {
+        els.ledgerJournalSourceAmount.value = formatMinor(minorFromMajor(ledgerMajor / rate, sourceCurrency), sourceCurrency);
+        return;
+      }
+      if (touchedSourceRate && hasSource && hasRate) {
+        els.ledgerJournalAmount.value = formatMinor(minorFromMajor(sourceMajor * rate, ledgerCurrency), ledgerCurrency);
+        return;
+      }
+      if (!hasRate && hasSource && hasLedger) {
+        els.ledgerJournalRate.value = formatRate(ledgerMajor / sourceMajor);
+        return;
+      }
+      if (!hasSource && hasLedger && hasRate) {
+        els.ledgerJournalSourceAmount.value = formatMinor(minorFromMajor(ledgerMajor / rate, sourceCurrency), sourceCurrency);
+        return;
+      }
+      if (!hasLedger && hasSource && hasRate) {
+        els.ledgerJournalAmount.value = formatMinor(minorFromMajor(sourceMajor * rate, ledgerCurrency), ledgerCurrency);
+      }
+    }
+
+    function postActorJournal({ actorName, sourceCurrency, sourceAmountMinor, currency, amountMinor, rate, remarks }) {
+      const journalId = nextJournalId();
+      const postedAt = new Date().toISOString();
+      const entryId = `JNL-${journalId.replace("JRN-", "")}`;
+      const detailBits = [
+        `Journal add ${money(sourceCurrency, sourceAmountMinor)} to ${money(currency, amountMinor)}`,
+        `Rate ${formatRate(rate)}`,
+        remarks ? `Remarks: ${remarks}` : ""
+      ].filter(Boolean);
+      state.ledger.unshift({
+        journal: journalId,
+        entryId,
+        source: "JOURNAL",
+        account: `${actorName} ACTOR_CLEARING`,
+        direction: "Debit",
+        currency,
+        amountMinor,
+        sourceCurrency,
+        sourceAmountMinor,
+        rate,
+        details: detailBits.join(" - "),
+        postedAt
+      });
+      syncSettlementsFromLedger();
+      return entryId;
+    }
+
+    function postActorWithdrawal({ actorName, currency, amountMinor, remarks }) {
+      const journalId = nextJournalId();
+      const postedAt = new Date().toISOString();
+      const entryId = `WDL-${journalId.replace("JRN-", "")}`;
+      const details = [`Withdrawal ${money(currency, amountMinor)} from ${actorName}`, remarks ? `Remarks: ${remarks}` : ""].filter(Boolean).join(" - ");
+      state.ledger.unshift(
+        { journal: journalId, entryId, source: "WITHDRAWAL", account: `${actorName} ACTOR_CLEARING`, direction: "Credit", currency, amountMinor, details, postedAt },
+        { journal: journalId, entryId, source: "WITHDRAWAL", account: "MASTER_FX_CLEARING", direction: "Debit", currency, amountMinor, details, postedAt }
+      );
+      syncSettlementsFromLedger();
+      return entryId;
+    }
+
     function fillTransferForm(transfer) {
       transferConversionTouches = [];
       els.transferFrom.value = transfer.from;
@@ -3880,18 +4093,74 @@
       if (!progress) return;
       if (!file) {
         if (orderId) pendingProofFiles.delete(orderId);
+        if (orderId) pendingProofUploads.delete(orderId);
         progress.textContent = "";
         return;
       }
       if (file.size > maxProofFileBytes) {
         if (orderId) pendingProofFiles.delete(orderId);
+        if (orderId) pendingProofUploads.delete(orderId);
         input.value = "";
         progress.textContent = "File too large";
         showOrderError(`Payment proof is too large. Use an image under ${Math.round(maxProofFileBytes / 1024 / 1024)} MB.`);
         return;
       }
       if (orderId) pendingProofFiles.set(orderId, file);
-      progress.textContent = `Attached: ${file.name || "payment proof"}`;
+      progress.textContent = "Uploading 0%";
+      if (!orderId) return;
+      const upload = {
+        status: "uploading",
+        fileName: file.name || `${orderId}-payment-proof.png`,
+        media: "",
+        promise: null
+      };
+      upload.promise = readFileAsDataUrl(file, (percent) => {
+        const current = pendingProofUploads.get(orderId);
+        if (current !== upload) return;
+        const currentProgress = document.querySelector(`.proof-progress[data-id="${orderId}"]`);
+        if (currentProgress) currentProgress.textContent = `Uploading ${percent}%`;
+      }).then((media) => {
+        upload.status = "ready";
+        upload.media = media;
+        const currentProgress = document.querySelector(`.proof-progress[data-id="${orderId}"]`);
+        if (currentProgress) currentProgress.textContent = `Photo ready: ${upload.fileName}`;
+        return { media, fileName: upload.fileName };
+      }).catch((error) => {
+        upload.status = "error";
+        const currentProgress = document.querySelector(`.proof-progress[data-id="${orderId}"]`);
+        if (currentProgress) currentProgress.textContent = "Could not upload photo";
+        throw error;
+      });
+      pendingProofUploads.set(orderId, upload);
+      upload.promise.catch(() => {});
+    }
+
+    async function paymentProofForOrder(orderId, actionBox) {
+      const progress = actionBox?.querySelector(".proof-progress");
+      const upload = pendingProofUploads.get(orderId);
+      if (upload?.status === "ready" && upload.media) {
+        if (progress) progress.textContent = `Photo ready: ${upload.fileName}`;
+        return { media: upload.media, fileName: upload.fileName };
+      }
+      if (upload?.status === "uploading" && upload.promise) {
+        if (progress) progress.textContent = "Waiting for photo upload...";
+        return upload.promise;
+      }
+      if (upload?.status === "error") {
+        throw new Error("Could not attach the payment proof. Try another screenshot.");
+      }
+      const proofFile = pendingProofFiles.get(orderId) || actionBox?.querySelector(".payment-proof-input")?.files?.[0] || null;
+      if (!proofFile) return null;
+      if (proofFile.size > maxProofFileBytes) {
+        pendingProofFiles.delete(orderId);
+        pendingProofUploads.delete(orderId);
+        throw new Error(`Payment proof is too large. Use an image under ${Math.round(maxProofFileBytes / 1024 / 1024)} MB.`);
+      }
+      if (progress) progress.textContent = "Uploading 0%";
+      const media = await readFileAsDataUrl(proofFile, (percent) => {
+        if (progress) progress.textContent = `Uploading ${percent}%`;
+      });
+      return { media, fileName: proofFile.name || `${orderId}-payment-proof.png` };
     }
 
     function setChatRecordButtonState(mode) {
@@ -4570,12 +4839,22 @@
       }
       if (canPay) {
         const pendingProof = pendingProofFiles.get(order.id);
+        const proofUpload = pendingProofUploads.get(order.id);
+        const proofStatus = proofUpload?.status === "uploading"
+          ? "Uploading photo..."
+          : proofUpload?.status === "ready"
+            ? `Photo ready: ${escapeHtml(proofUpload.fileName || "payment proof")}`
+            : proofUpload?.status === "error"
+              ? "Could not upload photo"
+              : pendingProof
+                ? `Attached: ${escapeHtml(pendingProof.name || "payment proof")}`
+                : "";
         return `
           <div class="order-actions">
             <span class="proof-upload-row">
               <button class="btn secondary attach-proof" data-id="${order.id}" type="button">${icons.paperclip}Attach</button>
               <input class="payment-proof-input hidden" data-id="${order.id}" type="file" accept="image/*">
-              <span class="muted proof-progress" data-id="${order.id}">${pendingProof ? `Attached: ${escapeHtml(pendingProof.name || "payment proof")}` : ""}</span>
+              <span class="muted proof-progress" data-id="${order.id}">${proofStatus}</span>
             </span>
             <button class="btn primary pay-order" data-id="${order.id}" type="button">${icons.check}Mark Paid</button>
             <button class="btn secondary return-order" data-id="${order.id}" type="button">Return</button>
@@ -4861,6 +5140,7 @@
     function ledgerReferenceNumber(line) {
       if (line.orderId) return line.orderId;
       if (line.transferId) return line.transferId;
+      if (line.entryId) return line.entryId;
       const order = orderForLedgerLine(line);
       if (order) return order.id;
       const transfer = transferForLedgerLine(line);
@@ -4974,7 +5254,7 @@
     function ledgerLineDetails(line, viewer) {
       if (line.source === "PREVIOUS_CLOSE") return line.details || "Previous Close";
       const order = orderForLedgerLine(line);
-      if (!order) return "";
+      if (!order) return line.details || "";
       const bits = [
         order.id ? `Order: ${order.id}` : "",
         order.senderName ? `Sender: ${order.senderName}` : "",
@@ -5959,8 +6239,14 @@
         showOrderError("Only the assigned payer can mark this order as paid.");
         return;
       }
+      const proofUpload = pendingProofUploads.get(orderId);
+      if (proofUpload?.status === "error") {
+        showOrderError("Could not attach the payment proof. Try another screenshot.");
+        return;
+      }
       if (proofFile && proofFile.size > maxProofFileBytes) {
         if (orderId) pendingProofFiles.delete(orderId);
+        if (orderId) pendingProofUploads.delete(orderId);
         showOrderError(`Payment proof is too large. Use an image under ${Math.round(maxProofFileBytes / 1024 / 1024)} MB.`);
         return;
       }
@@ -5979,32 +6265,18 @@
       }
       const actor = actorForOrderPayment(order);
       const actionBox = payButton.closest(".order-actions");
-      const proofFile = pendingProofFiles.get(orderId) || actionBox?.querySelector(".payment-proof-input")?.files?.[0] || null;
       const progress = actionBox?.querySelector(".proof-progress");
-      if (proofFile && proofFile.size > maxProofFileBytes) {
-        pendingProofFiles.delete(orderId);
-        showOrderError(`Payment proof is too large. Use an image under ${Math.round(maxProofFileBytes / 1024 / 1024)} MB.`);
-        return;
-      }
       processingOrderIds.add(order.id);
       payButton.disabled = true;
-      if (progress) progress.textContent = proofFile ? "Uploading 0%" : "Posting payment...";
       let proof = null;
-      if (proofFile) {
-        try {
-          proof = {
-            media: await readFileAsDataUrl(proofFile, (percent) => {
-              if (progress) progress.textContent = `Uploading ${percent}%`;
-            }),
-            fileName: proofFile.name || `${order.id}-payment-proof.png`
-          };
-        } catch {
-          processingOrderIds.delete(order.id);
-          payButton.disabled = false;
-          if (progress) progress.textContent = "";
-          showOrderError("Could not attach the payment proof. Try another screenshot.");
-          return;
-        }
+      try {
+        proof = await paymentProofForOrder(orderId, actionBox);
+      } catch (error) {
+        processingOrderIds.delete(order.id);
+        payButton.disabled = false;
+        if (progress) progress.textContent = "";
+        showOrderError(error.message || "Could not attach the payment proof. Try another screenshot.");
+        return;
       }
       if (progress) progress.textContent = "Posting payment...";
       try {
@@ -6022,6 +6294,7 @@
         order.updatedAt = order.paidAt;
         sendPaymentProofToMaster(order, actor, proof);
         pendingProofFiles.delete(order.id);
+        pendingProofUploads.delete(order.id);
         state.orderState = "Paid";
         els.orderState.textContent = "Paid";
         els.orderState.className = "state-pill good";
@@ -6064,6 +6337,7 @@
     let chatAudioChunks = [];
     let orderConversionTouches = [];
     let transferConversionTouches = [];
+    let journalConversionTouches = [];
 
     function setAuthMode(mode) {
       const signup = mode === "signup";
@@ -6461,6 +6735,43 @@
       updateTransferConversion("rate", false);
     });
 
+    els.ledgerJournalForm.addEventListener("input", (event) => {
+      els.ledgerJournalError.classList.remove("visible");
+      if (event.target === els.ledgerJournalSourceAmount) {
+        updateJournalConversion("source");
+      }
+      if (event.target === els.ledgerJournalRate) {
+        updateJournalConversion("rate");
+      }
+      if (event.target === els.ledgerJournalAmount) {
+        updateJournalConversion("payout");
+      }
+    });
+
+    els.ledgerJournalSourceCurrency.addEventListener("change", () => {
+      journalConversionTouches = [];
+      els.ledgerJournalError.classList.remove("visible");
+      updateJournalConversion("rate", false);
+    });
+
+    els.ledgerJournalCurrency.addEventListener("change", () => {
+      journalConversionTouches = [];
+      els.ledgerJournalError.classList.remove("visible");
+      updateJournalConversion("rate", false);
+    });
+
+    els.ledgerJournalActor.addEventListener("change", () => {
+      els.ledgerJournalError.classList.remove("visible");
+    });
+
+    els.ledgerWithdrawalForm.addEventListener("input", () => {
+      els.ledgerWithdrawalError.classList.remove("visible");
+    });
+
+    els.ledgerWithdrawalForm.addEventListener("change", () => {
+      els.ledgerWithdrawalError.classList.remove("visible");
+    });
+
     els.chatConversationList.addEventListener("click", (event) => {
       const button = event.target.closest(".chat-item");
       if (!button) return;
@@ -6842,6 +7153,60 @@
         notifyEvent("New transfer", transfer.state === "Pending Approval"
           ? `${transfer.id} sent to Master for approval.`
           : `${transfer.id} sent to ${transfer.to}.`);
+        renderAll();
+      });
+    });
+
+    els.ledgerJournalForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const actor = selectedActor();
+      if (actor?.role !== "Master") return;
+      updateJournalConversion("submit", false);
+      const actorName = els.ledgerJournalActor.value;
+      const sourceCurrency = els.ledgerJournalSourceCurrency.value;
+      const currency = els.ledgerJournalCurrency.value;
+      const sourceAmountMinor = parseMoney(els.ledgerJournalSourceAmount.value, sourceCurrency);
+      const amountMinor = parseMoney(els.ledgerJournalAmount.value, currency);
+      const rate = Number(els.ledgerJournalRate.value) || 0;
+      const remarks = els.ledgerJournalRemarks.value.trim();
+      const invalid = !actorName || !sourceCurrency || !currency || sourceAmountMinor <= 0 || amountMinor <= 0 || rate <= 0;
+      els.ledgerJournalError.textContent = invalid
+        ? "Choose an actor, currencies, rate, and amount."
+        : "";
+      els.ledgerJournalError.classList.toggle("visible", invalid);
+      if (invalid) return;
+      confirmAction("Post this journal amount to the selected actor?", () => {
+        const entryId = postActorJournal({ actorName, sourceCurrency, sourceAmountMinor, currency, amountMinor, rate, remarks });
+        journalConversionTouches = [];
+        els.ledgerJournalSourceAmount.value = "";
+        els.ledgerJournalAmount.value = "";
+        els.ledgerJournalRemarks.value = "";
+        els.ledgerJournalError.classList.remove("visible");
+        notifyEvent("Journal posted", `${entryId} added to ${actorName}.`);
+        renderAll();
+      });
+    });
+
+    els.ledgerWithdrawalForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const actor = selectedActor();
+      if (actor?.role !== "Master") return;
+      const actorName = els.ledgerWithdrawalActor.value;
+      const currency = els.ledgerWithdrawalCurrency.value;
+      const amountMinor = parseMoney(els.ledgerWithdrawalAmount.value, currency);
+      const remarks = els.ledgerWithdrawalRemarks.value.trim();
+      const invalid = !actorName || !currency || amountMinor <= 0;
+      els.ledgerWithdrawalError.textContent = invalid
+        ? "Choose an actor, currency, and withdrawal amount."
+        : "";
+      els.ledgerWithdrawalError.classList.toggle("visible", invalid);
+      if (invalid) return;
+      confirmAction("Record this withdrawal from the selected actor?", () => {
+        const entryId = postActorWithdrawal({ actorName, currency, amountMinor, remarks });
+        els.ledgerWithdrawalAmount.value = "";
+        els.ledgerWithdrawalRemarks.value = "";
+        els.ledgerWithdrawalError.classList.remove("visible");
+        notifyEvent("Withdrawal recorded", `${entryId} withdrew ${money(currency, amountMinor)} from ${actorName}.`);
         renderAll();
       });
     });
@@ -7495,6 +7860,7 @@
       renderCurrencyOptions();
       renderActorSelectors();
       renderTransferControls();
+      renderLedgerToolControls();
       renderLedgerActorSelector();
       renderProfiles();
       renderActors();
