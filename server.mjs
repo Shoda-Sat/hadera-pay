@@ -344,12 +344,34 @@ function mergeOrders(existingItems = [], incomingItems = []) {
     if (item.journal && !next.journal) next.journal = item.journal;
     if (previous.paidAt && !next.paidAt) next.paidAt = previous.paidAt;
     if (item.paidAt && !next.paidAt) next.paidAt = item.paidAt;
+    if (previous.voidRequestedAt && !next.voidRequestedAt) next.voidRequestedAt = previous.voidRequestedAt;
+    if (item.voidRequestedAt && !next.voidRequestedAt) next.voidRequestedAt = item.voidRequestedAt;
+    if (previous.voidRequestedBy && !next.voidRequestedBy) next.voidRequestedBy = previous.voidRequestedBy;
+    if (item.voidRequestedBy && !next.voidRequestedBy) next.voidRequestedBy = item.voidRequestedBy;
+    if (previous.voidRejectedAt && !next.voidRejectedAt) next.voidRejectedAt = previous.voidRejectedAt;
+    if (item.voidRejectedAt && !next.voidRejectedAt) next.voidRejectedAt = item.voidRejectedAt;
+    if (previous.voidRejectedBy && !next.voidRejectedBy) next.voidRejectedBy = previous.voidRejectedBy;
+    if (item.voidRejectedBy && !next.voidRejectedBy) next.voidRejectedBy = item.voidRejectedBy;
     if (previous.voidJournal && !next.voidJournal) next.voidJournal = previous.voidJournal;
     if (item.voidJournal && !next.voidJournal) next.voidJournal = item.voidJournal;
     if (previous.voidedAt && !next.voidedAt) next.voidedAt = previous.voidedAt;
     if (item.voidedAt && !next.voidedAt) next.voidedAt = item.voidedAt;
     if (previous.voidedBy && !next.voidedBy) next.voidedBy = previous.voidedBy;
     if (item.voidedBy && !next.voidedBy) next.voidedBy = item.voidedBy;
+    const latestVoidRequest = Math.max(new Date(next.voidRequestedAt || 0).getTime(), 0);
+    const latestVoidReject = Math.max(new Date(next.voidRejectedAt || 0).getTime(), 0);
+    const hasOpenVoidRequest = (previous.state === "Void Requested" || item.state === "Void Requested" || previous.voidRequested || item.voidRequested) &&
+      latestVoidRequest >= latestVoidReject;
+    if (!hasOpenVoidRequest && (previous.state === "Paid" || item.state === "Paid" || next.paidAt || next.journal)) {
+      next.state = "Paid";
+      next.returnedBy = "";
+      next.returnedReason = "";
+      next.returnedAt = "";
+    }
+    if (hasOpenVoidRequest) {
+      next.state = "Void Requested";
+      next.voidRequested = true;
+    }
     if (previous.state === "Voided" || item.state === "Voided") next.state = "Voided";
     merged.set(item.id, next);
   });

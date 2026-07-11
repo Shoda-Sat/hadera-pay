@@ -2689,12 +2689,34 @@
         if (item.journal && !next.journal) next.journal = item.journal;
         if (previous.paidAt && !next.paidAt) next.paidAt = previous.paidAt;
         if (item.paidAt && !next.paidAt) next.paidAt = item.paidAt;
+        if (previous.voidRequestedAt && !next.voidRequestedAt) next.voidRequestedAt = previous.voidRequestedAt;
+        if (item.voidRequestedAt && !next.voidRequestedAt) next.voidRequestedAt = item.voidRequestedAt;
+        if (previous.voidRequestedBy && !next.voidRequestedBy) next.voidRequestedBy = previous.voidRequestedBy;
+        if (item.voidRequestedBy && !next.voidRequestedBy) next.voidRequestedBy = item.voidRequestedBy;
+        if (previous.voidRejectedAt && !next.voidRejectedAt) next.voidRejectedAt = previous.voidRejectedAt;
+        if (item.voidRejectedAt && !next.voidRejectedAt) next.voidRejectedAt = item.voidRejectedAt;
+        if (previous.voidRejectedBy && !next.voidRejectedBy) next.voidRejectedBy = previous.voidRejectedBy;
+        if (item.voidRejectedBy && !next.voidRejectedBy) next.voidRejectedBy = item.voidRejectedBy;
         if (previous.voidJournal && !next.voidJournal) next.voidJournal = previous.voidJournal;
         if (item.voidJournal && !next.voidJournal) next.voidJournal = item.voidJournal;
         if (previous.voidedAt && !next.voidedAt) next.voidedAt = previous.voidedAt;
         if (item.voidedAt && !next.voidedAt) next.voidedAt = item.voidedAt;
         if (previous.voidedBy && !next.voidedBy) next.voidedBy = previous.voidedBy;
         if (item.voidedBy && !next.voidedBy) next.voidedBy = item.voidedBy;
+        const latestVoidRequest = Math.max(new Date(next.voidRequestedAt || 0).getTime(), 0);
+        const latestVoidReject = Math.max(new Date(next.voidRejectedAt || 0).getTime(), 0);
+        const hasOpenVoidRequest = (previous.state === "Void Requested" || item.state === "Void Requested" || previous.voidRequested || item.voidRequested) &&
+          latestVoidRequest >= latestVoidReject;
+        if (!hasOpenVoidRequest && (previous.state === "Paid" || item.state === "Paid" || next.paidAt || next.journal)) {
+          next.state = "Paid";
+          next.returnedBy = "";
+          next.returnedReason = "";
+          next.returnedAt = "";
+        }
+        if (hasOpenVoidRequest) {
+          next.state = "Void Requested";
+          next.voidRequested = true;
+        }
         if (previous.state === "Voided" || item.state === "Voided") next.state = "Voided";
         merged.set(item.id, next);
       });
@@ -6256,6 +6278,20 @@
       return true;
     }
 
+    function repairPostedOrderStates() {
+      state.orders.forEach((order) => {
+        if (!order?.journal || ["Paid", "Voided", "Void Requested"].includes(order.state)) return;
+        const postedLine = state.ledger.find((line) => line.source === "ORDER_PAYMENT" && line.journal === order.journal);
+        const paidAt = order.paidAt || postedLine?.postedAt || order.updatedAt || new Date().toISOString();
+        order.state = "Paid";
+        order.paidAt = paidAt;
+        order.updatedAt = paidAt;
+        order.returnedBy = "";
+        order.returnedReason = "";
+        order.returnedAt = "";
+      });
+    }
+
     function approveOrderVoid(order, actorName = "Master") {
       if (!order?.journal || order.voidJournal) return;
       const paidLines = state.ledger.filter((line) => line.source === "ORDER_PAYMENT" && line.journal === order.journal);
@@ -6381,7 +6417,7 @@
     }
 
     function actorCanPayOrder(order, actor = selectedActor()) {
-      if (!order || order.state !== "Assigned" || order.journal) return false;
+      if (!order || order.state !== "Assigned") return false;
       if (!["Agent", "Special Agent", "Special Broker"].includes(actor?.role)) return false;
       if (currentAuth?.membership?.role === "Master" || currentAuth?.membership?.role === "Owner") return false;
       if (!currentAuth) return order.agent === actor.name || (order.agentActorId && order.agentActorId === actor.id);
@@ -6440,6 +6476,23 @@
       });
     }
 
+    function finalizeOrderPaid(order, actor, proof) {
+      const paidAt = order.paidAt || new Date().toISOString();
+      order.state = "Paid";
+      order.paidAt = paidAt;
+      order.updatedAt = paidAt;
+      order.returnedBy = "";
+      order.returnedReason = "";
+      order.returnedAt = "";
+      sendPaymentProofToMaster(order, actor, proof);
+      pendingProofFiles.delete(order.id);
+      pendingProofUploads.delete(order.id);
+      state.orderState = "Paid";
+      els.orderState.textContent = "Paid";
+      els.orderState.className = "state-pill good";
+      els.voidButton.disabled = false;
+    }
+
     async function markOrderPaidFromButton(payButton) {
       const orderId = payButton?.dataset?.id;
       if (!orderId || payButton.disabled || processingOrderIds.has(orderId)) return;
@@ -6465,25 +6518,16 @@
       }
       if (progress) progress.textContent = "Posting payment...";
       try {
-        if (order.state !== "Assigned" || order.journal) {
+        if (order.state !== "Assigned") {
           renderAll();
           return;
         }
-        const posted = postOrderPayment(order);
-        if (!posted) {
+        const posted = order.journal ? true : postOrderPayment(order);
+        if (!posted && !order.journal) {
           renderAll();
           return;
         }
-        order.state = "Paid";
-        order.paidAt = new Date().toISOString();
-        order.updatedAt = order.paidAt;
-        sendPaymentProofToMaster(order, actor, proof);
-        pendingProofFiles.delete(order.id);
-        pendingProofUploads.delete(order.id);
-        state.orderState = "Paid";
-        els.orderState.textContent = "Paid";
-        els.orderState.className = "state-pill good";
-        els.voidButton.disabled = false;
+        finalizeOrderPaid(order, actor, proof);
         renderAll();
         await saveStateNow();
       } finally {
@@ -8061,6 +8105,7 @@
 
     function renderAll() {
       applyPrivileges();
+      repairPostedOrderStates();
       renderCurrencyOptions();
       renderActorSelectors();
       renderTransferControls();
