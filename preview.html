@@ -2415,6 +2415,7 @@
     const pendingProofFiles = new Map();
     const pendingProofUploads = new Map();
     const processingTransferIds = new Set();
+    const receivablePaymentDrafts = new Map();
     const maxProofFileBytes = 4 * 1024 * 1024;
     const supportedCurrencies = ["USD", "ETB", "EUR", "ERN"];
 
@@ -5571,6 +5572,11 @@
     }
 
     function renderReceivables() {
+      const activePaymentInput = document.activeElement?.closest?.(".receivable-payment");
+      if (activePaymentInput && els.receivableRows.contains(activePaymentInput)) {
+        receivablePaymentDrafts.set(activePaymentInput.dataset.id, activePaymentInput.value || "");
+        return;
+      }
       const actor = selectedActor();
       syncVoidedReceivablesFromOrders();
       const rows = visibleReceivablesFor(actor)
@@ -5597,6 +5603,7 @@
           isVoided ? `Voided: ${displayDate(item.voidedAt)}` : "",
           paymentHistory ? `Payments: ${paymentHistory}` : ""
         ].filter(Boolean).join(" - ");
+        const draftValue = receivablePaymentDrafts.get(item.id) ?? "";
         return `
           <tr class="${isVoided ? "void-row" : ""}">
             <td>${escapeHtml(displayDate(item.createdAt))}</td>
@@ -5609,7 +5616,7 @@
             <td>
               ${canCollect ? `
                 <div class="setting-inline">
-                  <input class="receivable-payment" data-id="${item.id}" inputmode="decimal" placeholder="Amount">
+                  <input class="receivable-payment" data-id="${item.id}" inputmode="decimal" placeholder="Amount" value="${escapeHtml(draftValue)}">
                   <button class="btn primary collect-receivable" data-id="${item.id}" type="button">Pay</button>
                 </div>
               ` : `<span class="state-pill ${isVoided ? "danger" : balanceMinor === 0 ? "good" : "warn"}">${isVoided ? "Voided" : balanceMinor === 0 ? "Paid" : "Open"}</span>`}
@@ -6618,6 +6625,12 @@
         state.activeView = "dashboard";
       }
       renderAll();
+    });
+
+    els.receivableRows.addEventListener("input", (event) => {
+      const input = event.target.closest?.(".receivable-payment");
+      if (!input) return;
+      receivablePaymentDrafts.set(input.dataset.id, input.value || "");
     });
 
     els.menuButton.addEventListener("click", openDrawer);
@@ -7747,6 +7760,7 @@
         const receivable = state.receivables.find((item) => item.id === collectReceivableButton.dataset.id);
         if (!receivable) return;
         const input = collectReceivableButton.closest(".setting-inline")?.querySelector(".receivable-payment");
+        if (input) receivablePaymentDrafts.set(receivable.id, input.value || "");
         const amountMinor = parseMoney(input?.value || "", receivable.currency || "USD");
         const paidMinor = receivablePaidMinor(receivable);
         const balanceMinor = Math.max(0, Number(receivable.principalMinor || 0) - paidMinor);
@@ -7766,6 +7780,8 @@
           receivedBy: actor?.name || "Unknown"
         });
         receivable.updatedAt = new Date().toISOString();
+        receivablePaymentDrafts.delete(receivable.id);
+        input?.blur();
         notifyEvent("Receivable paid", `${money(receivable.currency || "USD", amountMinor)} collected for ${receivable.id}.`);
         renderAll();
         return;
