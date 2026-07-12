@@ -2154,6 +2154,10 @@
                   <label for="archiveAmountMax">Amount max</label>
                   <input id="archiveAmountMax" inputmode="decimal" placeholder="0.00">
                 </div>
+                <div class="field">
+                  <label for="archiveSearch">Search</label>
+                  <input id="archiveSearch" placeholder="Name, order, transfer, remarks">
+                </div>
               </div>
             </div>
             <div class="panel-body table-wrap">
@@ -3092,6 +3096,7 @@
       archiveDateTo: document.getElementById("archiveDateTo"),
       archiveAmountMin: document.getElementById("archiveAmountMin"),
       archiveAmountMax: document.getElementById("archiveAmountMax"),
+      archiveSearch: document.getElementById("archiveSearch"),
       resetPermit: document.getElementById("resetPermit"),
       resetError: document.getElementById("resetError"),
       transferFrom: document.getElementById("transferFrom"),
@@ -5244,8 +5249,16 @@
         from: closedWindow ? closedWindow.from : els.archiveDateFrom.value ? new Date(`${els.archiveDateFrom.value}T00:00:00`).getTime() : null,
         to: closedWindow ? closedWindow.to : els.archiveDateTo.value ? new Date(`${els.archiveDateTo.value}T23:59:59`).getTime() : null,
         minMinor: parseMoney(els.archiveAmountMin.value),
-        maxMinor: parseMoney(els.archiveAmountMax.value)
+        maxMinor: parseMoney(els.archiveAmountMax.value),
+        search: text(els.archiveSearch?.value || "").toLowerCase()
       };
+    }
+
+    function archiveSearchVisible(values, filters) {
+      if (!filters.search) return true;
+      return values
+        .filter((value) => value !== undefined && value !== null)
+        .some((value) => String(value).toLowerCase().includes(filters.search));
     }
 
     function archiveRowVisible(dateValue, amountMinor, filters) {
@@ -6100,6 +6113,7 @@
               const netMinor = balances[currency] || 0;
               const amountMinor = Math.abs(netMinor);
               if (amountMinor === 0 || !archiveRowVisible(archive.closedAt, amountMinor, filters)) return;
+              if (!archiveSearchVisible([archive.actor, archive.id, "Closed Balance", currency, netMinor > 0 ? "Owes Master" : "Master owes"], filters)) return;
               actorRows.push(`
                 <tr>
                   <td>${escapeHtml(displayDate(archive.closedAt))}</td>
@@ -6111,17 +6125,42 @@
                 </tr>
               `);
             });
-            if (archive.balances) return;
             (archive.orders || []).forEach((order) => {
               const date = order.sentAt || order.createdAt || order.postedAt || archive.closedAt;
               const amountMinor = Number(order.sourceAmountMinor || 0);
               if (!archiveRowVisible(date, amountMinor, filters)) return;
+              const detail = [
+                `${order.broker || ""} -> ${order.agent || ""}`,
+                order.senderName ? `Sender: ${order.senderName}` : "",
+                order.receiverName ? `Receiver: ${order.receiverName}` : "",
+                order.phoneNumber ? `Phone: ${order.phoneNumber}` : "",
+                order.accountNumber ? `Account: ${order.accountNumber}` : "",
+                order.remarks ? `Remarks: ${order.remarks}` : "",
+                order.paidAt ? `Paid ${displayDate(order.paidAt)}` : "",
+                order.voidedAt ? `Voided ${displayDate(order.voidedAt)}` : ""
+              ].filter(Boolean).join(" - ");
+              if (!archiveSearchVisible([
+                archive.actor,
+                archive.id,
+                order.id,
+                order.broker,
+                order.agent,
+                order.senderName,
+                order.receiverName,
+                order.phoneNumber,
+                order.accountNumber,
+                order.remarks,
+                order.state,
+                order.journal,
+                order.voidJournal,
+                detail
+              ], filters)) return;
               actorRows.push(`
                 <tr>
                   <td>${escapeHtml(displayDate(date))}</td>
                   <td>Order</td>
                   <td><strong>${escapeHtml(order.id)}</strong></td>
-                  <td>${escapeHtml(order.broker)} -> ${escapeHtml(order.agent)}${order.paidAt ? ` · Paid ${escapeHtml(displayDate(order.paidAt))}` : ""}</td>
+                  <td>${escapeHtml(detail || `${order.broker || ""} -> ${order.agent || ""}`)}</td>
                   <td>${lockedAmount(order.sourceCurrency || "USD", amountMinor)}</td>
                   <td><span class="state-pill danger">Locked</span></td>
                 </tr>
@@ -6131,12 +6170,28 @@
               const date = transfer.sentAt || transfer.createdAt || transfer.postedAt || archive.closedAt;
               const amountMinor = Number(transfer.amountMinor || 0);
               if (!archiveRowVisible(date, amountMinor, filters)) return;
+              const detail = transfer.details || [
+                `${transfer.from || ""} -> ${transfer.to || ""}`,
+                transfer.remarks ? `Remarks: ${transfer.remarks}` : "",
+                transfer.paidOutAt ? `Paid out ${displayDate(transfer.paidOutAt)}` : ""
+              ].filter(Boolean).join(" - ");
+              if (!archiveSearchVisible([
+                archive.actor,
+                archive.id,
+                transfer.id,
+                transfer.from,
+                transfer.to,
+                transfer.remarks,
+                transfer.state,
+                transfer.journal,
+                detail
+              ], filters)) return;
               actorRows.push(`
                 <tr>
                   <td>${escapeHtml(displayDate(date))}</td>
                   <td>Transfer</td>
                   <td><strong>${escapeHtml(transfer.id)}</strong></td>
-                  <td>${escapeHtml(transfer.from)} -> ${escapeHtml(transfer.to)}${transfer.paidOutAt ? ` · Paid out ${escapeHtml(displayDate(transfer.paidOutAt))}` : ""}</td>
+                  <td>${escapeHtml(detail || `${transfer.from || ""} -> ${transfer.to || ""}`)}</td>
                   <td>${lockedAmount(transfer.currency, amountMinor)}</td>
                   <td><span class="state-pill danger">Locked</span></td>
                 </tr>
@@ -6146,12 +6201,25 @@
               const date = line.postedAt || archive.closedAt;
               const amountMinor = Number(line.amountMinor || 0);
               if (!archiveRowVisible(date, amountMinor, filters)) return;
+              const reference = line.entryId || line.transferId || line.orderId || line.journal;
+              const detail = line.details || `${line.account} ${line.direction}`;
+              if (!archiveSearchVisible([
+                archive.actor,
+                archive.id,
+                reference,
+                line.journal,
+                line.source,
+                line.account,
+                line.direction,
+                line.details,
+                detail
+              ], filters)) return;
               actorRows.push(`
                 <tr>
                   <td>${escapeHtml(displayDate(date))}</td>
                   <td>Ledger</td>
-                  <td><strong>${escapeHtml(line.journal)}</strong></td>
-                  <td>${escapeHtml(line.account)} ${escapeHtml(line.direction)}</td>
+                  <td><strong>${escapeHtml(reference)}</strong></td>
+                  <td>${escapeHtml(detail)}</td>
                   <td>${lockedAmount(line.currency, amountMinor)}</td>
                   <td><span class="state-pill danger">Locked</span></td>
                 </tr>
@@ -6350,6 +6418,81 @@
       return true;
     }
 
+    function archiveOrderSnapshot(order, actorName, closedAt = new Date().toISOString()) {
+      return {
+        id: order.id,
+        actor: actorName,
+        broker: order.broker,
+        agent: order.agent,
+        senderName: order.senderName || "",
+        receiverName: order.receiverName || "",
+        accountNumber: order.accountNumber || "",
+        phoneNumber: order.phoneNumber || "",
+        remarks: order.remarks || "",
+        sourceCurrency: order.sourceCurrency || "USD",
+        sourceAmountMinor: Number(order.sourceAmountMinor || 0),
+        payoutCurrency: order.payoutCurrency || order.sourceCurrency || "USD",
+        payoutAmountMinor: Number(order.payoutAmountMinor || order.sourceAmountMinor || 0),
+        state: order.state,
+        fundingType: order.fundingType || "cash",
+        journal: order.journal || "",
+        voidJournal: order.voidJournal || "",
+        createdAt: order.createdAt || "",
+        sentAt: order.sentAt || "",
+        paidAt: order.paidAt || "",
+        voidedAt: order.voidedAt || "",
+        archivedAt: closedAt
+      };
+    }
+
+    function archiveTransferSnapshot(transfer, actorName, closedAt = new Date().toISOString()) {
+      return {
+        id: transfer.id,
+        actor: actorName,
+        from: transfer.from,
+        to: transfer.to,
+        sourceCurrency: transfer.sourceCurrency || transfer.currency || "USD",
+        sourceAmountMinor: Number(transfer.sourceAmountMinor || transfer.amountMinor || 0),
+        currency: transfer.currency || transfer.sourceCurrency || "USD",
+        amountMinor: Number(transfer.amountMinor || 0),
+        rate: transfer.rate || "1",
+        remarks: transfer.remarks || "",
+        state: transfer.state,
+        journal: transfer.journal || "",
+        createdAt: transfer.createdAt || "",
+        sentAt: transfer.sentAt || "",
+        approvedAt: transfer.approvedAt || "",
+        paidOutAt: transfer.paidOutAt || "",
+        archivedAt: closedAt,
+        details: transferLedgerDetails(transfer)
+      };
+    }
+
+    function archiveLedgerSnapshot(line, actorName, closedAt = new Date().toISOString()) {
+      return {
+        actor: actorName,
+        journal: line.journal || "",
+        entryId: line.entryId || "",
+        transferId: line.transferId || "",
+        orderId: line.orderId || "",
+        source: line.source || "",
+        account: line.account || "",
+        direction: line.direction || "",
+        currency: line.currency || "USD",
+        amountMinor: Number(line.amountMinor || 0),
+        postedAt: line.postedAt || "",
+        details: line.details || ledgerLineDetails(line, selectedActor()) || "",
+        archivedAt: closedAt
+      };
+    }
+
+    function archiveLedgerLineIsSmart(line) {
+      if (!line || line.source === "PREVIOUS_CLOSE") return false;
+      if (String(line.source || "").startsWith("ORDER_")) return false;
+      if (line.source === "TRANSFER") return false;
+      return true;
+    }
+
     function repairPostedOrderStates() {
       state.orders.forEach((order) => {
         if (!order?.journal || ["Paid", "Voided", "Void Requested"].includes(order.state)) return;
@@ -6412,6 +6555,11 @@
       const incomeProfitMinor = incomeRows.reduce((sum, row) => sum + row.profitMinor, 0);
       const closedAt = new Date().toISOString();
       const previousBalances = archivedBalances(actor.name, actorLines);
+      const archivedOrderSnapshots = archivedOrders.map((order) => archiveOrderSnapshot(order, actor.name, closedAt));
+      const archivedTransferSnapshots = archivedTransfers.map((transfer) => archiveTransferSnapshot(transfer, actor.name, closedAt));
+      const archivedLedgerSnapshots = openTransactionLines
+        .filter(archiveLedgerLineIsSmart)
+        .map((line) => archiveLedgerSnapshot(line, actor.name, closedAt));
       if (!openTransactionLines.length && !archivedOrders.length && !archivedTransfers.length) return;
       if (actorLines.length || archivedOrders.length || archivedTransfers.length) {
         state.archives.unshift({
@@ -6422,9 +6570,9 @@
           incomeProfitMinor,
           incomeProfitCurrency: "USD",
           incomeSummary: `Closed Profit/Loss for ${actor.name}`,
-          ledger: [],
-          orders: [],
-          transfers: []
+          ledger: archivedLedgerSnapshots,
+          orders: archivedOrderSnapshots,
+          transfers: archivedTransferSnapshots
         });
       }
       state.ledger = state.ledger.map((line) =>
@@ -6951,7 +7099,7 @@
       saveState();
     });
 
-    [els.archiveActorFilter, els.archiveDatePreset, els.archiveDateFrom, els.archiveDateTo, els.archiveAmountMin, els.archiveAmountMax].forEach((input) => {
+    [els.archiveActorFilter, els.archiveDatePreset, els.archiveDateFrom, els.archiveDateTo, els.archiveAmountMin, els.archiveAmountMax, els.archiveSearch].forEach((input) => {
       input.addEventListener("input", renderArchive);
       input.addEventListener("change", renderArchive);
     });
