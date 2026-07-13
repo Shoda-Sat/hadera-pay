@@ -5575,6 +5575,12 @@
         .reduce((sum, line) => sum + Number(line.amountMinor || 0), 0);
     }
 
+    function specialAgentErnBaseUsdMinorForOrder(order, journalLines) {
+      const payoutCurrency = order.payoutCurrency || order.sourceCurrency || "USD";
+      if (payoutCurrency !== "ERN") return 0;
+      return payerAgentPayoutMinorForOrder(order, journalLines, "USD");
+    }
+
     function masterIncomeAmountForOrder(order, journalLines) {
       const baseCurrency = "USD";
       const payoutCurrency = order.payoutCurrency || order.sourceCurrency || baseCurrency;
@@ -5582,6 +5588,8 @@
       if (payoutCurrency === baseCurrency) {
         return payerAgentPayoutMinorForOrder(order, journalLines, baseCurrency) || payoutAmountMinor;
       }
+      const specialAgentBaseUsdMinor = specialAgentErnBaseUsdMinorForOrder(order, journalLines);
+      if (specialAgentBaseUsdMinor > 0) return specialAgentBaseUsdMinor;
       const setting = masterRateDivisorSettingFor(payoutCurrency);
       if (setting.enabled === true && Number(setting.divider) > 0) {
         const baseMajor = majorAmount(payoutAmountMinor, payoutCurrency) / Number(setting.divider);
@@ -5665,10 +5673,14 @@
           const baseCurrency = "USD";
           let baseAmountMinor = masterIncomeAmountForOrder(order, journalLines);
           const collected = masterCollectedAmountForOrder(order, journalLines);
-          const profitMinor = Number.isFinite(Number(collected.buyingProfitMinor))
+          let profitMinor = Number.isFinite(Number(collected.buyingProfitMinor))
             ? Number(collected.buyingProfitMinor)
             : collected.collectedUsdMinor - baseAmountMinor;
-          if (Number.isFinite(Number(collected.buyingProfitMinor))) {
+          const specialAgentBaseUsdMinor = specialAgentErnBaseUsdMinorForOrder(order, journalLines);
+          if (specialAgentBaseUsdMinor > 0) {
+            baseAmountMinor = specialAgentBaseUsdMinor;
+            profitMinor = collected.collectedUsdMinor - baseAmountMinor;
+          } else if (Number.isFinite(Number(collected.buyingProfitMinor))) {
             baseAmountMinor = collected.collectedUsdMinor - profitMinor;
           }
           return {
