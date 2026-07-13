@@ -419,6 +419,18 @@
       justify-content: flex-end;
     }
 
+    .ledger-export-options {
+      align-items: end;
+    }
+
+    .ledger-export-checks {
+      min-height: 42px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
     .panel-body {
       padding: 16px;
     }
@@ -734,6 +746,36 @@
       overflow-x: auto;
     }
 
+    .search-toolbar {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: end;
+    }
+
+    .search-table {
+      min-width: 980px;
+    }
+
+    .search-table td {
+      vertical-align: top;
+    }
+
+    .search-result-detail {
+      min-width: 280px;
+      white-space: normal;
+      line-height: 1.45;
+    }
+
+    .search-result-detail span {
+      display: block;
+    }
+
+    .search-amount {
+      text-align: left;
+      white-space: nowrap;
+    }
+
     table {
       border-collapse: collapse;
       width: 100%;
@@ -855,10 +897,74 @@
       min-width: 220px;
     }
 
+    .order-detail.compact {
+      gap: 2px;
+    }
+
+    .order-compact-primary {
+      color: var(--ink);
+      font-weight: 800;
+    }
+
+    .order-compact-receiver {
+      color: var(--muted);
+      overflow-wrap: anywhere;
+    }
+
+    .order-extra-detail {
+      margin-top: 2px;
+    }
+
+    .order-extra-detail summary {
+      align-items: center;
+      color: inherit;
+      cursor: pointer;
+      display: flex;
+      gap: 8px;
+      justify-content: space-between;
+      list-style: none;
+      width: 100%;
+    }
+
+    .order-extra-detail-toggle {
+      color: var(--accent);
+      flex: 0 0 auto;
+      font-weight: 800;
+    }
+
+    .order-extra-detail summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .order-extra-detail .show-less-text {
+      display: none;
+    }
+
+    .order-extra-detail[open] .show-more-text {
+      display: none;
+    }
+
+    .order-extra-detail[open] .show-less-text {
+      display: inline;
+    }
+
+    .order-extra-detail-list {
+      display: grid;
+      gap: 3px;
+      margin-top: 4px;
+    }
+
     .order-number-line {
       display: inline-flex;
       align-items: center;
       gap: 5px;
+      flex-wrap: wrap;
+    }
+
+    .order-number-secondary {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
     }
 
     .order-copy-details {
@@ -1530,6 +1636,14 @@
       .actions .btn {
         width: 100%;
       }
+
+      .search-toolbar {
+        grid-template-columns: 1fr;
+      }
+
+      .search-toolbar .btn {
+        width: 100%;
+      }
     }
   </style>
 </head>
@@ -1666,6 +1780,10 @@
         <button class="active" data-view="dashboard" type="button" aria-label="Dashboard">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M3 13h8V3H3v10Z"/><path d="M13 21h8V11h-8v10Z"/><path d="M13 3v6h8V3h-8Z"/><path d="M3 21h8v-6H3v6Z"/></svg>
           Dashboard
+        </button>
+        <button data-view="search" type="button" aria-label="Search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="11" cy="11" r="7"/><path d="m16 16 5 5"/></svg>
+          Search
         </button>
         <button data-view="orders" type="button" aria-label="Orders">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/></svg>
@@ -1815,6 +1933,32 @@
                   <div class="step"><b>Voided</b><small>Reversal only</small></div>
                 </div>
               </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="view" id="search">
+          <div class="panel">
+            <div class="panel-header">
+              <h2>Search</h2>
+              <span class="state-pill" id="globalSearchCount">Ready</span>
+            </div>
+            <div class="panel-body">
+              <div class="search-toolbar">
+                <div class="field">
+                  <label for="globalSearch">Search</label>
+                  <input id="globalSearch" type="search" autocomplete="off" placeholder="Order, name, transfer, journal, amount">
+                </div>
+                <button class="btn secondary" id="globalSearchClear" type="button">Clear</button>
+              </div>
+            </div>
+            <div class="panel-body table-wrap">
+              <table class="search-table">
+                <thead>
+                  <tr><th>Date</th><th>Type</th><th>Reference</th><th>Actors</th><th>Amount</th><th>Status</th><th>Details</th></tr>
+                </thead>
+                <tbody id="globalSearchRows"></tbody>
+              </table>
             </div>
           </div>
         </section>
@@ -2152,10 +2296,27 @@
               </div>
             </div>
             <div class="panel-body">
-              <div class="form-grid" data-master-action>
+              <div class="form-grid ledger-export-options" data-master-action>
                 <div class="field">
                   <label for="ledgerActorSelect">Actor ledger</label>
                   <select id="ledgerActorSelect"></select>
+                </div>
+                <div class="field">
+                  <label>Export columns</label>
+                  <div class="ledger-export-checks">
+                    <label class="currency-check">
+                      <input id="ledgerExportOrderedAmount" type="checkbox">
+                      Ordered Amount
+                    </label>
+                    <label class="currency-check">
+                      <input id="ledgerExportRate" type="checkbox">
+                      Rate
+                    </label>
+                    <label class="currency-check">
+                      <input id="ledgerExportPercent" type="checkbox">
+                      %
+                    </label>
+                  </div>
                 </div>
               </div>
             </div>
@@ -2397,6 +2558,20 @@
           </div>
           <div class="panel">
             <div class="panel-header">
+              <h2>Permissions</h2>
+              <span class="state-pill">Agent Visibility</span>
+            </div>
+            <div class="panel-body table-wrap">
+              <table>
+                <thead>
+                  <tr><th>Actor</th><th>Role</th><th>Source Currency</th><th>Rate</th><th>Commission</th><th>Base Currency + Amount</th></tr>
+                </thead>
+                <tbody id="visibilityPermissionRows"></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-header">
               <h2>Master Reset Permit</h2>
               <button class="btn secondary" id="resetPanelToggle" type="button">
                 Master Reset Permit
@@ -2539,6 +2714,23 @@
           divider: Number(current.divider) > 0 ? Number(current.divider) : 1,
           percent: Number(current.percent) > 0 ? Number(current.percent) : 0
         };
+      });
+      return normalized;
+    }
+
+    const orderVisibilityPermissionDefaults = {
+      sourceCurrency: true,
+      rate: true,
+      commission: true,
+      baseAmount: true
+    };
+
+    function normalizeOrderVisibilityPermissions(settings = {}) {
+      const normalized = {};
+      Object.keys(orderVisibilityPermissionDefaults).forEach((key) => {
+        normalized[key] = Object.prototype.hasOwnProperty.call(settings || {}, key)
+          ? settings[key] === true
+          : orderVisibilityPermissionDefaults[key];
       });
       return normalized;
     }
@@ -2690,6 +2882,9 @@
           active: actor.role === "Master" ? true : actor.active !== false,
           transferEnabled: actor.role === "Master" ? true : normalizedTransferMode(actor) !== "none",
           transferMode: normalizedTransferMode(actor),
+          orderVisibilityPermissions: ["Agent", "Special Agent"].includes(actor.role)
+            ? normalizeOrderVisibilityPermissions(actor.orderVisibilityPermissions)
+            : normalizeOrderVisibilityPermissions(),
           incomeStatementVisible: actor.role === "Master" ? true : actor.incomeStatementVisible !== false
         };
       });
@@ -3076,6 +3271,7 @@
 
     const titles = {
       dashboard: ["Dashboard", "Live operating view for the local ledger app."],
+      search: ["Search", "Find matching transactions, transfers, journals, and archived records."],
       orders: ["Orders", "Create, assign, pay, and void routed payment orders."],
       transfers: ["Transfers", "Create internal transfers and approve pending requests."],
       receivables: ["Receivables", "Credit orders and collections outside the ledger."],
@@ -3128,6 +3324,10 @@
       pageSubtitle: document.getElementById("pageSubtitle"),
       accountBadge: document.getElementById("accountBadge"),
       logoutButton: document.getElementById("logoutButton"),
+      globalSearch: document.getElementById("globalSearch"),
+      globalSearchClear: document.getElementById("globalSearchClear"),
+      globalSearchCount: document.getElementById("globalSearchCount"),
+      globalSearchRows: document.getElementById("globalSearchRows"),
       orderRows: document.getElementById("orderRows"),
       dashboardOrderRows: document.getElementById("dashboardOrderRows"),
       receivableRows: document.getElementById("receivableRows"),
@@ -3146,6 +3346,9 @@
       incomeStatementRows: document.getElementById("incomeStatementRows"),
       exportLedgerExcelButton: document.getElementById("exportLedgerExcelButton"),
       exportLedgerPdfButton: document.getElementById("exportLedgerPdfButton"),
+      ledgerExportOrderedAmount: document.getElementById("ledgerExportOrderedAmount"),
+      ledgerExportRate: document.getElementById("ledgerExportRate"),
+      ledgerExportPercent: document.getElementById("ledgerExportPercent"),
       transferList: document.getElementById("transferList"),
       archiveRows: document.getElementById("archiveRows"),
       journalPreview: document.getElementById("journalPreview"),
@@ -3162,6 +3365,7 @@
       profileBadge: document.getElementById("profileBadge"),
       actorRows: document.getElementById("actorRows"),
       permissionRows: document.getElementById("permissionRows"),
+      visibilityPermissionRows: document.getElementById("visibilityPermissionRows"),
       resetScope: document.getElementById("resetScope"),
       subscriptionRows: document.getElementById("subscriptionRows"),
       subscriptionError: document.getElementById("subscriptionError"),
@@ -3534,11 +3738,162 @@
       }
     }
 
+    function actorOrderPrefix(actorName) {
+      const clean = String(actorName || "ACT").toUpperCase().replace(/[^A-Z0-9]/g, "");
+      return `${clean}XXX`.slice(0, 3);
+    }
+
+    function allOrderRecordsForNumbering() {
+      return [
+        ...state.orders.map((order) => ({ order, current: true, closedAt: "" })),
+        ...state.archives.flatMap((archive) =>
+          (archive.orders || []).map((order) => ({
+            order,
+            current: false,
+            closedAt: archive.closedAt || order.archivedAt || ""
+          }))
+        )
+      ];
+    }
+
+    function latestCloseTimeForActor(actorName) {
+      return state.archives
+        .filter((archive) => archive.actor === actorName)
+        .reduce((latest, archive) => {
+          const time = new Date(archive.closedAt || 0).getTime();
+          return Number.isFinite(time) ? Math.max(latest, time) : latest;
+        }, 0);
+    }
+
+    function orderRecordIsVoided(order) {
+      return order?.state === "Voided" || Boolean(order?.voidedAt || order?.voidJournal);
+    }
+
+    function orderRecordCountsForActorNumber(record, actorName, reserveVoided = true) {
+      if (record.current) return true;
+      if (reserveVoided && orderRecordIsVoided(record.order)) return true;
+      const latestClose = latestCloseTimeForActor(actorName);
+      if (!latestClose) return true;
+      const recordClose = new Date(record.closedAt || record.order?.archivedAt || 0).getTime();
+      return Number.isFinite(recordClose) && recordClose > latestClose;
+    }
+
+    function firstAvailableSequence(usedNumbers) {
+      let next = 1;
+      while (usedNumbers.has(next)) next += 1;
+      return next;
+    }
+
+    function brokerOrderNumberForOrder(order) {
+      return order?.brokerOrderNumber || order?.id || "";
+    }
+
+    function agentOrderNumberForOrder(order, agentName = "") {
+      if (!order) return "";
+      if (agentName && order.agentOrderNumbers && typeof order.agentOrderNumbers === "object" && order.agentOrderNumbers[agentName]) {
+        return order.agentOrderNumbers[agentName];
+      }
+      return order.agentOrderNumber || "";
+    }
+
+    function nextBrokerOrderNumber(brokerName) {
+      const brokerActor = activeActors().find((actor) => actor.name === brokerName);
+      const prefix = actorOrderPrefix(brokerName);
+      const escapedPrefix = prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const pattern = new RegExp(`^${escapedPrefix}(\\d+)$`);
+      const usedNumbers = allOrderRecordsForNumbering().reduce((used, record) => {
+        const order = record.order;
+        const actorMatches = order?.brokerActorId && brokerActor?.id
+          ? order.brokerActorId === brokerActor.id
+          : order?.broker === brokerName;
+        if (!actorMatches || !orderRecordCountsForActorNumber(record, brokerName)) return used;
+        const number = brokerOrderNumberForOrder(order);
+        const match = String(number || "").match(pattern);
+        if (match) used.add(Number(match[1]));
+        return used;
+      }, new Set());
+      const next = firstAvailableSequence(usedNumbers);
+      return `${prefix}${String(next).padStart(3, "0")}`;
+    }
+
+    function agentOrderNumbersForActor(order, agentName) {
+      const numbers = [];
+      if (order?.agentOrderNumbers && typeof order.agentOrderNumbers === "object" && order.agentOrderNumbers[agentName]) {
+        numbers.push(order.agentOrderNumbers[agentName]);
+      }
+      if ((order?.agentOrderActor === agentName || order?.agent === agentName) && order.agentOrderNumber) {
+        numbers.push(order.agentOrderNumber);
+      }
+      return Array.from(new Set(numbers.filter(Boolean)));
+    }
+
+    function nextAgentSequence(agentName, brokerNumber = "") {
+      const usedNumbers = allOrderRecordsForNumbering().reduce((used, record) => {
+        const order = record.order;
+        const numbers = [];
+        numbers.push(...agentOrderNumbersForActor(order, agentName));
+        return numbers.reduce((innerUsed, number) => {
+          const match = String(number || "").match(/^(\d+)_/);
+          if (!match) return innerUsed;
+          const sequence = Number(match[1]);
+          const exactVoidedMatch = orderRecordIsVoided(order) && (!brokerNumber || String(number).endsWith(`_${brokerNumber}`));
+          if (orderRecordCountsForActorNumber(record, agentName, false) || exactVoidedMatch) innerUsed.add(sequence);
+          return innerUsed;
+        }, used);
+      }, new Set());
+      return firstAvailableSequence(usedNumbers);
+    }
+
+    function assignAgentOrderNumber(order, agentName) {
+      if (!order || !agentName || agentName === "Unassigned") return;
+      const brokerNumber = brokerOrderNumberForOrder(order);
+      order.agentOrderNumbers = order.agentOrderNumbers && typeof order.agentOrderNumbers === "object"
+        ? { ...order.agentOrderNumbers }
+        : {};
+      if (order.agentOrderNumber && order.agentOrderActor && !order.agentOrderNumbers[order.agentOrderActor]) {
+        order.agentOrderNumbers[order.agentOrderActor] = order.agentOrderNumber;
+      }
+      if (!order.agentOrderNumbers[agentName]) {
+        order.agentOrderNumbers[agentName] = `${String(nextAgentSequence(agentName, brokerNumber)).padStart(4, "0")}_${brokerNumber}`;
+      }
+      order.agentOrderNumber = order.agentOrderNumbers[agentName];
+      order.agentOrderActor = agentName;
+    }
+
+    function orderDisplayNumber(order, viewer = selectedActor(), contextActor = null) {
+      const context = contextActor || viewer;
+      if (["Agent", "Special Agent"].includes(context?.role) && (order?.agent === context.name || order?.agentActorId === context.id)) {
+        return agentOrderNumberForOrder(order, context.name) || brokerOrderNumberForOrder(order);
+      }
+      return brokerOrderNumberForOrder(order);
+    }
+
+    function orderNumberDetailValues(order, viewer = selectedActor()) {
+      const displayNumber = orderDisplayNumber(order, viewer);
+      const brokerNumber = brokerOrderNumberForOrder(order);
+      const agentNumber = agentOrderNumberForOrder(order, order?.agent);
+      return [
+        displayNumber ? `Order Number: ${displayNumber}` : "",
+        brokerNumber && brokerNumber !== displayNumber ? `Initiator Number: ${brokerNumber}` : "",
+        agentNumber && agentNumber !== displayNumber && order?.agent !== "Unassigned" ? `Payer Number: ${agentNumber}` : ""
+      ].filter(Boolean);
+    }
+
+    function orderNumberDetailBits(order, viewer = selectedActor()) {
+      return orderNumberDetailValues(order, viewer).map(escapeHtml);
+    }
+
     function buildOrderRecord(input, stateName) {
       const existingOrder = state.orders.find((item) => item.id === state.editingOrderId);
+      const brokerActor = activeActors().find((actor) => actor.name === input.broker);
       const now = new Date().toISOString();
-      return {
+      const order = {
         id: state.editingOrderId || nextOrderId(),
+        brokerOrderNumber: existingOrder?.brokerOrderNumber || nextBrokerOrderNumber(input.broker),
+        brokerActorId: brokerActor?.id || existingOrder?.brokerActorId || "",
+        agentOrderNumber: existingOrder?.agentOrderNumber || "",
+        agentOrderActor: existingOrder?.agentOrderActor || "",
+        agentOrderNumbers: existingOrder?.agentOrderNumbers && typeof existingOrder.agentOrderNumbers === "object" ? { ...existingOrder.agentOrderNumbers } : {},
         broker: input.broker,
         agent: stateName === "Pending Forward" ? "Unassigned" : input.agent,
         agentActorId: stateName === "Pending Forward" ? "" : activeActors().find((actor) => actor.name === input.agent)?.id || "",
@@ -3566,6 +3921,8 @@
         returnedReason: "",
         updatedAt: now
       };
+      if (stateName !== "Pending Forward") assignAgentOrderNumber(order, input.agent);
+      return order;
     }
 
     function fillOrderForm(order) {
@@ -3630,6 +3987,8 @@
       return {
         id: existing?.id || nextReceivableId(),
         orderId: order?.id || existing?.orderId || "",
+        brokerOrderNumber: brokerOrderNumberForOrder(order) || existing?.brokerOrderNumber || "",
+        agentOrderNumber: agentOrderNumberForOrder(order, order?.agent) || existing?.agentOrderNumber || "",
         borrower: input.broker,
         borrowerActorId: borrower?.id || "",
         currency: input.sourceCurrency,
@@ -3794,9 +4153,9 @@
 
     function privilegeViews(role, actor = selectedActor()) {
       if (role === "Owner") return ["owner"];
-      if (role === "Master") return ["dashboard", "orders", "transfers", "receivables", "chat", "ledger", "settlement", "archive", "actors", "settings"];
-      const views = ["dashboard", "orders", "chat", "ledger", "settlement", "archive"];
-      if (actor?.transferEnabled !== false) views.splice(2, 0, "transfers");
+      if (role === "Master") return ["dashboard", "search", "orders", "transfers", "receivables", "chat", "ledger", "settlement", "archive", "actors", "settings"];
+      const views = ["dashboard", "search", "orders", "chat", "ledger", "settlement", "archive"];
+      if (actor?.transferEnabled !== false) views.splice(views.indexOf("chat"), 0, "transfers");
       if (["Broker", "Special Broker"].includes(role)) views.splice(views.indexOf("chat"), 0, "receivables");
       if (role === "Broker") return views;
       if (role === "Agent") return views;
@@ -4472,7 +4831,9 @@
       const media = await readFileAsDataUrl(proofFile, (percent) => {
         if (progress) progress.textContent = `Uploading ${percent}%`;
       });
-      return { media, fileName: proofFile.name || `${orderId}-payment-proof.png` };
+      const proofOrder = state.orders.find((item) => item.id === orderId);
+      const proofNumber = proofOrder ? orderDisplayNumber(proofOrder, selectedActor()) : orderId;
+      return { media, fileName: proofFile.name || `${proofNumber}-payment-proof.png` };
     }
 
     function setChatRecordButtonState(mode) {
@@ -4500,7 +4861,7 @@
       chat.messages.push({
         id: nextMessageId(),
         from: master,
-        text: `Order ${order.id} assigned to you. Pay ${money(order.payoutCurrency || order.sourceCurrency || "USD", order.payoutAmountMinor || order.sourceAmountMinor || 0)} to ${order.receiverName || order.phoneNumber || order.accountNumber || "the receiver"}.`,
+        text: `Order ${orderDisplayNumber(order, { name: agentName, role: "Agent" })} assigned to you. Pay ${money(order.payoutCurrency || order.sourceCurrency || "USD", order.payoutAmountMinor || order.sourceAmountMinor || 0)} to ${order.receiverName || order.phoneNumber || order.accountNumber || "the receiver"}.`,
         kind: "text",
         media: "",
         fileName: "",
@@ -4518,16 +4879,16 @@
       chat.messages.push({
         id: nextMessageId(),
         from: actor.name,
-        text: `Payment proof for order ${order.id}. Paid ${money(order.payoutCurrency || order.sourceCurrency || "USD", order.payoutAmountMinor || order.sourceAmountMinor || 0)}.`,
+        text: `Payment proof for order ${orderDisplayNumber(order, actor)}. Paid ${money(order.payoutCurrency || order.sourceCurrency || "USD", order.payoutAmountMinor || order.sourceAmountMinor || 0)}.`,
         kind: "photo",
         media: proof.media,
-        fileName: proof.fileName || `${order.id}-payment-proof.png`,
+        fileName: proof.fileName || `${orderDisplayNumber(order, actor)}-payment-proof.png`,
         replyTo: "",
         reactions: {},
         readBy: [actor.name],
         createdAt: new Date().toISOString()
       });
-      notifyEvent("New message", `${actor.name} sent payment proof for ${order.id} to ${masterName()}.`);
+      notifyEvent("New message", `${actor.name} sent payment proof for ${orderDisplayNumber(order, actor)} to ${masterName()}.`);
     }
 
     function applyPrivileges() {
@@ -4785,6 +5146,33 @@
           `;
         });
       els.permissionRows.innerHTML = rows.length ? rows.join("") : '<tr><td colspan="7">No actors available for permissions.</td></tr>';
+    }
+
+    function renderVisibilityPermissions() {
+      const actors = activeActors().filter((actor) => ["Agent", "Special Agent"].includes(actor.role));
+      const fields = [
+        ["sourceCurrency", "Source Currency"],
+        ["rate", "Rate"],
+        ["commission", "Commission"],
+        ["baseAmount", "Base Currency + Amount"]
+      ];
+      els.visibilityPermissionRows.innerHTML = actors.length ? actors.map((actor) => {
+        const permissions = normalizeOrderVisibilityPermissions(actor.orderVisibilityPermissions);
+        return `
+          <tr>
+            <td><strong>${escapeHtml(actor.name)}</strong></td>
+            <td>${escapeHtml(actor.role)}</td>
+            ${fields.map(([key, label]) => `
+              <td>
+                <label class="currency-check">
+                  <input class="order-visibility-toggle" type="checkbox" data-id="${escapeHtml(actor.id)}" data-field="${escapeHtml(key)}" ${permissions[key] ? "checked" : ""}>
+                  ${escapeHtml(label)}
+                </label>
+              </td>
+            `).join("")}
+          </tr>
+        `;
+      }).join("") : '<tr><td colspan="6">No Agents or Special Agents available.</td></tr>';
     }
 
     function renderFixedRateSettings() {
@@ -5065,6 +5453,49 @@
       state.settlements = state.settlements.filter((item) => activeActors().some((actor) => actor.name === item.actor));
     }
 
+    function viewerUsesOrderVisibilityPermissions(viewer) {
+      return ["Agent", "Special Agent"].includes(viewer?.role);
+    }
+
+    function viewerCanSeeOrderField(viewer, field) {
+      if (!viewerUsesOrderVisibilityPermissions(viewer)) return true;
+      const permissions = normalizeOrderVisibilityPermissions(viewer.orderVisibilityPermissions);
+      return permissions[field] !== false;
+    }
+
+    function sourceAmountForViewer(order, viewer) {
+      if (!viewerCanSeeOrderField(viewer, "baseAmount")) return "";
+      const currency = order.sourceCurrency || "USD";
+      const amountMinor = Number(order.sourceAmountMinor || 0);
+      return viewerCanSeeOrderField(viewer, "sourceCurrency")
+        ? money(currency, amountMinor)
+        : formatMinor(amountMinor, currency);
+    }
+
+    function orderTableAmountHtml(order, viewer) {
+      const sourceAmount = sourceAmountForViewer(order, viewer);
+      if (sourceAmount) return escapeHtml(sourceAmount);
+      const payoutCurrency = order.payoutCurrency || order.sourceCurrency || "USD";
+      return escapeHtml(money(payoutCurrency, order.payoutAmountMinor || order.sourceAmountMinor || 0));
+    }
+
+    const compactOrderDetailStates = new Set(["Assigned", "Paid", "Cancelled", "Voided", "Void Requested"]);
+
+    function orderUsesCompactDetails(order) {
+      return compactOrderDetailStates.has(order?.state);
+    }
+
+    function orderDetailItem(key, html) {
+      return html ? { key, html } : null;
+    }
+
+    function orderCompactReceiverItem(order) {
+      if (text(order.receiverName)) return orderDetailItem("receiver", `Receiver: ${escapeHtml(order.receiverName)}`);
+      if (text(order.accountNumber)) return orderDetailItem("account", `Account: ${escapeHtml(order.accountNumber)}`);
+      if (text(order.phoneNumber)) return orderDetailItem("phone", `Phone: ${escapeHtml(order.phoneNumber)}`);
+      return orderDetailItem("receiver", "Receiver: Not provided");
+    }
+
     function orderDetailsHtml(order, viewer) {
       const commissionPercent = Number.isFinite(Number(order.forwardedPayoutPercent))
         ? Number(order.forwardedPayoutPercent)
@@ -5076,33 +5507,66 @@
         ? minorFromMajor(majorAmount(Number(order.payoutAmountMinor || order.sourceAmountMinor || 0), commissionCurrency) * commissionPercent / 100, commissionCurrency)
         : Number(order.commissionMinor || 0);
       const masterCanSeePayoutRates = viewer?.role === "Master";
-      const bits = [
-        order.id ? `Order Number: ${escapeHtml(order.id)}` : "",
-        viewer?.role === "Master" && order.broker ? `Ordering Actor: ${escapeHtml(order.broker)}` : "",
-        order.senderName ? `Sender: ${escapeHtml(order.senderName)}` : "",
-        order.receiverName ? `Receiver: ${escapeHtml(order.receiverName)}` : "",
-        order.phoneNumber ? `Phone: ${escapeHtml(order.phoneNumber)}` : "",
-        order.accountNumber ? `Account: ${escapeHtml(order.accountNumber)}` : "",
-        order.remarks ? `Remarks: ${escapeHtml(order.remarks)}` : "",
-        `Base Amount: ${money(order.sourceCurrency || "USD", order.sourceAmountMinor || 0)}`,
-        `Payout Amount: ${money(order.payoutCurrency || order.sourceCurrency || "USD", order.payoutAmountMinor || order.sourceAmountMinor || 0)}`,
-        `Commission: ${money(commissionCurrency, commissionMinor)}${commissionPercent ? ` (${escapeHtml(formatRate(commissionPercent))}%)` : ""}`,
-        order.sentAt || order.createdAt ? `Sent: ${escapeHtml(displayDate(order.sentAt || order.createdAt))}` : "",
-        order.paidAt ? `Paid: ${escapeHtml(displayDate(order.paidAt))}` : "",
-        masterCanSeePayoutRates && order.manualSpecialPayoutDivider ? `Manual divisor: ${escapeHtml(formatRate(order.manualSpecialPayoutDivider))}` : "",
-        masterCanSeePayoutRates && order.manualSpecialPayoutPercent ? `Manual %: ${escapeHtml(formatRate(order.manualSpecialPayoutPercent))}` : "",
-        masterCanSeePayoutRates && Number.isFinite(Number(order.forwardedPayoutDivider)) ? `Forwarded payout divisor: ${escapeHtml(formatRate(order.forwardedPayoutDivider))}` : "",
-        masterCanSeePayoutRates && Number.isFinite(Number(order.forwardedPayoutPercent)) ? `Forwarded payout %: ${escapeHtml(formatRate(order.forwardedPayoutPercent))}` : "",
-        order.manualMasterRateDivider ? `Master rate divisor: ${escapeHtml(formatRate(order.manualMasterRateDivider))}` : "",
-        order.manualMasterRatePercent ? `Master rate %: ${escapeHtml(formatRate(order.manualMasterRatePercent))}` : "",
-        order.returnedBy ? `Returned by: ${escapeHtml(order.returnedBy)}` : "",
-        order.voidRequestedBy ? `Void requested by: ${escapeHtml(order.voidRequestedBy)}` : "",
-        order.voidRejectedBy ? `Void rejected by: ${escapeHtml(order.voidRejectedBy)}` : ""
+      const sourceAmount = sourceAmountForViewer(order, viewer);
+      const payoutAmount = money(order.payoutCurrency || order.sourceCurrency || "USD", order.payoutAmountMinor || order.sourceAmountMinor || 0);
+      const summaryLine = [
+        viewerCanSeeOrderField(viewer, "rate") ? `Rate ${escapeHtml(order.rate || "1")}` : "",
+        viewerCanSeeOrderField(viewer, "commission") ? `Commission ${money(commissionCurrency, commissionMinor)}` : ""
+      ].filter(Boolean).join(" - ");
+      const amountLine = `${sourceAmount ? `${escapeHtml(sourceAmount)} source -> ` : ""}${payoutAmount} payout`;
+      const compactReceiverItem = orderCompactReceiverItem(order);
+      const detailItems = [
+        ...orderNumberDetailBits(order, viewer).map((bit, index) => orderDetailItem(`number-${index}`, bit)),
+        orderDetailItem("orderingActor", viewer?.role === "Master" && order.broker ? `Ordering Actor: ${escapeHtml(order.broker)}` : ""),
+        orderDetailItem("sender", order.senderName ? `Sender: ${escapeHtml(order.senderName)}` : ""),
+        orderDetailItem("receiver", order.receiverName ? `Receiver: ${escapeHtml(order.receiverName)}` : ""),
+        orderDetailItem("phone", order.phoneNumber ? `Phone: ${escapeHtml(order.phoneNumber)}` : ""),
+        orderDetailItem("account", order.accountNumber ? `Account: ${escapeHtml(order.accountNumber)}` : ""),
+        orderDetailItem("remarks", order.remarks ? `Remarks: ${escapeHtml(order.remarks)}` : ""),
+        orderDetailItem("baseAmount", sourceAmount ? `Base Amount: ${escapeHtml(sourceAmount)}` : ""),
+        orderDetailItem("payoutAmount", `Payout Amount: ${payoutAmount}`),
+        orderDetailItem("commission", viewerCanSeeOrderField(viewer, "commission") ? `Commission: ${money(commissionCurrency, commissionMinor)}${commissionPercent ? ` (${escapeHtml(formatRate(commissionPercent))}%)` : ""}` : ""),
+        orderDetailItem("sentAt", order.sentAt || order.createdAt ? `Sent: ${escapeHtml(displayDate(order.sentAt || order.createdAt))}` : ""),
+        orderDetailItem("paidAt", order.paidAt ? `Paid: ${escapeHtml(displayDate(order.paidAt))}` : ""),
+        orderDetailItem("manualSpecialPayoutDivider", masterCanSeePayoutRates && order.manualSpecialPayoutDivider ? `Manual divisor: ${escapeHtml(formatRate(order.manualSpecialPayoutDivider))}` : ""),
+        orderDetailItem("manualSpecialPayoutPercent", masterCanSeePayoutRates && order.manualSpecialPayoutPercent ? `Manual %: ${escapeHtml(formatRate(order.manualSpecialPayoutPercent))}` : ""),
+        orderDetailItem("forwardedPayoutDivider", masterCanSeePayoutRates && Number.isFinite(Number(order.forwardedPayoutDivider)) ? `Forwarded payout divisor: ${escapeHtml(formatRate(order.forwardedPayoutDivider))}` : ""),
+        orderDetailItem("forwardedPayoutPercent", masterCanSeePayoutRates && Number.isFinite(Number(order.forwardedPayoutPercent)) ? `Forwarded payout %: ${escapeHtml(formatRate(order.forwardedPayoutPercent))}` : ""),
+        orderDetailItem("manualMasterRateDivider", order.manualMasterRateDivider ? `Master rate divisor: ${escapeHtml(formatRate(order.manualMasterRateDivider))}` : ""),
+        orderDetailItem("manualMasterRatePercent", order.manualMasterRatePercent ? `Master rate %: ${escapeHtml(formatRate(order.manualMasterRatePercent))}` : ""),
+        orderDetailItem("returnedBy", order.returnedBy ? `Returned by: ${escapeHtml(order.returnedBy)}` : ""),
+        orderDetailItem("voidRequestedBy", order.voidRequestedBy ? `Void requested by: ${escapeHtml(order.voidRequestedBy)}` : ""),
+        orderDetailItem("voidRejectedBy", order.voidRejectedBy ? `Void rejected by: ${escapeHtml(order.voidRejectedBy)}` : "")
       ].filter(Boolean);
+      if (orderUsesCompactDetails(order)) {
+        const compactHiddenItems = [
+          orderDetailItem("rate", viewerCanSeeOrderField(viewer, "rate") ? `Rate: ${escapeHtml(order.rate || "1")}` : ""),
+          ...detailItems
+        ].filter(Boolean);
+        const visibleCompactKeys = new Set([compactReceiverItem.key, "baseAmount", "payoutAmount"]);
+        const hiddenItems = compactHiddenItems.filter((item) => !visibleCompactKeys.has(item.key));
+        return `
+          <div class="order-detail compact">
+            <span class="order-compact-primary">${amountLine}</span>
+            ${hiddenItems.length ? `
+              <details class="order-extra-detail">
+                <summary>
+                  <span class="order-compact-receiver">${compactReceiverItem.html}</span>
+                  <span class="order-extra-detail-toggle"><span class="show-more-text">Show more</span><span class="show-less-text">Show less</span></span>
+                </summary>
+                <div class="order-extra-detail-list">
+                  ${hiddenItems.map((item) => `<span>${item.html}</span>`).join("")}
+                </div>
+              </details>
+            ` : `<span class="order-compact-receiver">${compactReceiverItem.html}</span>`}
+          </div>
+        `;
+      }
+      const bits = detailItems.map((item) => item.html);
       return `
         <div class="order-detail">
-          <span>${money(order.sourceCurrency || "USD", order.sourceAmountMinor || 0)} source -> ${money(order.payoutCurrency || order.sourceCurrency || "USD", order.payoutAmountMinor || order.sourceAmountMinor || 0)} payout</span>
-          <span>Rate ${escapeHtml(order.rate || "1")} - Commission ${money(commissionCurrency, commissionMinor)}</span>
+          <span>${amountLine}</span>
+          ${summaryLine ? `<span>${summaryLine}</span>` : ""}
           ${bits.map((bit) => `<span>${bit}</span>`).join("")}
         </div>
       `;
@@ -5136,10 +5600,15 @@
     }
 
     function orderNumberHtml(order, viewer) {
+      const primaryNumber = orderDisplayNumber(order, viewer);
+      const payerNumber = agentOrderNumberForOrder(order, order.agent);
+      const secondaryNumber = viewer?.role === "Master" && payerNumber && payerNumber !== primaryNumber && order.agent !== "Unassigned"
+        ? `<span class="order-number-secondary">${escapeHtml(payerNumber)}</span>`
+        : "";
       const copyButton = viewer?.role === "Master"
         ? `<button class="order-copy-details" data-id="${escapeHtml(order.id)}" type="button" aria-label="Copy order details" title="Copy order details">${icons.copy}</button>`
         : "";
-      return `<span class="order-number-line"><strong>${escapeHtml(order.id)}</strong>${copyButton}</span>`;
+      return `<span class="order-number-line"><strong>${escapeHtml(primaryNumber)}</strong>${secondaryNumber}${copyButton}</span>`;
     }
 
     function orderActionsHtml(order, actor) {
@@ -5419,9 +5888,10 @@
       }, {});
     }
 
-    function ledgerBalanceRows(lines, actor, showOrderInfo = false) {
+    function ledgerBalanceRows(lines, actor, showOrderInfo = false, showPaidOutInfo = false) {
       if (!actor || actor.role === "Master") return "";
-      const orderInfoSpacer = showOrderInfo ? '<td colspan="5"></td>' : "";
+      const orderInfoColumnCount = showOrderInfo ? 5 + (showPaidOutInfo ? 1 : 0) : 0;
+      const orderInfoSpacer = orderInfoColumnCount ? `<td colspan="${orderInfoColumnCount}"></td>` : "";
       const totals = lines.reduce((acc, line) => {
         const sign = line.direction === "Debit" ? 1 : -1;
         acc[line.currency] = (acc[line.currency] || 0) + sign * line.amountMinor;
@@ -5510,12 +5980,12 @@
       );
     }
 
-    function ledgerReferenceNumber(line) {
+    function ledgerReferenceNumber(line, viewer = selectedActor(), contextActor = null) {
+      const order = orderForLedgerLine(line);
+      if (order) return orderDisplayNumber(order, viewer, contextActor);
       if (line.orderId) return line.orderId;
       if (line.transferId) return line.transferId;
       if (line.entryId) return line.entryId;
-      const order = orderForLedgerLine(line);
-      if (order) return order.id;
       const transfer = transferForLedgerLine(line);
       if (transfer) return transfer.id;
       return "";
@@ -5525,14 +5995,19 @@
       return viewer?.role === "Master" && ["Agent", "Special Agent"].includes(ledgerActor?.role);
     }
 
-    function ledgerColumnCount(showOrderInfo) {
-      return 7 + supportedCurrencies.length + (showOrderInfo ? 5 : 0);
+    function showSpecialAgentPaidOutColumn(viewer, ledgerActor) {
+      return viewer?.role === "Master" && ledgerActor?.role === "Special Agent";
     }
 
-    function renderLedgerHeader(showOrderInfo) {
+    function ledgerColumnCount(showOrderInfo, showPaidOutInfo = false) {
+      return 7 + supportedCurrencies.length + (showOrderInfo ? 5 : 0) + (showPaidOutInfo ? 1 : 0);
+    }
+
+    function renderLedgerHeader(showOrderInfo, showPaidOutInfo = false) {
       const headers = ["Date", "Journal", "Order / Transfer No.", "Source", "Details"];
       if (showOrderInfo) {
         headers.push("Ordering Broker", "Ordered Amount", "Rate", "%", "Payout Currency");
+        if (showPaidOutInfo) headers.push("Paid Out");
       }
       headers.push("Account", "Direction", ...supportedCurrencies);
       els.ledgerHeadRow.innerHTML = headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("");
@@ -5547,20 +6022,30 @@
       return Number.isFinite(commissionPercent) ? commissionPercent : null;
     }
 
-    function ledgerOrderInfoCells(line) {
+    function compactCurrencyAmount(currency, amountMinor) {
+      const code = currency || "USD";
+      const formatted = formatMinor(amountMinor || 0, code)
+        .replace(/(\.\d*?[1-9])0+$/, "$1")
+        .replace(/\.0+$/, "");
+      return `${code} ${formatted}`;
+    }
+
+    function ledgerOrderInfoCells(line, showPaidOutInfo = false) {
       const order = orderForLedgerLine(line);
-      if (!order) return "<td></td><td></td><td></td><td></td><td></td>";
+      if (!order) return `<td></td><td></td><td></td><td></td><td></td>${showPaidOutInfo ? "<td></td>" : ""}`;
       const sourceCurrency = order.sourceCurrency || "USD";
       const sourceAmount = `${formatMinor(order.sourceAmountMinor || 0, sourceCurrency)} ${sourceCurrency}`;
       const rate = Number(order.rate || 0);
       const percent = ledgerOrderPercent(order);
       const payoutCurrency = order.payoutCurrency || sourceCurrency;
+      const paidOut = compactCurrencyAmount(payoutCurrency, order.payoutAmountMinor || order.sourceAmountMinor || 0);
       return `
         <td>${escapeHtml(order.broker || "")}</td>
         <td>${escapeHtml(sourceAmount)}</td>
         <td>${Number.isFinite(rate) && rate > 0 ? escapeHtml(formatRate(rate)) : ""}</td>
         <td>${percent === null ? "" : `${escapeHtml(formatRate(percent))}%`}</td>
         <td>${escapeHtml(payoutCurrency)}</td>
+        ${showPaidOutInfo ? `<td>${escapeHtml(paidOut)}</td>` : ""}
       `;
     }
 
@@ -5757,14 +6242,14 @@
         .sort((a, b) => new Date(b.postedAt || 0) - new Date(a.postedAt || 0));
     }
 
-    function ledgerLineDetails(line, viewer) {
+    function ledgerLineDetails(line, viewer, contextActor = null) {
       if (line.source === "PREVIOUS_CLOSE") return line.details || "Previous Close";
       const transfer = transferForLedgerLine(line);
       if (transfer) return transferLedgerDetails(transfer) || line.details || "";
       const order = orderForLedgerLine(line);
       if (!order) return line.details || "";
       const bits = [
-        order.id ? `Order: ${order.id}` : "",
+        orderDisplayNumber(order, viewer, contextActor) ? `Order: ${orderDisplayNumber(order, viewer, contextActor)}` : "",
         order.senderName ? `Sender: ${order.senderName}` : "",
         order.receiverName ? `Receiver: ${order.receiverName}` : "",
         order.accountNumber ? `Account: ${order.accountNumber}` : "",
@@ -5774,21 +6259,59 @@
       return bits.filter(Boolean).join(" - ");
     }
 
+    function ledgerExportOptions(actor) {
+      const viewer = selectedActor();
+      const canChoose = viewer?.role === "Master" && actor && actor.role !== "Master";
+      return {
+        orderedAmount: canChoose && els.ledgerExportOrderedAmount?.checked === true,
+        rate: canChoose && els.ledgerExportRate?.checked === true,
+        percent: canChoose && els.ledgerExportPercent?.checked === true
+      };
+    }
+
+    function ledgerOrderExportValues(line) {
+      const order = orderForLedgerLine(line);
+      if (!order) return { orderedAmount: "", rate: "", percent: "" };
+      const sourceCurrency = order.sourceCurrency || "USD";
+      const orderedAmount = `${formatMinor(order.sourceAmountMinor || 0, sourceCurrency)} ${sourceCurrency}`;
+      const rate = Number(order.rate || 0);
+      const percent = ledgerOrderPercent(order);
+      return {
+        orderedAmount,
+        rate: Number.isFinite(rate) && rate > 0 ? formatRate(rate) : "",
+        percent: percent === null ? "" : `${formatRate(percent)}%`
+      };
+    }
+
+    function addLedgerExportOptionColumns(row, options, values = {}) {
+      if (options.orderedAmount) row["Ordered Amount"] = values.orderedAmount || "";
+      if (options.rate) row.Rate = values.rate || "";
+      if (options.percent) row["%"] = values.percent || "";
+      return row;
+    }
+
     function ledgerExportRows(lines, actor) {
       const viewer = selectedActor();
-      const rows = lines.map((line) => ({
-        Date: displayDate(line.postedAt),
-        Journal: line.journal,
-        "Order / Transfer No.": ledgerReferenceNumber(line),
-        Source: line.source,
-        Details: ledgerLineDetails(line, viewer),
-        Account: line.account,
-        Direction: line.direction,
-        USD: line.currency === "USD" ? formatMinor(line.amountMinor, "USD") : "",
-        ETB: line.currency === "ETB" ? formatMinor(line.amountMinor, "ETB") : "",
-        EUR: line.currency === "EUR" ? formatMinor(line.amountMinor, "EUR") : "",
-        ERN: line.currency === "ERN" ? formatMinor(line.amountMinor, "ERN") : ""
-      }));
+      const options = ledgerExportOptions(actor);
+      const rows = lines.map((line) => {
+        const row = {
+          Date: displayDate(line.postedAt),
+          Journal: line.journal,
+          "Order / Transfer No.": ledgerReferenceNumber(line, viewer, actor),
+          Source: line.source,
+          Details: ledgerLineDetails(line, viewer, actor)
+        };
+        addLedgerExportOptionColumns(row, options, ledgerOrderExportValues(line));
+        return {
+          ...row,
+          Account: line.account,
+          Direction: line.direction,
+          USD: line.currency === "USD" ? formatMinor(line.amountMinor, "USD") : "",
+          ETB: line.currency === "ETB" ? formatMinor(line.amountMinor, "ETB") : "",
+          EUR: line.currency === "EUR" ? formatMinor(line.amountMinor, "EUR") : "",
+          ERN: line.currency === "ERN" ? formatMinor(line.amountMinor, "ERN") : ""
+        };
+      });
       if (!actor || actor.role === "Master") return rows;
       const totals = lines.reduce((acc, line) => {
         const sign = line.direction === "Debit" ? 1 : -1;
@@ -5799,11 +6322,15 @@
         .filter((currency) => (totals[currency] || 0) !== 0)
         .map((currency) => {
           const net = totals[currency];
-          return {
+          const row = {
             Date: "",
             Journal: "BALANCE",
             Source: `${actor.name} balance`,
-            Details: "",
+            Details: ""
+          };
+          addLedgerExportOptionColumns(row, options);
+          return {
+            ...row,
             Account: `${actor.name} ACTOR_CLEARING`,
             Direction: net > 0 ? "Owes Master" : "Master owes",
             USD: currency === "USD" ? formatMinor(Math.abs(net), "USD") : "",
@@ -5813,11 +6340,15 @@
           };
         });
       if (balanceRows.length === 0) {
-        balanceRows.push({
+        const row = {
           Date: "",
           Journal: "BALANCE",
           Source: `${actor.name} balance`,
-          Details: "",
+          Details: ""
+        };
+        addLedgerExportOptionColumns(row, options);
+        balanceRows.push({
+          ...row,
           Account: `${actor.name} ACTOR_CLEARING`,
           Direction: "Zero",
           USD: actor.currency === "USD" ? formatMinor(0, "USD") : "",
@@ -5887,7 +6418,23 @@
 
     function buildLedgerPdf(title, rows) {
       const headers = Object.keys(rows[0]);
-      const widths = [18, 13, 16, 26, 24, 12, 11, 11, 11, 11];
+      const widthByHeader = {
+        Date: 18,
+        Journal: 12,
+        "Order / Transfer No.": 18,
+        Source: 16,
+        Details: 24,
+        "Ordered Amount": 14,
+        Rate: 10,
+        "%": 8,
+        Account: 24,
+        Direction: 12,
+        USD: 11,
+        ETB: 11,
+        EUR: 11,
+        ERN: 11
+      };
+      const widths = headers.map((header) => widthByHeader[header] || 12);
       const textRows = [
         title,
         `Exported ${displayDate(new Date().toISOString())}`,
@@ -5980,7 +6527,7 @@
             <td>${orderNumberHtml(order, actor)}${orderDetailsHtml(order, actor)}</td>
             <td>${actor?.role === "Master" || order.broker === actor?.name ? escapeHtml(order.broker) : '<span class="muted">Master assigned</span>'}</td>
             <td>${escapeHtml(order.agent)}</td>
-            <td>${money(order.sourceCurrency || "USD", order.sourceAmountMinor || 0)}</td>
+            <td>${orderTableAmountHtml(order, actor)}</td>
             <td><span class="state-pill ${className}">${order.state}</span></td>
             <td>${orderActionsHtml(order, actor)}</td>
           </tr>
@@ -6102,6 +6649,441 @@
       els.receivableRows.innerHTML = [...bodyRows, ...totalRows].join("");
     }
 
+    function searchTerms() {
+      return text(els.globalSearch?.value || "")
+        .toLowerCase()
+        .split(/\s+/)
+        .filter(Boolean);
+    }
+
+    function amountSearchValues(currency, amountMinor) {
+      if (!currency) return [];
+      const formatted = formatMinor(amountMinor || 0, currency);
+      return [
+        money(currency, amountMinor || 0),
+        formatted,
+        `${currency}${formatted}`,
+        `${currency} ${formatted}`,
+        `${formatted} ${currency}`
+      ];
+    }
+
+    function matchesSearch(values, terms) {
+      if (!terms.length) return false;
+      const haystack = values
+        .flat(Infinity)
+        .filter((value) => value !== undefined && value !== null && value !== "")
+        .map((value) => String(value).toLowerCase())
+        .join(" ");
+      return terms.every((term) => haystack.includes(term));
+    }
+
+    function orderCommissionSummary(order) {
+      const commissionPercent = Number.isFinite(Number(order.forwardedPayoutPercent))
+        ? Number(order.forwardedPayoutPercent)
+        : Number(order.commissionPercent || 0);
+      const commissionCurrency = Number.isFinite(Number(order.forwardedPayoutPercent))
+        ? order.payoutCurrency || order.sourceCurrency || "USD"
+        : order.sourceCurrency || "USD";
+      const commissionMinor = Number.isFinite(Number(order.forwardedPayoutPercent))
+        ? minorFromMajor(majorAmount(Number(order.payoutAmountMinor || order.sourceAmountMinor || 0), commissionCurrency) * commissionPercent / 100, commissionCurrency)
+        : Number(order.commissionMinor || 0);
+      return { commissionPercent, commissionCurrency, commissionMinor };
+    }
+
+    function orderActorsForSearch(order, viewer) {
+      const canSeeBroker = viewer?.role === "Master" || order.broker === viewer?.name;
+      const broker = canSeeBroker ? order.broker : "Master assigned";
+      return [broker, order.agent].filter(Boolean).join(" -> ");
+    }
+
+    function orderDetailsForSearch(order, viewer) {
+      const sourceCurrency = order.sourceCurrency || "USD";
+      const payoutCurrency = order.payoutCurrency || sourceCurrency;
+      const payoutAmountMinor = Number(order.payoutAmountMinor || order.sourceAmountMinor || 0);
+      const { commissionPercent, commissionCurrency, commissionMinor } = orderCommissionSummary(order);
+      const masterCanSeeRates = viewer?.role === "Master";
+      const sourceAmount = sourceAmountForViewer(order, viewer);
+      const details = [
+        ...orderNumberDetailValues(order, viewer),
+        order.senderName ? `Sender: ${order.senderName}` : "",
+        order.receiverName ? `Receiver: ${order.receiverName}` : "",
+        order.phoneNumber ? `Phone: ${order.phoneNumber}` : "",
+        order.accountNumber ? `Account: ${order.accountNumber}` : "",
+        order.remarks ? `Remarks: ${order.remarks}` : "",
+        viewer?.role === "Master" && order.broker ? `Ordering Actor: ${order.broker}` : "",
+        order.broker === viewer?.name && viewer?.role !== "Master" ? `Broker: ${order.broker}` : "",
+        order.agent ? `Payer: ${order.agent}` : "",
+        sourceAmount ? `Base Amount: ${sourceAmount}` : "",
+        `Payout Amount: ${money(payoutCurrency, payoutAmountMinor)}`,
+        viewerCanSeeOrderField(viewer, "commission") ? `Commission: ${money(commissionCurrency, commissionMinor)}${commissionPercent ? ` (${formatRate(commissionPercent)}%)` : ""}` : "",
+        viewerCanSeeOrderField(viewer, "rate") && order.rate ? `Rate: ${formatRate(order.rate)}` : "",
+        order.fundingType ? `Payment Type: ${order.fundingType}` : "",
+        order.journal ? `Journal: ${order.journal}` : "",
+        order.voidJournal ? `Void Journal: ${order.voidJournal}` : "",
+        order.sentAt || order.createdAt ? `Sent: ${displayDate(order.sentAt || order.createdAt)}` : "",
+        order.paidAt ? `Paid: ${displayDate(order.paidAt)}` : "",
+        order.voidedAt ? `Voided: ${displayDate(order.voidedAt)}` : "",
+        masterCanSeeRates && order.manualSpecialPayoutDivider ? `Manual divisor: ${formatRate(order.manualSpecialPayoutDivider)}` : "",
+        masterCanSeeRates && order.manualSpecialPayoutPercent ? `Manual %: ${formatRate(order.manualSpecialPayoutPercent)}` : "",
+        masterCanSeeRates && Number.isFinite(Number(order.forwardedPayoutDivider)) ? `Forwarded payout divisor: ${formatRate(order.forwardedPayoutDivider)}` : "",
+        masterCanSeeRates && Number.isFinite(Number(order.forwardedPayoutPercent)) ? `Forwarded payout %: ${formatRate(order.forwardedPayoutPercent)}` : "",
+        masterCanSeeRates && order.manualMasterRateDivider ? `Master rate divisor: ${formatRate(order.manualMasterRateDivider)}` : "",
+        masterCanSeeRates && order.manualMasterRatePercent ? `Master rate %: ${formatRate(order.manualMasterRatePercent)}` : "",
+        order.returnedBy ? `Returned by: ${order.returnedBy}` : "",
+        order.voidRequestedBy ? `Void requested by: ${order.voidRequestedBy}` : "",
+        order.voidRejectedBy ? `Void rejected by: ${order.voidRejectedBy}` : ""
+      ];
+      return details.filter(Boolean).join(" - ");
+    }
+
+    function orderSearchResult(order, viewer, type = "Order", statusOverride = "") {
+      const sourceCurrency = order.sourceCurrency || "USD";
+      const payoutCurrency = order.payoutCurrency || sourceCurrency;
+      const payoutAmountMinor = Number(order.payoutAmountMinor || order.sourceAmountMinor || 0);
+      const actors = orderActorsForSearch(order, viewer);
+      const details = orderDetailsForSearch(order, viewer);
+      const sourceAmount = sourceAmountForViewer(order, viewer);
+      const amount = sourceAmount
+        ? `${sourceAmount} -> ${money(payoutCurrency, payoutAmountMinor)}`
+        : money(payoutCurrency, payoutAmountMinor);
+      const displayNumber = orderDisplayNumber(order, viewer);
+      const sourceSearchValues = sourceAmount
+        ? [
+            viewerCanSeeOrderField(viewer, "sourceCurrency") ? sourceCurrency : "",
+            sourceAmount,
+            viewerCanSeeOrderField(viewer, "sourceCurrency")
+              ? amountSearchValues(sourceCurrency, order.sourceAmountMinor || 0)
+              : formatMinor(order.sourceAmountMinor || 0, sourceCurrency)
+          ]
+        : [];
+      return {
+        type,
+        date: order.paidAt || order.sentAt || order.createdAt || order.archivedAt || "",
+        time: new Date(order.paidAt || order.sentAt || order.createdAt || order.archivedAt || 0).getTime() || 0,
+        reference: displayNumber || order.journal || "",
+        actors,
+        amount,
+        status: statusOverride || order.state || "Open",
+        details,
+        searchValues: [
+          order.id,
+          order.internalOrderId,
+          order.brokerOrderNumber,
+          order.agentOrderNumber,
+          order.agentOrderNumbers ? Object.values(order.agentOrderNumbers) : [],
+          order.journal,
+          order.voidJournal,
+          order.state,
+          order.fundingType,
+          actors,
+          details,
+          sourceSearchValues,
+          payoutCurrency,
+          amount,
+          amountSearchValues(payoutCurrency, payoutAmountMinor)
+        ]
+      };
+    }
+
+    function transferDetailsForSearch(transfer) {
+      const sourceCurrency = transfer.sourceCurrency || transfer.currency || "USD";
+      const payoutCurrency = transfer.currency || sourceCurrency;
+      return [
+        transfer.from ? `From: ${transfer.from}` : "",
+        transfer.to ? `To: ${transfer.to}` : "",
+        `Source Amount: ${money(sourceCurrency, transfer.sourceAmountMinor || transfer.amountMinor || 0)}`,
+        `Payout Amount: ${money(payoutCurrency, transfer.amountMinor || 0)}`,
+        transfer.rate ? `Rate: ${formatRate(transfer.rate)}` : "",
+        transfer.remarks ? `Remarks: ${transfer.remarks}` : "",
+        transfer.journal ? `Journal: ${transfer.journal}` : "",
+        transfer.createdAt ? `Created: ${displayDate(transfer.createdAt)}` : "",
+        transfer.sentAt ? `Sent: ${displayDate(transfer.sentAt)}` : "",
+        transfer.approvedAt ? `Approved: ${displayDate(transfer.approvedAt)}` : "",
+        transfer.paidOutAt ? `Paid out: ${displayDate(transfer.paidOutAt)}` : "",
+        transfer.returnedAt ? `Returned: ${displayDate(transfer.returnedAt)}` : "",
+        transfer.rejectedAt ? `Rejected: ${displayDate(transfer.rejectedAt)}` : ""
+      ].filter(Boolean).join(" - ");
+    }
+
+    function transferSearchResult(transfer, type = "Transfer", statusOverride = "") {
+      const sourceCurrency = transfer.sourceCurrency || transfer.currency || "USD";
+      const payoutCurrency = transfer.currency || sourceCurrency;
+      const amount = `${money(sourceCurrency, transfer.sourceAmountMinor || transfer.amountMinor || 0)} -> ${money(payoutCurrency, transfer.amountMinor || 0)}`;
+      const details = transferDetailsForSearch(transfer);
+      return {
+        type,
+        date: transfer.paidOutAt || transfer.approvedAt || transfer.sentAt || transfer.createdAt || transfer.archivedAt || "",
+        time: new Date(transfer.paidOutAt || transfer.approvedAt || transfer.sentAt || transfer.createdAt || transfer.archivedAt || 0).getTime() || 0,
+        reference: transfer.id || transfer.journal || "",
+        actors: [transfer.from, transfer.to].filter(Boolean).join(" -> "),
+        amount,
+        status: statusOverride || transfer.state || "Open",
+        details,
+        searchValues: [
+          transfer.id,
+          transfer.journal,
+          transfer.from,
+          transfer.to,
+          transfer.state,
+          transfer.remarks,
+          details,
+          sourceCurrency,
+          payoutCurrency,
+          amount,
+          amountSearchValues(sourceCurrency, transfer.sourceAmountMinor || transfer.amountMinor || 0),
+          amountSearchValues(payoutCurrency, transfer.amountMinor || 0)
+        ]
+      };
+    }
+
+    function ledgerSearchResult(line, viewer, typeOverride = "") {
+      const reference = ledgerReferenceNumber(line) || line.entryId || line.journal || "";
+      const details = [
+        line.details || ledgerLineDetails(line, viewer),
+        `Journal: ${line.journal || ""}`,
+        reference ? `Reference: ${reference}` : "",
+        line.source ? `Source: ${line.source}` : "",
+        line.account ? `Account: ${line.account}` : "",
+        line.direction ? `Direction: ${line.direction}` : ""
+      ].filter(Boolean).join(" - ");
+      const amount = money(line.currency || "USD", line.amountMinor || 0);
+      return {
+        type: typeOverride || (line.source === "JOURNAL" ? "Journal" : line.source === "WITHDRAWAL" ? "Withdrawal" : "Ledger"),
+        date: line.postedAt || line.archivedAt || "",
+        time: new Date(line.postedAt || line.archivedAt || 0).getTime() || 0,
+        reference,
+        actors: actorNameFromAccount(line.account) || line.account || "",
+        amount,
+        status: line.direction || "Posted",
+        details,
+        searchValues: [
+          line.journal,
+          line.entryId,
+          line.orderId,
+          line.transferId,
+          line.source,
+          line.account,
+          line.direction,
+          line.currency,
+          line.details,
+          details,
+          amount,
+          amountSearchValues(line.currency || "USD", line.amountMinor || 0)
+        ]
+      };
+    }
+
+    function receivableDetailsForSearch(item) {
+      const paidMinor = receivablePaidMinor(item);
+      const balanceMinor = Math.max(0, Number(item.principalMinor || 0) - paidMinor);
+      const paymentHistory = (item.payments || [])
+        .map((payment) => `${displayDate(payment.paidAt)} ${money(item.currency, payment.amountMinor)}`)
+        .join(" / ");
+      return [
+        item.brokerOrderNumber ? `Initiator Number: ${item.brokerOrderNumber}` : "",
+        item.agentOrderNumber ? `Payer Number: ${item.agentOrderNumber}` : "",
+        item.senderName ? `Sender: ${item.senderName}` : "",
+        item.receiverName ? `Receiver: ${item.receiverName}` : "",
+        item.phoneNumber ? `Phone: ${item.phoneNumber}` : "",
+        item.accountNumber ? `Account: ${item.accountNumber}` : "",
+        item.remarks ? `Remarks: ${item.remarks}` : "",
+        `Principal: ${money(item.currency, item.principalMinor || 0)}`,
+        `Collected: ${money(item.currency, paidMinor)}`,
+        `Balance: ${money(item.currency, balanceMinor)}`,
+        paymentHistory ? `Payments: ${paymentHistory}` : "",
+        receivableIsVoided(item) ? `Voided: ${displayDate(item.voidedAt)}` : ""
+      ].filter(Boolean).join(" - ");
+    }
+
+    function receivableSearchResult(item) {
+      const paidMinor = receivablePaidMinor(item);
+      const balanceMinor = Math.max(0, Number(item.principalMinor || 0) - paidMinor);
+      const details = receivableDetailsForSearch(item);
+      const amount = `Principal ${money(item.currency, item.principalMinor || 0)} / Balance ${money(item.currency, balanceMinor)}`;
+      const status = receivableIsVoided(item) ? "Voided" : balanceMinor === 0 ? "Paid" : "Open";
+      return {
+        type: "Receivable",
+        date: item.createdAt || item.updatedAt || "",
+        time: new Date(item.createdAt || item.updatedAt || 0).getTime() || 0,
+        reference: item.id || item.orderId || "",
+        actors: item.borrower || "",
+        amount,
+        status,
+        details,
+        searchValues: [
+          item.id,
+          item.orderId,
+          item.brokerOrderNumber,
+          item.agentOrderNumber,
+          item.borrower,
+          item.currency,
+          item.senderName,
+          item.receiverName,
+          item.phoneNumber,
+          item.accountNumber,
+          item.remarks,
+          status,
+          details,
+          amount,
+          amountSearchValues(item.currency || "USD", item.principalMinor || 0),
+          amountSearchValues(item.currency || "USD", paidMinor),
+          amountSearchValues(item.currency || "USD", balanceMinor)
+        ]
+      };
+    }
+
+    function archiveBalanceSearchResult(archive, currency, netMinor) {
+      const amountMinor = Math.abs(netMinor);
+      const direction = netMinor > 0 ? "Owes Master" : "Master owes";
+      const amount = money(currency, amountMinor);
+      const details = [
+        `Archive: ${archive.id}`,
+        `Actor: ${archive.actor}`,
+        `Direction: ${direction}`,
+        `Amount: ${amount}`,
+        `Closed: ${displayDate(archive.closedAt)}`
+      ].join(" - ");
+      return {
+        type: "Closed Balance",
+        date: archive.closedAt || archive.archivedAt || "",
+        time: new Date(archive.closedAt || archive.archivedAt || 0).getTime() || 0,
+        reference: archive.id || "",
+        actors: archive.actor || "",
+        amount,
+        status: "Locked",
+        details,
+        searchValues: [
+          archive.id,
+          archive.actor,
+          currency,
+          direction,
+          amount,
+          details,
+          amountSearchValues(currency, amountMinor)
+        ]
+      };
+    }
+
+    function archivedOrderForSearch(order, archive) {
+      return {
+        ...order,
+        archivedAt: archive.closedAt || order.archivedAt,
+        state: order.state || "Archived"
+      };
+    }
+
+    function archivedTransferForSearch(transfer, archive) {
+      return {
+        ...transfer,
+        archivedAt: archive.closedAt || transfer.archivedAt,
+        state: transfer.state || "Archived"
+      };
+    }
+
+    function archivedLedgerLineForSearch(line, archive) {
+      return {
+        ...line,
+        archivedAt: archive.closedAt || line.archivedAt,
+        details: line.details || archive.details || ""
+      };
+    }
+
+    function buildGlobalSearchResults(actor, terms) {
+      if (!actor || !terms.length) return [];
+      const viewerIsMaster = actor.role === "Master";
+      const orderResults = (viewerIsMaster
+        ? state.orders
+        : state.orders.filter((order) => order.broker === actor.name || order.agent === actor.name))
+        .map((order) => orderSearchResult(order, actor));
+      const transferResults = (viewerIsMaster
+        ? state.transfers
+        : state.transfers.filter((transfer) => transfer.from === actor.name || transfer.to === actor.name))
+        .map((transfer) => transferSearchResult(transfer));
+      const ledgerResults = (viewerIsMaster
+        ? activeLedgerLines(state.ledger)
+        : activeLedgerLines(state.ledger).filter((line) => lineBelongsToActor(line, actor)))
+        .map((line) => ledgerSearchResult(line, actor));
+      const receivableResults = visibleReceivablesFor(actor).map((item) => receivableSearchResult(item));
+      const archiveResults = (viewerIsMaster
+        ? state.archives
+        : state.archives.filter((archive) => archive.actor === actor.name))
+        .flatMap((archive) => {
+          const balances = archive.balances && typeof archive.balances === "object"
+            ? archive.balances
+            : archivedBalances(archive.actor, archive.ledger || []);
+          const balanceRows = supportedCurrencies
+            .filter((currency) => (balances[currency] || 0) !== 0)
+            .map((currency) => archiveBalanceSearchResult(archive, currency, balances[currency] || 0));
+          const orderRows = (archive.orders || []).map((order) =>
+            orderSearchResult(archivedOrderForSearch(order, archive), actor, "Archived Order", "Locked")
+          );
+          const transferRows = (archive.transfers || []).map((transfer) =>
+            transferSearchResult(archivedTransferForSearch(transfer, archive), "Archived Transfer", "Locked")
+          );
+          const ledgerRows = (archive.ledger || []).map((line) =>
+            ledgerSearchResult(archivedLedgerLineForSearch(line, archive), actor, "Archived Ledger")
+          ).map((result) => ({ ...result, status: "Locked" }));
+          return [...balanceRows, ...orderRows, ...transferRows, ...ledgerRows];
+        });
+      return [...orderResults, ...transferResults, ...ledgerResults, ...receivableResults, ...archiveResults]
+        .filter((result) => matchesSearch([
+          result.type,
+          result.date,
+          result.reference,
+          result.actors,
+          result.amount,
+          result.status,
+          result.details,
+          result.searchValues
+        ], terms))
+        .sort((a, b) => b.time - a.time);
+    }
+
+    function searchStatusClass(status) {
+      const value = String(status || "").toLowerCase();
+      if (value.includes("void") || value.includes("cancel") || value.includes("reject")) return "danger";
+      if (value.includes("pending") || value.includes("assigned") || value.includes("return") || value.includes("open")) return "warn";
+      if (value.includes("paid") || value.includes("approved") || value.includes("posted")) return "good";
+      if (value.includes("locked")) return "danger";
+      return "";
+    }
+
+    function searchDetailsHtml(details) {
+      return text(details)
+        .split(" - ")
+        .filter(Boolean)
+        .map((part) => `<span>${escapeHtml(part)}</span>`)
+        .join("");
+    }
+
+    function renderGlobalSearch() {
+      if (!els.globalSearchRows) return;
+      const terms = searchTerms();
+      if (!terms.length) {
+        els.globalSearchCount.textContent = "Ready";
+        els.globalSearchRows.innerHTML = '<tr><td colspan="7">Enter text or number to search.</td></tr>';
+        return;
+      }
+      const results = buildGlobalSearchResults(selectedActor(), terms);
+      els.globalSearchCount.textContent = `${results.length} result${results.length === 1 ? "" : "s"}`;
+      if (results.length === 0) {
+        els.globalSearchRows.innerHTML = '<tr><td colspan="7">No matching records.</td></tr>';
+        return;
+      }
+      els.globalSearchRows.innerHTML = results.map((result) => `
+        <tr>
+          <td>${escapeHtml(displayDate(result.date))}</td>
+          <td><span class="state-pill">${escapeHtml(result.type)}</span></td>
+          <td><strong>${escapeHtml(result.reference)}</strong></td>
+          <td>${escapeHtml(result.actors)}</td>
+          <td class="search-amount">${escapeHtml(result.amount)}</td>
+          <td><span class="state-pill ${searchStatusClass(result.status)}">${escapeHtml(result.status)}</span></td>
+          <td><div class="search-result-detail">${searchDetailsHtml(result.details)}</div></td>
+        </tr>
+      `).join("");
+    }
+
     function newestOrderFirst(a, b) {
       const timeA = Math.max(new Date(a?.sentAt || 0).getTime(), new Date(a?.createdAt || 0).getTime());
       const timeB = Math.max(new Date(b?.sentAt || 0).getTime(), new Date(b?.createdAt || 0).getTime());
@@ -6159,14 +7141,15 @@
     function renderLedger() {
       const { actor, ledgerActor, lines: visibleLines } = currentLedgerContext();
       const showOrderInfo = showMasterOrderInfoColumns(actor, ledgerActor);
-      renderLedgerHeader(showOrderInfo);
+      const showPaidOutInfo = showSpecialAgentPaidOutColumn(actor, ledgerActor);
+      renderLedgerHeader(showOrderInfo, showPaidOutInfo);
       els.exportLedgerExcelButton.disabled = !ledgerActor;
       els.exportLedgerPdfButton.disabled = !ledgerActor;
       renderTrialBalance();
       renderIncomeStatement(visibleLines, ledgerActor);
       if (visibleLines.length === 0) {
         const emptyName = actor?.role === "Master" && ledgerActor ? `${escapeHtml(ledgerActor.name)} ledger is empty.` : "No journal entries posted. Ledger balance is zero.";
-        els.ledgerRows.innerHTML = `<tr><td colspan="${ledgerColumnCount(showOrderInfo)}">${emptyName}</td></tr>`;
+        els.ledgerRows.innerHTML = `<tr><td colspan="${ledgerColumnCount(showOrderInfo, showPaidOutInfo)}">${emptyName}</td></tr>`;
         els.metricLines.textContent = "0";
         return;
       }
@@ -6174,16 +7157,16 @@
         <tr class="${line.source === "ORDER_VOID" ? "void-row" : ""}">
           <td>${escapeHtml(displayDate(line.postedAt))}</td>
           <td><strong>${line.journal}</strong></td>
-          <td>${escapeHtml(ledgerReferenceNumber(line))}</td>
+          <td>${escapeHtml(ledgerReferenceNumber(line, actor, ledgerActor))}</td>
           <td>${line.source}</td>
-          <td>${escapeHtml(ledgerLineDetails(line, actor))}</td>
-          ${showOrderInfo ? ledgerOrderInfoCells(line) : ""}
+          <td>${escapeHtml(ledgerLineDetails(line, actor, ledgerActor))}</td>
+          ${showOrderInfo ? ledgerOrderInfoCells(line, showPaidOutInfo) : ""}
           <td>${line.account}</td>
           <td class="${toneClass(line.direction.toLowerCase())}"><strong>${line.direction}</strong></td>
           ${currencyCells(line.currency, line.amountMinor)}
         </tr>
       `).join("");
-      els.ledgerRows.innerHTML = lineRows + ledgerBalanceRows(visibleLines, ledgerActor, showOrderInfo);
+      els.ledgerRows.innerHTML = lineRows + ledgerBalanceRows(visibleLines, ledgerActor, showOrderInfo, showPaidOutInfo);
       els.metricLines.textContent = String(visibleLines.length);
     }
 
@@ -6234,7 +7217,7 @@
         const profitClass = toneClass(row.profitMinor >= 0 ? "profit-positive" : "profit-negative");
         return `
           <tr>
-            <td><strong>${escapeHtml(row.order.id)}</strong></td>
+            <td><strong>${escapeHtml(brokerOrderNumberForOrder(row.order))}</strong></td>
             <td>${escapeHtml(displayDate(row.postedAt))}</td>
             <td>${escapeHtml(row.details)}</td>
             <td>${escapeHtml(row.direction)}</td>
@@ -6359,6 +7342,10 @@
               const date = order.sentAt || order.createdAt || order.postedAt || archive.closedAt;
               const amountMinor = Number(order.sourceAmountMinor || 0);
               if (!archiveRowVisible(date, amountMinor, filters)) return;
+              const archiveOrderViewer = actor?.role === "Master"
+                ? (archive.actor === order.agent ? { name: archive.actor, role: "Agent" } : actor)
+                : actor;
+              const archiveOrderNumber = orderDisplayNumber(order, archiveOrderViewer);
               const detail = [
                 `${order.broker || ""} -> ${order.agent || ""}`,
                 order.senderName ? `Sender: ${order.senderName}` : "",
@@ -6373,6 +7360,9 @@
                 archive.actor,
                 archive.id,
                 order.id,
+                order.internalOrderId,
+                order.brokerOrderNumber,
+                order.agentOrderNumber,
                 order.broker,
                 order.agent,
                 order.senderName,
@@ -6389,7 +7379,7 @@
                 <tr>
                   <td>${escapeHtml(displayDate(date))}</td>
                   <td>Order</td>
-                  <td><strong>${escapeHtml(order.id)}</strong></td>
+                  <td><strong>${escapeHtml(archiveOrderNumber)}</strong></td>
                   <td>${escapeHtml(detail || `${order.broker || ""} -> ${order.agent || ""}`)}</td>
                   <td>${lockedAmount(order.sourceCurrency || "USD", amountMinor)}</td>
                   <td><span class="state-pill danger">Locked</span></td>
@@ -6652,6 +7642,12 @@
     function archiveOrderSnapshot(order, actorName, closedAt = new Date().toISOString()) {
       return {
         id: order.id,
+        internalOrderId: order.id,
+        brokerOrderNumber: brokerOrderNumberForOrder(order),
+        brokerActorId: order.brokerActorId || "",
+        agentOrderNumber: agentOrderNumberForOrder(order, order.agent),
+        agentOrderActor: order.agentOrderActor || order.agent || "",
+        agentOrderNumbers: order.agentOrderNumbers && typeof order.agentOrderNumbers === "object" ? { ...order.agentOrderNumbers } : {},
         actor: actorName,
         broker: order.broker,
         agent: order.agent,
@@ -7229,6 +8225,17 @@
         updatePaymentProofStatus(proofInput);
         return;
       }
+      const visibilityToggle = event.target.closest(".order-visibility-toggle");
+      if (visibilityToggle) {
+        if (selectedActor()?.role !== "Master") return;
+        const actor = state.actors.find((item) => item.id === visibilityToggle.dataset.id);
+        const field = visibilityToggle.dataset.field;
+        if (!actor || !["Agent", "Special Agent"].includes(actor.role) || !Object.prototype.hasOwnProperty.call(orderVisibilityPermissionDefaults, field)) return;
+        actor.orderVisibilityPermissions = normalizeOrderVisibilityPermissions(actor.orderVisibilityPermissions);
+        actor.orderVisibilityPermissions[field] = visibilityToggle.checked === true;
+        renderAll();
+        return;
+      }
       const checkbox = event.target.closest(".transfer-target-toggle");
       if (!checkbox || selectedActor()?.role !== "Master") return;
       const actor = state.actors.find((item) => item.id === checkbox.dataset.id);
@@ -7333,6 +8340,13 @@
     [els.archiveActorFilter, els.archiveDatePreset, els.archiveDateFrom, els.archiveDateTo, els.archiveAmountMin, els.archiveAmountMax, els.archiveSearch].forEach((input) => {
       input.addEventListener("input", renderArchive);
       input.addEventListener("change", renderArchive);
+    });
+
+    els.globalSearch?.addEventListener("input", renderGlobalSearch);
+    els.globalSearchClear?.addEventListener("click", () => {
+      els.globalSearch.value = "";
+      renderGlobalSearch();
+      els.globalSearch.focus();
     });
 
     document.getElementById("orderForm").addEventListener("input", (event) => {
@@ -7638,6 +8652,9 @@
         transferEnabled: true,
         transferMode: "master",
         incomeStatementVisible: true,
+        orderVisibilityPermissions: ["Agent", "Special Agent"].includes(roleInput.value)
+          ? normalizeOrderVisibilityPermissions()
+          : undefined,
         workingCurrencies,
         specialPayoutDivider: roleInput.value === "Special Agent" ? 1 : undefined,
         specialPayoutDividerEnabled: false,
@@ -7732,7 +8749,7 @@
         els.orderState.className = "state-pill";
         clearOrderDetails();
         if (receivable) notifyEvent("Receivable registered", `${receivable.id} recorded for ${receivable.borrower}.`);
-        notifyEvent("New order", `${order.id} assigned to ${order.agent}.`);
+        notifyEvent("New order", `${orderDisplayNumber(order, { name: order.agent, role: "Agent" })} assigned to ${order.agent}.`);
         renderAll();
       });
     });
@@ -7776,7 +8793,7 @@
         els.voidButton.disabled = true;
         clearOrderDetails();
         if (receivable) notifyEvent("Receivable registered", `${receivable.id} recorded for ${receivable.borrower}.`);
-        notifyEvent("New order", `${order.id} sent to Master for routing.`);
+        notifyEvent("New order", `${orderDisplayNumber(order, actor)} sent to Master for routing.`);
         renderAll();
       });
     });
@@ -7930,7 +8947,7 @@
         if (!value) return;
         try {
           const copied = await copyTextToClipboard(value);
-          notifyEvent(copied ? "Order copied" : "Copy failed", copied ? `${order.id} details copied.` : "Your browser could not copy this order.");
+          notifyEvent(copied ? "Order copied" : "Copy failed", copied ? `${orderDisplayNumber(order, selectedActor())} details copied.` : "Your browser could not copy this order.");
         } catch {
           notifyEvent("Copy failed", "Your browser could not copy this order.");
         }
@@ -8270,6 +9287,13 @@
         percentInput?.setCustomValidity("");
         order.agent = targetAgent;
         order.agentActorId = targetActor.id;
+        assignAgentOrderNumber(order, targetAgent);
+        const receivable = receivableForOrder(order);
+        if (receivable) {
+          receivable.brokerOrderNumber = brokerOrderNumberForOrder(order);
+          receivable.agentOrderNumber = agentOrderNumberForOrder(order, targetAgent);
+          receivable.updatedAt = new Date().toISOString();
+        }
         if (dividerText) {
           order.forwardedPayoutDivider = forwardedDivider;
           delete order.manualSpecialPayoutDivider;
@@ -8290,7 +9314,7 @@
         els.orderState.textContent = "Assigned";
         els.orderState.className = "state-pill";
         clearOrderDetails();
-        notifyEvent("Order forwarded", `${order.id} sent to ${targetAgent}.`);
+        notifyEvent("Order forwarded", `${orderDisplayNumber(order, { name: targetAgent, role: targetActor.role })} sent to ${targetAgent}.`);
         renderAll();
         await saveStateNow();
         return;
@@ -8570,6 +9594,7 @@
       renderProfiles();
       renderActors();
       renderPermissionSettings();
+      renderVisibilityPermissions();
       renderSettingsCollapses();
       renderSubscriptions();
       renderFixedRateSettings();
@@ -8582,6 +9607,7 @@
       renderLedger();
       renderSettlements();
       renderArchive();
+      renderGlobalSearch();
       renderMetrics();
       updateOrderFundingMode();
       saveState();
