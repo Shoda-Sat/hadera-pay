@@ -2693,6 +2693,7 @@
     const pendingProofUploads = new Map();
     const processingTransferIds = new Set();
     const receivablePaymentDrafts = new Map();
+    const expandedCompactOrderIds = new Set();
     const authIdleMs = 1000 * 60 * 60 * 3;
     const maxProofFileBytes = 4 * 1024 * 1024;
     const supportedCurrencies = ["USD", "ETB", "EUR", "ERN"];
@@ -5545,11 +5546,12 @@
         ].filter(Boolean);
         const visibleCompactKeys = new Set([compactReceiverItem.key, "baseAmount", "payoutAmount"]);
         const hiddenItems = compactHiddenItems.filter((item) => !visibleCompactKeys.has(item.key));
+        const expandedAttribute = expandedCompactOrderIds.has(order.id) ? " open" : "";
         return `
           <div class="order-detail compact">
             <span class="order-compact-primary">${amountLine}</span>
             ${hiddenItems.length ? `
-              <details class="order-extra-detail">
+              <details class="order-extra-detail" data-order-id="${escapeHtml(order.id)}"${expandedAttribute}>
                 <summary>
                   <span class="order-compact-receiver">${compactReceiverItem.html}</span>
                   <span class="order-extra-detail-toggle"><span class="show-more-text">Show more</span><span class="show-less-text">Show less</span></span>
@@ -8250,6 +8252,17 @@
       }
       renderAll();
     });
+
+    document.addEventListener("toggle", (event) => {
+      const detail = event.target.closest?.(".order-extra-detail");
+      const orderId = detail?.dataset.orderId;
+      if (!orderId) return;
+      if (detail.open) {
+        expandedCompactOrderIds.add(orderId);
+      } else {
+        expandedCompactOrderIds.delete(orderId);
+      }
+    }, true);
 
     els.receivableRows.addEventListener("input", (event) => {
       const input = event.target.closest?.(".receivable-payment");
