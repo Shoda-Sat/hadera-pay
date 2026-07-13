@@ -5658,6 +5658,80 @@
       };
     }
 
+    function calculatedIncomeStatementForOrder(order, journalLines) {
+      const baseCurrency = "USD";
+      let baseAmountMinor = masterIncomeAmountForOrder(order, journalLines);
+      const collected = masterCollectedAmountForOrder(order, journalLines);
+      let profitMinor = Number.isFinite(Number(collected.buyingProfitMinor))
+        ? Number(collected.buyingProfitMinor)
+        : collected.collectedUsdMinor - baseAmountMinor;
+      const specialAgentBaseUsdMinor = specialAgentErnBaseUsdMinorForOrder(order, journalLines);
+      if (specialAgentBaseUsdMinor > 0) {
+        baseAmountMinor = specialAgentBaseUsdMinor;
+        profitMinor = collected.collectedUsdMinor - baseAmountMinor;
+      } else if (Number.isFinite(Number(collected.buyingProfitMinor))) {
+        baseAmountMinor = collected.collectedUsdMinor - profitMinor;
+      }
+      return {
+        baseCurrency,
+        baseAmountMinor,
+        collectedCurrency: collected.collectedCurrency,
+        collectedOriginalMinor: collected.collectedOriginalMinor,
+        collectedEurMinor: collected.collectedEurMinor,
+        collectedUsdMinor: collected.collectedUsdMinor,
+        profitMinor
+      };
+    }
+
+    function frozenIncomeStatementForOrder(order) {
+      const baseAmountMinor = Number(order.incomeBaseAmountMinor);
+      const profitMinor = Number(order.incomeProfitMinor);
+      if (!Number.isFinite(baseAmountMinor) || !Number.isFinite(profitMinor)) return null;
+      return {
+        baseCurrency: order.incomeBaseCurrency || "USD",
+        baseAmountMinor,
+        collectedCurrency: order.incomeCollectedCurrency || order.sourceCurrency || "USD",
+        collectedOriginalMinor: Number(order.incomeCollectedOriginalMinor || 0),
+        collectedEurMinor: Number(order.incomeCollectedEurMinor || 0),
+        collectedUsdMinor: Number(order.incomeCollectedUsdMinor || 0),
+        profitMinor
+      };
+    }
+
+    function freezeOrderIncomeStatement(order, journalLines, force = false) {
+      if (!order || order.state === "Voided" || order.voidJournal) return false;
+      if (!force && frozenIncomeStatementForOrder(order)) return false;
+      const income = calculatedIncomeStatementForOrder(order, journalLines);
+      const payoutCurrency = order.payoutCurrency || order.sourceCurrency || "USD";
+      const masterSetting = masterRateDivisorSettingFor(payoutCurrency);
+      order.incomeBaseCurrency = income.baseCurrency;
+      order.incomeBaseAmountMinor = income.baseAmountMinor;
+      order.incomeCollectedCurrency = income.collectedCurrency;
+      order.incomeCollectedOriginalMinor = income.collectedOriginalMinor;
+      order.incomeCollectedEurMinor = income.collectedEurMinor;
+      order.incomeCollectedUsdMinor = income.collectedUsdMinor;
+      order.incomeProfitMinor = income.profitMinor;
+      order.incomeSnapshotAt = order.paidAt || new Date().toISOString();
+      order.incomeMasterRateSnapshot = {
+        payoutCurrency,
+        enabled: masterSetting.enabled === true,
+        divider: Number(masterSetting.divider || 1),
+        percent: Number(masterSetting.percent || 0)
+      };
+      return true;
+    }
+
+    function freezePostedIncomeStatements(force = false) {
+      let changed = false;
+      state.orders
+        .filter((order) => order.state === "Paid" && order.journal && !order.voidJournal)
+        .forEach((order) => {
+          const journalLines = state.ledger.filter((line) => line.journal === order.journal && line.source === "ORDER_PAYMENT");
+          if (journalLines.length) changed = freezeOrderIncomeStatement(order, journalLines, force) || changed;
+        });
+      return changed;
+    }
+
     function incomeStatementRows(lines) {
       const orderJournals = new Set(
         lines
@@ -5670,30 +5744,12 @@
           if (!order) return null;
           if (order.state === "Voided" || order.voidJournal) return null;
           const journalLines = state.ledger.filter((line) => line.journal === journal && line.source === "ORDER_PAYMENT");
-          const baseCurrency = "USD";
-          let baseAmountMinor = masterIncomeAmountForOrder(order, journalLines);
-          const collected = masterCollectedAmountForOrder(order, journalLines);
-          let profitMinor = Number.isFinite(Number(collected.buyingProfitMinor))
-            ? Number(collected.buyingProfitMinor)
-            : collected.collectedUsdMinor - baseAmountMinor;
-          const specialAgentBaseUsdMinor = specialAgentErnBaseUsdMinorForOrder(order, journalLines);
-          if (specialAgentBaseUsdMinor > 0) {
-            baseAmountMinor = specialAgentBaseUsdMinor;
-            profitMinor = collected.collectedUsdMinor - baseAmountMinor;
-          } else if (Number.isFinite(Number(collected.buyingProfitMinor))) {
-            baseAmountMinor = collected.collectedUsdMinor - profitMinor;
-          }
+          const income = frozenIncomeStatementForOrder(order) || calculatedIncomeStatementForOrder(order, journalLines);
           return {
             order,
             postedAt: order.paidAt || journalLines[0]?.postedAt || order.createdAt,
             direction: journalLines.some((line) => line.direction === "Debit") ? "Debit" : "Credit",
-            baseCurrency,
-            baseAmountMinor,
-            collectedCurrency: collected.collectedCurrency,
-            collectedOriginalMinor: collected.collectedOriginalMinor,
-            collectedEurMinor: collected.collectedEurMinor,
-            collectedUsdMinor: collected.collectedUsdMinor,
-            profitMinor,
+            ...income,
             details: ledgerLineDetails(journalLines[0] || { source: "ORDER_PAYMENT", journal }, selectedActor())
           };
         })
@@ -6587,6 +6643,7 @@
         { journal: journalId, orderId: order.id, source: "ORDER_PAYMENT", account: "MASTER_FX_CLEARING", direction: "Debit", currency: payerStatement.currency, amountMinor: payerStatement.amountMinor, postedAt },
         { journal: journalId, orderId: order.id, source: "ORDER_PAYMENT", account: `${order.agent} ACTOR_CLEARING`, direction: "Credit", currency: payerStatement.currency, amountMinor: payerStatement.amountMinor, postedAt }
       ].filter((line) => line.amountMinor > 0);
+      freezeOrderIncomeStatement(order, lines, true);
       state.ledger.unshift(...lines);
       syncSettlementsFromLedger();
       return true;
@@ -8104,6 +8161,7 @@
         }
         input?.setCustomValidity("");
         percentInput?.setCustomValidity("");
+        freezePostedIncomeStatements();
         state.masterRateDivisorSettings ||= {};
         state.masterRateDivisorSettings[currency] = {
           ...(state.masterRateDivisorSettings[currency] || {}),
@@ -8159,6 +8217,7 @@
         }
         input?.setCustomValidity("");
         percentInput?.setCustomValidity("");
+        freezePostedIncomeStatements();
         state.masterRateDivisorSettings ||= {};
         state.masterRateDivisorSettings[currency] = {
           divider,
@@ -8317,6 +8376,8 @@
         } else {
           delete order.manualMasterRatePercent;
         }
+        const journalLines = state.ledger.filter((line) => line.journal === order.journal && line.source === "ORDER_PAYMENT");
+        if (journalLines.length) freezeOrderIncomeStatement(order, journalLines, true);
         order.updatedAt = new Date().toISOString();
         renderAll();
         return;
