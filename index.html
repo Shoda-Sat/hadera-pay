@@ -822,6 +822,39 @@
       min-width: 220px;
     }
 
+    .order-number-line {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .order-copy-details {
+      width: 22px;
+      height: 22px;
+      min-width: 22px;
+      border-radius: 6px;
+      border: 1px solid var(--line);
+      background: #ffffff;
+      color: var(--muted);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      vertical-align: middle;
+    }
+
+    .order-copy-details:hover {
+      color: var(--accent);
+      border-color: var(--accent);
+      background: #f0fdfa;
+    }
+
+    .order-copy-details svg {
+      width: 13px;
+      height: 13px;
+      stroke-width: 2.2;
+    }
+
     .order-actions {
       display: flex;
       gap: 8px;
@@ -2292,7 +2325,7 @@
             <div class="panel-body table-wrap">
               <table>
                 <thead>
-                  <tr><th>Actor</th><th>Role</th><th>Currency</th><th>Transfer Access</th><th>Action</th><th>Income Statement</th><th>Order Currency Access</th><th>Special Agent Divisor / %</th></tr>
+                  <tr><th>Actor</th><th>Role</th><th>Currency</th><th>Transfer Access</th><th>Action</th><th>Order Currency Access</th><th>Special Agent Divisor / %</th></tr>
                 </thead>
                 <tbody id="permissionRows"></tbody>
               </table>
@@ -2997,6 +3030,7 @@
       mic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/></svg>',
       paperclip: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m21.44 11.05-8.49 8.49a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.19 9.19a2 2 0 0 1-2.83-2.83l8.49-8.49"/></svg>',
       stop: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="7" y="7" width="10" height="10" rx="1"/></svg>',
+      copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
       trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v5"/><path d="M14 11v5"/></svg>'
     };
 
@@ -3213,6 +3247,23 @@
       els.notificationStack.prepend(toast);
       setTimeout(() => toast.remove(), 3800);
       Array.from(els.notificationStack.children).slice(4).forEach((item) => item.remove());
+    }
+
+    async function copyTextToClipboard(value) {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(value);
+        return true;
+      }
+      const input = document.createElement("textarea");
+      input.value = value;
+      input.setAttribute("readonly", "");
+      input.style.position = "fixed";
+      input.style.left = "-9999px";
+      document.body.appendChild(input);
+      input.select();
+      const copied = document.execCommand("copy");
+      input.remove();
+      return copied;
     }
 
     function renderCurrencyOptions() {
@@ -4609,7 +4660,6 @@
                 ? "Master only"
                 : "None";
           const transferStatusClass = transferMode === "none" ? "danger" : transferMode === "both" ? "good" : "warn";
-          const incomeVisible = actor.incomeStatementVisible !== false;
           const orderMultiCurrency = actor.orderMultiCurrencyEnabled === true;
           const orderCurrencyControl = ["Broker", "Special Broker"].includes(actor.role)
             ? `
@@ -4665,20 +4715,12 @@
                   Actors
                 </label>
               </td>
-              <td>
-                <div class="setting-inline">
-                  <span class="state-pill ${incomeVisible ? "good" : "danger"}">${incomeVisible ? "View" : "Hidden"}</span>
-                  <button class="btn ${incomeVisible ? "danger" : "primary"} toggle-income-permission" data-id="${actor.id}" type="button">
-                    ${incomeVisible ? "Hide" : "View"}
-                  </button>
-                </div>
-              </td>
               <td>${orderCurrencyControl}</td>
               <td>${specialDividerControl}</td>
             </tr>
           `;
         });
-      els.permissionRows.innerHTML = rows.length ? rows.join("") : '<tr><td colspan="8">No actors available for permissions.</td></tr>';
+      els.permissionRows.innerHTML = rows.length ? rows.join("") : '<tr><td colspan="7">No actors available for permissions.</td></tr>';
     }
 
     function renderFixedRateSettings() {
@@ -5000,6 +5042,40 @@
           ${bits.map((bit) => `<span>${bit}</span>`).join("")}
         </div>
       `;
+    }
+
+    function orderCopyAmount(currency, amountMinor) {
+      const code = currency || "USD";
+      const amount = Number(amountMinor || 0);
+      if (amount <= 0) return "";
+      const formatted = formatMinor(amount, code).replace(/(\.\d*?[1-9])0+$/, "$1").replace(/\.0+$/, "");
+      return `${code}${formatted}`;
+    }
+
+    function orderCopyText(order) {
+      const sourceCurrency = order.sourceCurrency || "USD";
+      const payoutCurrency = order.payoutCurrency || sourceCurrency;
+      const payoutMinor = Number(order.payoutAmountMinor || order.sourceAmountMinor || 0);
+      return [
+        ["Sender Name", order.senderName],
+        ["Receiver Name", order.receiverName],
+        ["Source Amount", orderCopyAmount(sourceCurrency, order.sourceAmountMinor)],
+        ["Total Payout", orderCopyAmount(payoutCurrency, payoutMinor)],
+        ["Phone Number", order.phoneNumber],
+        ["Account Number", order.accountNumber],
+        ["Remarks", order.remarks]
+      ]
+        .map(([label, value]) => [label, text(value)])
+        .filter(([, value]) => value)
+        .map(([label, value]) => `${label}: ${value}`)
+        .join("\n");
+    }
+
+    function orderNumberHtml(order, viewer) {
+      const copyButton = viewer?.role === "Master"
+        ? `<button class="order-copy-details" data-id="${escapeHtml(order.id)}" type="button" aria-label="Copy order details" title="Copy order details">${icons.copy}</button>`
+        : "";
+      return `<span class="order-number-line"><strong>${escapeHtml(order.id)}</strong>${copyButton}</span>`;
     }
 
     function orderActionsHtml(order, actor) {
@@ -5747,7 +5823,7 @@
               : "";
         return `
           <tr>
-            <td><strong>${order.id}</strong>${orderDetailsHtml(order, actor)}</td>
+            <td>${orderNumberHtml(order, actor)}${orderDetailsHtml(order, actor)}</td>
             <td>${actor?.role === "Master" || order.broker === actor?.name ? escapeHtml(order.broker) : '<span class="muted">Master assigned</span>'}</td>
             <td>${escapeHtml(order.agent)}</td>
             <td>${money(order.sourceCurrency || "USD", order.sourceAmountMinor || 0)}</td>
@@ -5966,7 +6042,7 @@
 
     function renderIncomeStatement(lines, ledgerActor) {
       const viewer = selectedActor();
-      const canViewIncome = viewer?.role === "Master" || viewer?.incomeStatementVisible !== false;
+      const canViewIncome = viewer?.role === "Master";
       els.incomeStatementSection.classList.toggle("hidden", !canViewIncome);
       if (!canViewIncome) {
         els.incomeStatementRows.innerHTML = "";
@@ -7287,7 +7363,7 @@
       }
       if (event.target.closest(".copy-message")) {
         const value = message.text || messageSummary(message);
-        if (navigator.clipboard) await navigator.clipboard.writeText(value);
+        await copyTextToClipboard(value);
         return;
       }
       if (event.target.closest(".forward-message") && actor?.role === "Master") {
@@ -7691,6 +7767,21 @@
     });
 
     document.addEventListener("click", async (event) => {
+      const copyOrderButton = event.target.closest(".order-copy-details");
+      if (copyOrderButton) {
+        if (selectedActor()?.role !== "Master") return;
+        const order = state.orders.find((item) => item.id === copyOrderButton.dataset.id);
+        const value = order ? orderCopyText(order) : "";
+        if (!value) return;
+        try {
+          const copied = await copyTextToClipboard(value);
+          notifyEvent(copied ? "Order copied" : "Copy failed", copied ? `${order.id} details copied.` : "Your browser could not copy this order.");
+        } catch {
+          notifyEvent("Copy failed", "Your browser could not copy this order.");
+        }
+        return;
+      }
+
       const saveActorNameButton = event.target.closest(".save-actor-name");
       if (saveActorNameButton) {
         if (selectedActor()?.role !== "Master") return;
@@ -7749,16 +7840,6 @@
         if (!actor || !["Broker", "Special Broker"].includes(actor.role)) return;
         actor.orderMultiCurrencyEnabled = actor.orderMultiCurrencyEnabled !== true;
         orderConversionTouches = [];
-        renderAll();
-        return;
-      }
-
-      const incomePermissionButton = event.target.closest(".toggle-income-permission");
-      if (incomePermissionButton) {
-        if (selectedActor()?.role !== "Master") return;
-        const actor = state.actors.find((item) => item.id === incomePermissionButton.dataset.id);
-        if (!actor || actor.role === "Master") return;
-        actor.incomeStatementVisible = actor.incomeStatementVisible === false;
         renderAll();
         return;
       }
