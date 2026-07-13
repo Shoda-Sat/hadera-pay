@@ -5568,6 +5568,7 @@
       const baseCurrency = "USD";
       const payoutCurrency = order.payoutCurrency || order.sourceCurrency || baseCurrency;
       const payoutAmountMinor = Number(order.payoutAmountMinor || order.sourceAmountMinor || 0);
+      if (payoutCurrency === baseCurrency) return payoutAmountMinor;
       const setting = masterRateDivisorSettingFor(payoutCurrency);
       if (setting.enabled === true && Number(setting.divider) > 0) {
         const baseMajor = majorAmount(payoutAmountMinor, payoutCurrency) / Number(setting.divider);
