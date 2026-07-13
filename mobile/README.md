@@ -1,6 +1,6 @@
 # HaderaPay Mobile
 
-React Native mobile app starter for the HaderaPay Android experience.
+React Native mobile app for the HaderaPay Android experience.
 
 ## Run
 
@@ -10,11 +10,13 @@ npm install
 npm run android
 ```
 
+By default the app talks to `https://haderapay.com`. To point a build at another backend, set `EXPO_PUBLIC_HADERAPAY_API_URL` before starting or building the app.
+
 ## Included
 
 - HaderaPay branding, colors, and compact operational layout.
-- Login and signup screens with placeholder API calls.
-- Mobile dashboard homepage.
+- Login, signup, session restore, and logout using the HaderaPay server.
+- Role-aware mobile dashboard and orderbook.
 - Money transfer form with live source-to-payout conversion.
 - Currency conversion flow screen.
-- Confirmation screen and placeholder order submission.
+- Confirmation screen that submits Broker and Special Broker orders for Master routing.

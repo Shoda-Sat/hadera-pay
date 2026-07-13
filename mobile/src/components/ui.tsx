@@ -96,7 +96,9 @@ export function Field({
   placeholder,
   keyboardType,
   secureTextEntry,
-  multiline
+  multiline,
+  style,
+  ...inputProps
 }: TextInputProps & {
   label: string;
   value: string;
@@ -113,7 +115,8 @@ export function Field({
         keyboardType={keyboardType}
         secureTextEntry={secureTextEntry}
         multiline={multiline}
-        style={[styles.input, multiline && styles.textarea]}
+        style={[styles.input, multiline && styles.textarea, style]}
+        {...inputProps}
       />
     </View>
   );
