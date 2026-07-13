@@ -75,6 +75,14 @@
       gap: 12px;
     }
 
+    .auth-head-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
     .auth-head h1 {
       margin: 0;
       font-size: 22px;
@@ -321,6 +329,11 @@
       font-size: 12px;
       font-weight: 800;
       white-space: nowrap;
+    }
+
+    .app-download-link {
+      color: var(--ink);
+      text-decoration: none;
     }
 
     .badge.good {
@@ -1542,7 +1555,13 @@
           <h1>HaderaPay Accounts</h1>
           <span class="muted">Sign in as Master, or join a Master workspace as an Actor.</span>
         </div>
-        <span class="state-pill">Local</span>
+        <div class="auth-head-actions">
+          <a class="btn secondary app-download-link" href="downloads/haderapay-android-app-starter.zip" download>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+            Android App
+          </a>
+          <span class="state-pill">Local</span>
+        </div>
       </div>
       <div class="auth-body">
         <div class="auth-tabs">
@@ -1680,6 +1699,10 @@
           <span class="badge" id="currencyBadge">USD / ETB / EUR / ERN</span>
           <span class="badge" id="profileBadge">Master</span>
           <span class="badge" id="accountBadge">Not logged in</span>
+          <a class="btn secondary app-download-link" href="downloads/haderapay-android-app-starter.zip" download>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+            Android App
+          </a>
           <button class="btn secondary" id="passwordButton" type="button">Password</button>
           <button class="btn secondary" id="logoutButton" type="button">Logout</button>
         </div>

@@ -5,3 +5,4 @@ data/
 server.out.log
 server.err.log
 *.log
+mobile/.expo/

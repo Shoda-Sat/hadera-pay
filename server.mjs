@@ -32,6 +32,7 @@ const contentTypes = new Map([
   [".sql", "text/plain; charset=utf-8"],
   [".ts", "text/plain; charset=utf-8"],
   [".md", "text/markdown; charset=utf-8"],
+  [".zip", "application/zip"],
 ]);
 
 const blankDb = () => ({
