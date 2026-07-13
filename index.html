@@ -5564,11 +5564,24 @@
       `;
     }
 
+    function payerAgentPayoutMinorForOrder(order, journalLines, currency = "USD") {
+      const agentAccount = `${order.agent} ACTOR_CLEARING`;
+      const agentAmountMinor = journalLines
+        .filter((line) => line.currency === currency && line.account === agentAccount && line.direction === "Credit")
+        .reduce((sum, line) => sum + Number(line.amountMinor || 0), 0);
+      if (agentAmountMinor > 0) return agentAmountMinor;
+      return journalLines
+        .filter((line) => line.currency === currency && line.account === "MASTER_FX_CLEARING" && line.direction === "Debit")
+        .reduce((sum, line) => sum + Number(line.amountMinor || 0), 0);
+    }
+
     function masterIncomeAmountForOrder(order, journalLines) {
       const baseCurrency = "USD";
       const payoutCurrency = order.payoutCurrency || order.sourceCurrency || baseCurrency;
       const payoutAmountMinor = Number(order.payoutAmountMinor || order.sourceAmountMinor || 0);
-      if (payoutCurrency === baseCurrency) return payoutAmountMinor;
+      if (payoutCurrency === baseCurrency) {
+        return payerAgentPayoutMinorForOrder(order, journalLines, baseCurrency) || payoutAmountMinor;
+      }
       const setting = masterRateDivisorSettingFor(payoutCurrency);
       if (setting.enabled === true && Number(setting.divider) > 0) {
         const baseMajor = majorAmount(payoutAmountMinor, payoutCurrency) / Number(setting.divider);
@@ -5588,7 +5601,7 @@
         .reduce((sum, line) => sum + Number(line.amountMinor || 0), 0);
     }
 
-    function masterCollectedAmountForOrder(order) {
+    function masterCollectedAmountForOrder(order, journalLines = []) {
       const sourceCurrency = order.sourceCurrency || "USD";
       const payoutCurrency = order.payoutCurrency || sourceCurrency;
       const sourceAmountMinor = Number(order.sourceAmountMinor || 0);
@@ -5609,7 +5622,10 @@
         const localRate = buyingRateForPayout(payoutCurrency);
         const collectedEurMajor = majorAmount(collectedMinor, "EUR");
         const collectedUsdMinor = minorFromMajor(collectedEurMajor * rates.eurToUsd, "USD");
-        const payoutMajor = majorAmount(Number(order.payoutAmountMinor || 0), payoutCurrency);
+        const ledgerPayoutMinor = payoutCurrency === "USD"
+          ? payerAgentPayoutMinorForOrder(order, journalLines, "USD")
+          : 0;
+        const payoutMajor = majorAmount(ledgerPayoutMinor || Number(order.payoutAmountMinor || 0), payoutCurrency);
         let buyingProfitMinor = null;
         if (brokerBaseCurrency === "EUR" && ["ETB", "ERN"].includes(payoutCurrency) && localRate > 0) {
           buyingProfitMinor = minorFromMajor(((collectedEurMajor * rates.eurToUsd * localRate) - payoutMajor) / localRate, "USD");
@@ -5648,7 +5664,7 @@
           const journalLines = state.ledger.filter((line) => line.journal === journal && line.source === "ORDER_PAYMENT");
           const baseCurrency = "USD";
           let baseAmountMinor = masterIncomeAmountForOrder(order, journalLines);
-          const collected = masterCollectedAmountForOrder(order);
+          const collected = masterCollectedAmountForOrder(order, journalLines);
           const profitMinor = Number.isFinite(Number(collected.buyingProfitMinor))
             ? Number(collected.buyingProfitMinor)
             : collected.collectedUsdMinor - baseAmountMinor;
