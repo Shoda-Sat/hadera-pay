@@ -5545,9 +5545,14 @@
         const collectedEurMajor = majorAmount(collectedMinor, "EUR");
         const collectedUsdMinor = minorFromMajor(collectedEurMajor * rates.eurToUsd, "USD");
         const payoutMajor = majorAmount(Number(order.payoutAmountMinor || 0), payoutCurrency);
-        const buyingProfitMinor = brokerBaseCurrency === "EUR" && ["ETB", "ERN"].includes(payoutCurrency) && localRate > 0
-          ? minorFromMajor(((collectedEurMajor * rates.eurToUsd * localRate) - payoutMajor) / localRate, "USD")
-          : null;
+        let buyingProfitMinor = null;
+        if (brokerBaseCurrency === "EUR" && ["ETB", "ERN"].includes(payoutCurrency) && localRate > 0) {
+          buyingProfitMinor = minorFromMajor(((collectedEurMajor * rates.eurToUsd * localRate) - payoutMajor) / localRate, "USD");
+        }
+        if (brokerBaseCurrency === "EUR" && payoutCurrency === "USD" && rates.usdToEtb > 0) {
+          const payoutEtbMajor = payoutMajor * rates.usdToEtb;
+          buyingProfitMinor = minorFromMajor(((collectedEurMajor * rates.eurToUsd * rates.usdToEtb) - payoutEtbMajor) / rates.usdToEtb, "USD");
+        }
         return {
           collectedCurrency: "EUR",
           collectedOriginalMinor: collectedMinor,
