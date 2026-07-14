@@ -412,6 +412,23 @@
       letter-spacing: 0;
     }
 
+    .settings-heading {
+      display: grid;
+      gap: 3px;
+      min-width: 0;
+    }
+
+    .settings-heading small {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .settings-panel-toggle {
+      flex: 0 0 auto;
+      min-width: 106px;
+    }
+
     .panel-actions {
       display: flex;
       gap: 8px;
@@ -2542,12 +2559,18 @@
         </section>
 
         <section class="view" id="settings">
-          <div class="panel">
+          <div class="grid">
+            <div class="panel span-12 settings-category" data-settings-panel="actorAccess">
             <div class="panel-header">
-              <h2>Master Settings</h2>
-              <span class="state-pill good">Permissions</span>
+              <div class="settings-heading">
+                <h2>Actor Access</h2>
+                <small>Transfer access, order currency access, and Special Agent payout controls.</small>
+              </div>
+              <button class="btn secondary settings-panel-toggle" data-settings-toggle="actorAccess" type="button" aria-expanded="true">
+                <span data-settings-toggle-text>Collapse</span>
+              </button>
             </div>
-            <div class="panel-body table-wrap">
+            <div class="panel-body table-wrap" data-settings-body>
               <table>
                 <thead>
                   <tr><th>Actor</th><th>Role</th><th>Currency</th><th>Transfer Access</th><th>Action</th><th>Order Currency Access</th><th>Special Agent Divisor / %</th></tr>
@@ -2555,13 +2578,18 @@
                 <tbody id="permissionRows"></tbody>
               </table>
             </div>
-          </div>
-          <div class="panel">
-            <div class="panel-header">
-              <h2>Permissions</h2>
-              <span class="state-pill">Agent Visibility</span>
             </div>
-            <div class="panel-body table-wrap">
+            <div class="panel span-12 settings-category" data-settings-panel="agentVisibility">
+            <div class="panel-header">
+              <div class="settings-heading">
+                <h2>Agent Visibility</h2>
+                <small>Choose which order fields Agents and Special Agents can see.</small>
+              </div>
+              <button class="btn secondary settings-panel-toggle" data-settings-toggle="agentVisibility" type="button" aria-expanded="true">
+                <span data-settings-toggle-text>Collapse</span>
+              </button>
+            </div>
+            <div class="panel-body table-wrap" data-settings-body>
               <table>
                 <thead>
                   <tr><th>Actor</th><th>Role</th><th>Source Currency</th><th>Rate</th><th>Commission</th><th>Base Currency + Amount</th></tr>
@@ -2569,16 +2597,18 @@
                 <tbody id="visibilityPermissionRows"></tbody>
               </table>
             </div>
-          </div>
-          <div class="panel">
+            </div>
+            <div class="panel span-5 settings-category" data-settings-panel="masterReset">
             <div class="panel-header">
-              <h2>Master Reset Permit</h2>
-              <button class="btn secondary" id="resetPanelToggle" type="button">
-                Master Reset Permit
-                <span id="resetPanelToggleText">Collapse</span>
+              <div class="settings-heading">
+                <h2>Master Reset</h2>
+                <small>Erase transaction data or wipe data with Actors after permit confirmation.</small>
+              </div>
+              <button class="btn secondary settings-panel-toggle" data-settings-toggle="masterReset" type="button" aria-expanded="true">
+                <span data-settings-toggle-text>Collapse</span>
               </button>
             </div>
-            <div class="panel-body" id="resetPanelBody">
+            <div class="panel-body" id="resetPanelBody" data-settings-body>
               <form id="resetForm">
                 <div class="form-grid">
                   <div class="field">
@@ -2602,16 +2632,18 @@
                 </div>
               </form>
             </div>
-          </div>
-          <div class="panel">
+            </div>
+            <div class="panel span-7 settings-category" data-settings-panel="inviteCodes">
             <div class="panel-header">
-              <h2>Invite Codes</h2>
-              <button class="btn secondary" id="invitePanelToggle" type="button">
-                Invite Codes
-                <span id="invitePanelToggleText">Collapse</span>
+              <div class="settings-heading">
+                <h2>Invite Codes</h2>
+                <small>Create actor invite codes and review accepted actor access.</small>
+              </div>
+              <button class="btn secondary settings-panel-toggle" data-settings-toggle="inviteCodes" type="button" aria-expanded="true">
+                <span data-settings-toggle-text>Collapse</span>
               </button>
             </div>
-            <div class="panel-body" id="invitePanelFormBody">
+            <div class="panel-body" id="invitePanelFormBody" data-settings-body>
               <form id="inviteForm">
                 <div class="form-grid invite-grid">
                   <div class="field">
@@ -2638,7 +2670,7 @@
                 </div>
               </form>
             </div>
-            <div class="panel-body table-wrap" id="invitePanelTableBody">
+            <div class="panel-body table-wrap" id="invitePanelTableBody" data-settings-body>
               <table>
                 <thead>
                   <tr><th>Code</th><th>Role</th><th>Currency</th><th>Actor</th><th>Status</th><th>Active</th><th>Created</th></tr>
@@ -2646,13 +2678,18 @@
                 <tbody id="inviteRows"></tbody>
               </table>
             </div>
-          </div>
-          <div class="panel">
-            <div class="panel-header">
-              <h2>Fixed Order Rates</h2>
-              <span class="state-pill">Broker Rates</span>
             </div>
-            <div class="panel-body table-wrap">
+            <div class="panel span-6 settings-category" data-settings-panel="fixedOrderRates">
+            <div class="panel-header">
+              <div class="settings-heading">
+                <h2>Fixed Order Rates</h2>
+                <small>Manage Broker and Special Broker fixed order rates.</small>
+              </div>
+              <button class="btn secondary settings-panel-toggle" data-settings-toggle="fixedOrderRates" type="button" aria-expanded="true">
+                <span data-settings-toggle-text>Collapse</span>
+              </button>
+            </div>
+            <div class="panel-body table-wrap" data-settings-body>
               <table>
                 <thead>
                   <tr><th>Broker</th><th>Configured Rates</th><th>Status</th><th>Action</th></tr>
@@ -2660,19 +2697,25 @@
                 <tbody id="fixedRateRows"></tbody>
               </table>
             </div>
-          </div>
-          <div class="panel">
-            <div class="panel-header">
-              <h2>Master's Rate Divisor</h2>
-              <span class="state-pill">Income Statement</span>
             </div>
-            <div class="panel-body table-wrap">
+            <div class="panel span-6 settings-category" data-settings-panel="incomeRates">
+            <div class="panel-header">
+              <div class="settings-heading">
+                <h2>Income Statement Rates</h2>
+                <small>Set Buying Rate values and Master rate divisors used for future income calculations.</small>
+              </div>
+              <button class="btn secondary settings-panel-toggle" data-settings-toggle="incomeRates" type="button" aria-expanded="true">
+                <span data-settings-toggle-text>Collapse</span>
+              </button>
+            </div>
+            <div class="panel-body table-wrap" data-settings-body>
               <table>
                 <thead>
                   <tr><th>Master</th><th>Currency Settings</th><th>Status</th><th>Action</th></tr>
                 </thead>
                 <tbody id="masterRateDivisorRows"></tbody>
               </table>
+            </div>
             </div>
           </div>
         </section>
@@ -2751,6 +2794,40 @@
       return "none";
     }
 
+    const settingsPanelDefaults = {
+      actorAccess: true,
+      agentVisibility: true,
+      masterReset: true,
+      inviteCodes: true,
+      fixedOrderRates: true,
+      incomeRates: true
+    };
+
+    function normalizeSettingsPanels(settings = {}, legacySettings = {}) {
+      const normalized = {};
+      Object.keys(settingsPanelDefaults).forEach((key) => {
+        if (Object.prototype.hasOwnProperty.call(settings || {}, key)) {
+          normalized[key] = settings[key] !== false;
+        } else {
+          normalized[key] = settingsPanelDefaults[key];
+        }
+      });
+      if (!Object.prototype.hasOwnProperty.call(settings || {}, "masterReset") &&
+        Object.prototype.hasOwnProperty.call(legacySettings || {}, "resetPanelExpanded")) {
+        normalized.masterReset = legacySettings.resetPanelExpanded !== false;
+      }
+      if (!Object.prototype.hasOwnProperty.call(settings || {}, "inviteCodes") &&
+        Object.prototype.hasOwnProperty.call(legacySettings || {}, "invitePanelExpanded")) {
+        normalized.inviteCodes = legacySettings.invitePanelExpanded !== false;
+      }
+      return normalized;
+    }
+
+    function settingsPanelExpanded(key) {
+      state.settingsPanels = normalizeSettingsPanels(state.settingsPanels, state);
+      return state.settingsPanels[key] !== false;
+    }
+
     const defaultState = {
       activeView: "dashboard",
       orderState: "Draft",
@@ -2764,6 +2841,7 @@
       expandedMasterRateDivisor: false,
       resetPanelExpanded: true,
       invitePanelExpanded: true,
+      settingsPanels: normalizeSettingsPanels(),
       incomeStatementExpanded: false,
       trialBalanceExpanded: true,
       buyingRates: normalizeBuyingRates(),
@@ -2810,6 +2888,7 @@
           settlements: Array.isArray(saved.settlements) ? saved.settlements : [],
           masterRateDivisorSettings: normalizeCurrencyRateSettings(saved.masterRateDivisorSettings || {}),
           buyingRates: normalizeBuyingRates(saved.buyingRates || { eurToUsdDivider: saved.eurToUsdDivider }),
+          settingsPanels: normalizeSettingsPanels(saved.settingsPanels, saved),
           archives: Array.isArray(saved.archives) ? saved.archives : [],
           chatConversations: Array.isArray(saved.chatConversations) ? saved.chatConversations : [],
           deletedChatIds: Array.isArray(saved.deletedChatIds) ? saved.deletedChatIds : []
@@ -2942,8 +3021,12 @@
     }
 
     function replaceState(nextState) {
+      const preparedState = {
+        ...nextState,
+        settingsPanels: normalizeSettingsPanels(nextState?.settingsPanels, nextState)
+      };
       Object.keys(state).forEach((key) => delete state[key]);
-      Object.assign(state, nextState);
+      Object.assign(state, preparedState);
     }
 
     function mergeById(existingItems = [], incomingItems = []) {
@@ -5281,13 +5364,21 @@
     }
 
     function renderSettingsCollapses() {
-      const resetExpanded = state.resetPanelExpanded !== false;
-      const inviteExpanded = state.invitePanelExpanded !== false;
-      els.resetPanelBody?.classList.toggle("hidden", !resetExpanded);
-      if (els.resetPanelToggleText) els.resetPanelToggleText.textContent = resetExpanded ? "Collapse" : "Expand";
-      els.invitePanelFormBody?.classList.toggle("hidden", !inviteExpanded);
-      els.invitePanelTableBody?.classList.toggle("hidden", !inviteExpanded);
-      if (els.invitePanelToggleText) els.invitePanelToggleText.textContent = inviteExpanded ? "Collapse" : "Expand";
+      state.settingsPanels = normalizeSettingsPanels(state.settingsPanels, state);
+      document.querySelectorAll("[data-settings-panel]").forEach((panel) => {
+        const key = panel.dataset.settingsPanel;
+        const expanded = settingsPanelExpanded(key);
+        panel.classList.toggle("collapsed", !expanded);
+        panel.querySelectorAll("[data-settings-body]").forEach((body) => {
+          body.classList.toggle("hidden", !expanded);
+        });
+        panel.querySelectorAll("[data-settings-toggle-text]").forEach((label) => {
+          label.textContent = expanded ? "Collapse" : "Expand";
+        });
+        panel.querySelectorAll("[data-settings-toggle]").forEach((button) => {
+          button.setAttribute("aria-expanded", expanded ? "true" : "false");
+        });
+      });
     }
 
     async function renderSubscriptions() {
@@ -8624,14 +8715,16 @@
       saveState();
     });
 
-    els.resetPanelToggle?.addEventListener("click", () => {
-      state.resetPanelExpanded = state.resetPanelExpanded === false;
-      renderSettingsCollapses();
-      saveState();
-    });
-
-    els.invitePanelToggle?.addEventListener("click", () => {
-      state.invitePanelExpanded = state.invitePanelExpanded === false;
+    document.addEventListener("click", (event) => {
+      const settingsToggle = event.target.closest(".settings-panel-toggle");
+      if (!settingsToggle) return;
+      if (selectedActor()?.role !== "Master") return;
+      const key = settingsToggle.dataset.settingsToggle;
+      if (!Object.prototype.hasOwnProperty.call(settingsPanelDefaults, key)) return;
+      state.settingsPanels = normalizeSettingsPanels(state.settingsPanels, state);
+      state.settingsPanels[key] = !settingsPanelExpanded(key);
+      state.resetPanelExpanded = state.settingsPanels.masterReset;
+      state.invitePanelExpanded = state.settingsPanels.inviteCodes;
       renderSettingsCollapses();
       saveState();
     });
