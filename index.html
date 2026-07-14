@@ -2598,17 +2598,14 @@
               </table>
             </div>
             </div>
-            <div class="panel span-5 settings-category" data-settings-panel="masterReset">
+            <div class="panel span-5 settings-category">
             <div class="panel-header">
               <div class="settings-heading">
                 <h2>Master Reset</h2>
                 <small>Erase transaction data or wipe data with Actors after permit confirmation.</small>
               </div>
-              <button class="btn secondary settings-panel-toggle" data-settings-toggle="masterReset" type="button" aria-expanded="true">
-                <span data-settings-toggle-text>Collapse</span>
-              </button>
             </div>
-            <div class="panel-body" id="resetPanelBody" data-settings-body>
+            <div class="panel-body" id="resetPanelBody">
               <form id="resetForm">
                 <div class="form-grid">
                   <div class="field">
@@ -2698,17 +2695,14 @@
               </table>
             </div>
             </div>
-            <div class="panel span-6 settings-category" data-settings-panel="incomeRates">
+            <div class="panel span-6 settings-category">
             <div class="panel-header">
               <div class="settings-heading">
                 <h2>Income Statement Rates</h2>
                 <small>Set Buying Rate values and Master rate divisors used for future income calculations.</small>
               </div>
-              <button class="btn secondary settings-panel-toggle" data-settings-toggle="incomeRates" type="button" aria-expanded="true">
-                <span data-settings-toggle-text>Collapse</span>
-              </button>
             </div>
-            <div class="panel-body table-wrap" data-settings-body>
+            <div class="panel-body table-wrap">
               <table>
                 <thead>
                   <tr><th>Master</th><th>Currency Settings</th><th>Status</th><th>Action</th></tr>
@@ -2797,10 +2791,8 @@
     const settingsPanelDefaults = {
       actorAccess: true,
       agentVisibility: true,
-      masterReset: true,
       inviteCodes: true,
-      fixedOrderRates: true,
-      incomeRates: true
+      fixedOrderRates: true
     };
 
     function normalizeSettingsPanels(settings = {}, legacySettings = {}) {
@@ -2812,10 +2804,6 @@
           normalized[key] = settingsPanelDefaults[key];
         }
       });
-      if (!Object.prototype.hasOwnProperty.call(settings || {}, "masterReset") &&
-        Object.prototype.hasOwnProperty.call(legacySettings || {}, "resetPanelExpanded")) {
-        normalized.masterReset = legacySettings.resetPanelExpanded !== false;
-      }
       if (!Object.prototype.hasOwnProperty.call(settings || {}, "inviteCodes") &&
         Object.prototype.hasOwnProperty.call(legacySettings || {}, "invitePanelExpanded")) {
         normalized.inviteCodes = legacySettings.invitePanelExpanded !== false;
@@ -8718,15 +8706,11 @@
     document.getElementById("settings")?.addEventListener("click", (event) => {
       const settingsToggle = event.target.closest("[data-settings-toggle]");
       if (!settingsToggle) return;
-      const canManageSettings = currentAuth
-        ? currentAuth.membership?.role === "Master"
-        : selectedActor()?.role === "Master";
-      if (!canManageSettings) return;
+      event.preventDefault();
       const key = settingsToggle.dataset.settingsToggle || settingsToggle.closest("[data-settings-panel]")?.dataset.settingsPanel;
       if (!Object.prototype.hasOwnProperty.call(settingsPanelDefaults, key)) return;
       state.settingsPanels = normalizeSettingsPanels(state.settingsPanels, state);
       state.settingsPanels[key] = !settingsPanelExpanded(key);
-      state.resetPanelExpanded = state.settingsPanels.masterReset;
       state.invitePanelExpanded = state.settingsPanels.inviteCodes;
       renderSettingsCollapses();
       saveState();
