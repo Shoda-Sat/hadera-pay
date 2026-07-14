@@ -8715,11 +8715,14 @@
       saveState();
     });
 
-    document.addEventListener("click", (event) => {
-      const settingsToggle = event.target.closest(".settings-panel-toggle");
+    document.getElementById("settings")?.addEventListener("click", (event) => {
+      const settingsToggle = event.target.closest("[data-settings-toggle]");
       if (!settingsToggle) return;
-      if (selectedActor()?.role !== "Master") return;
-      const key = settingsToggle.dataset.settingsToggle;
+      const canManageSettings = currentAuth
+        ? currentAuth.membership?.role === "Master"
+        : selectedActor()?.role === "Master";
+      if (!canManageSettings) return;
+      const key = settingsToggle.dataset.settingsToggle || settingsToggle.closest("[data-settings-panel]")?.dataset.settingsPanel;
       if (!Object.prototype.hasOwnProperty.call(settingsPanelDefaults, key)) return;
       state.settingsPanels = normalizeSettingsPanels(state.settingsPanels, state);
       state.settingsPanels[key] = !settingsPanelExpanded(key);
