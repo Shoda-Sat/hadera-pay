@@ -905,13 +905,16 @@ async function handleApi(request, response, url) {
     const workingCurrencies = Array.isArray(body.workingCurrencies)
       ? body.workingCurrencies.filter((item) => ["USD", "ETB", "EUR", "ERN"].includes(item)).slice(0, 5)
       : [];
+    const specialWorkingCurrencies = actorRole === "Special Broker" && !workingCurrencies.some((item) => item !== currency)
+      ? ["USD", "ETB", "EUR", "ERN"]
+      : Array.from(new Set([currency, ...workingCurrencies])).slice(0, 5);
     const invite = {
       id: id("inv"),
       code: inviteCode(),
       workspaceId: session.workspace.id,
       actorRole,
       currency,
-      workingCurrencies: actorRole === "Special Agent" ? Array.from(new Set([currency, ...workingCurrencies])).slice(0, 5) : [],
+      workingCurrencies: ["Special Agent", "Special Broker"].includes(actorRole) ? specialWorkingCurrencies : [],
       actorId: id("act"),
       createdByUserId: session.user.id,
       createdAt: new Date().toISOString(),

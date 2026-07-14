@@ -2564,7 +2564,7 @@
             <div class="panel-header">
               <div class="settings-heading">
                 <h2>Actor Access</h2>
-                <small>Transfer access, order currency access, and Special Agent payout controls.</small>
+                <small>Transfer access, order currency access, and special payout controls.</small>
               </div>
               <button class="btn secondary settings-panel-toggle" data-settings-toggle="actorAccess" type="button" aria-expanded="true">
                 <span data-settings-toggle-text>Collapse</span>
@@ -2573,7 +2573,7 @@
             <div class="panel-body table-wrap" data-settings-body>
               <table>
                 <thead>
-                  <tr><th>Actor</th><th>Role</th><th>Currency</th><th>Transfer Access</th><th>Action</th><th>Order Currency Access</th><th>Special Agent Divisor / %</th></tr>
+                  <tr><th>Actor</th><th>Role</th><th>Currency</th><th>Transfer Access</th><th>Action</th><th>Order Currency Access</th><th>Payout Divisor / %</th></tr>
                 </thead>
                 <tbody id="permissionRows"></tbody>
               </table>
@@ -2735,6 +2735,32 @@
     const maxProofFileBytes = 4 * 1024 * 1024;
     const supportedCurrencies = ["USD", "ETB", "EUR", "ERN"];
 
+    function actorCanInitiateOrders(role) {
+      return ["Broker", "Special Broker"].includes(role);
+    }
+
+    function actorHasSpecialPayout(role) {
+      return ["Special Agent", "Special Broker"].includes(role);
+    }
+
+    function actorCanReceivePayouts(role) {
+      return ["Agent", "Special Agent", "Special Broker"].includes(role);
+    }
+
+    function normalizedWorkingCurrenciesForRole(role, baseCurrency = "USD", currencies = []) {
+      const base = supportedCurrencies.includes(baseCurrency) ? baseCurrency : "USD";
+      const selected = Array.from(new Set((Array.isArray(currencies) ? currencies : [])
+        .filter((currency) => supportedCurrencies.includes(currency))));
+      if (role === "Special Broker") {
+        const selectedBeyondBase = selected.some((currency) => currency !== base);
+        return Array.from(new Set([base, ...(selectedBeyondBase ? selected : supportedCurrencies)])).slice(0, 5);
+      }
+      if (role === "Special Agent") {
+        return Array.from(new Set([base, ...selected])).slice(0, 5);
+      }
+      return selected;
+    }
+
     function normalizeBuyingRates(settings = {}) {
       return {
         eurToUsd: Number(settings.eurToUsd || settings.eurToUsdDivider) > 0 ? Number(settings.eurToUsd || settings.eurToUsdDivider) : 1,
@@ -2848,7 +2874,7 @@
         { id: "ACT-0", name: "Master", role: "Master", currency: "USD", active: true, transferEnabled: true },
         { id: "ACT-1", name: "Eastline Broker", role: "Broker", currency: "USD", active: true, transferEnabled: true },
         { id: "ACT-2", name: "Hadera Agent", role: "Agent", currency: "USD", active: true, transferEnabled: true },
-        { id: "ACT-3", name: "Special Broker One", role: "Special Broker", currency: "ETB", active: true, transferEnabled: true },
+        { id: "ACT-3", name: "Special Broker One", role: "Special Broker", currency: "ETB", workingCurrencies: ["USD", "ETB", "EUR", "ERN"], active: true, transferEnabled: true },
         { id: "ACT-4", name: "Addis Agent", role: "Agent", currency: "ETB", active: true, transferEnabled: true },
         { id: "ACT-5", name: "Multi-Currency Agent", role: "Special Agent", currency: "USD", workingCurrencies: ["USD", "ETB", "EUR"], active: true, transferEnabled: true }
       ],
@@ -2892,11 +2918,13 @@
         normalizedActors.unshift({ id: "ACT-0", name: "Master", role: "Master", currency: "USD", active: true, transferEnabled: true });
       }
       return normalizedActors.map((actor) => {
-        const workingCurrencies = Array.isArray(actor.workingCurrencies)
+        const savedWorkingCurrencies = Array.isArray(actor.workingCurrencies)
           ? actor.workingCurrencies.filter((currency) => supportedCurrencies.includes(currency)).slice(0, 5)
           : [];
+        const baseCurrency = supportedCurrencies.includes(actor.currency) ? actor.currency : "USD";
+        const workingCurrencies = normalizedWorkingCurrenciesForRole(actor.role, baseCurrency, savedWorkingCurrencies);
         const orderFixedRates = {};
-        if (["Broker", "Special Broker"].includes(actor.role) && actor.orderFixedRates && typeof actor.orderFixedRates === "object") {
+        if (actorCanInitiateOrders(actor.role) && actor.orderFixedRates && typeof actor.orderFixedRates === "object") {
           supportedCurrencies.forEach((currency) => {
             const current = actor.orderFixedRates[currency] || {};
             orderFixedRates[currency] = {
@@ -2905,11 +2933,9 @@
             };
           });
         }
-        const payoutCurrencies = actor.role === "Special Agent"
-          ? Array.from(new Set([actor.currency, ...workingCurrencies])).slice(0, 5)
-          : workingCurrencies;
+        const payoutCurrencies = actorHasSpecialPayout(actor.role) ? workingCurrencies : savedWorkingCurrencies;
         const specialPayoutSettings = {};
-        if (actor.role === "Special Agent") {
+        if (actorHasSpecialPayout(actor.role)) {
           payoutCurrencies.forEach((currency) => {
             const current = actor.specialPayoutSettings?.[currency] || {};
             const hasCurrencyEnabled = Object.prototype.hasOwnProperty.call(current, "enabled");
@@ -2930,23 +2956,24 @@
         }
         return {
           ...actor,
-          workingCurrencies: actor.role === "Special Agent"
+          currency: baseCurrency,
+          workingCurrencies: actorHasSpecialPayout(actor.role)
             ? payoutCurrencies
-            : workingCurrencies,
-          specialPayoutDivider: actor.role === "Special Agent" && Number(actor.specialPayoutDivider) > 0
+            : savedWorkingCurrencies,
+          specialPayoutDivider: actorHasSpecialPayout(actor.role) && Number(actor.specialPayoutDivider) > 0
             ? Number(actor.specialPayoutDivider)
             : 1,
-          specialPayoutDividerEnabled: actor.role === "Special Agent"
+          specialPayoutDividerEnabled: actorHasSpecialPayout(actor.role)
             ? actor.specialPayoutDividerEnabled === true
             : false,
-          specialPayoutPercent: actor.role === "Special Agent" && Number(actor.specialPayoutPercent) > 0
+          specialPayoutPercent: actorHasSpecialPayout(actor.role) && Number(actor.specialPayoutPercent) > 0
             ? Number(actor.specialPayoutPercent)
             : 0,
           specialPayoutSettings,
-          orderMultiCurrencyEnabled: ["Broker", "Special Broker"].includes(actor.role)
+          orderMultiCurrencyEnabled: actorCanInitiateOrders(actor.role)
             ? actor.orderMultiCurrencyEnabled === true
             : false,
-          orderFixedRates: ["Broker", "Special Broker"].includes(actor.role) ? orderFixedRates : {},
+          orderFixedRates: actorCanInitiateOrders(actor.role) ? orderFixedRates : {},
           active: actor.role === "Master" ? true : actor.active !== false,
           transferEnabled: actor.role === "Master" ? true : normalizedTransferMode(actor) !== "none",
           transferMode: normalizedTransferMode(actor),
@@ -3625,12 +3652,12 @@
         ? Array.from(inviteWorking.querySelectorAll("input:checked")).map((input) => input.value)
         : [];
       const actor = selectedActor();
-      const selectedBrokerName = ["Broker", "Special Broker"].includes(actor?.role)
+      const selectedBrokerName = actorCanInitiateOrders(actor?.role)
         ? actor.name
         : document.getElementById("broker")?.value || "";
       const brokerActor = activeActors().find((actor) => actor.name === selectedBrokerName);
       const restrictedBroker = brokerActor &&
-        ["Broker", "Special Broker"].includes(brokerActor.role) &&
+        actorCanInitiateOrders(brokerActor.role) &&
         brokerActor.orderMultiCurrencyEnabled !== true &&
         actor?.role !== "Master";
       const sourceOptions = restrictedBroker ? [brokerActor.currency] : supportedCurrencies;
@@ -3934,7 +3961,7 @@
 
     function orderDisplayNumber(order, viewer = selectedActor(), contextActor = null) {
       const context = contextActor || viewer;
-      if (["Agent", "Special Agent"].includes(context?.role) && (order?.agent === context.name || order?.agentActorId === context.id)) {
+      if (actorCanReceivePayouts(context?.role) && (order?.agent === context.name || order?.agentActorId === context.id)) {
         return agentOrderNumberForOrder(order, context.name) || brokerOrderNumberForOrder(order);
       }
       return brokerOrderNumberForOrder(order);
@@ -4179,7 +4206,9 @@
         name: membership.actorName,
         role: membership.actorRole,
         currency: membership.currency || "USD",
-        workingCurrencies: membership.actorRole === "Special Agent" ? membership.workingCurrencies || [membership.currency || "USD"] : [],
+        workingCurrencies: actorHasSpecialPayout(membership.actorRole)
+          ? normalizedWorkingCurrenciesForRole(membership.actorRole, membership.currency || "USD", membership.workingCurrencies || [])
+          : [],
         active: true,
         transferEnabled: true,
         transferMode: "master",
@@ -4247,7 +4276,7 @@
 
     function actorCanPayoutCurrency(actor, currency) {
       if (!actor || actor.role === "Master") return false;
-      if (actor.role === "Special Agent") {
+      if (actorHasSpecialPayout(actor.role)) {
         return (actor.workingCurrencies || [actor.currency]).includes(currency);
       }
       return actor.currency === currency;
@@ -4256,7 +4285,7 @@
     function actorTransferCurrencies(actor) {
       if (!actor) return [];
       if (actor.role === "Master") return supportedCurrencies;
-      if (actor.role === "Special Agent") {
+      if (actorHasSpecialPayout(actor.role)) {
         return Array.from(new Set([actor.currency, ...(actor.workingCurrencies || [])]))
           .filter((currency) => supportedCurrencies.includes(currency));
       }
@@ -4264,7 +4293,7 @@
     }
 
     function specialPayoutSettingFor(actor, currency) {
-      if (!actor || actor.role !== "Special Agent") return { enabled: false, divider: 1, percent: 0 };
+      if (!actor || !actorHasSpecialPayout(actor.role)) return { enabled: false, divider: 1, percent: 0 };
       const config = actor.specialPayoutSettings?.[currency] || {};
       return {
         enabled: config.enabled === true,
@@ -4284,7 +4313,7 @@
       const currentBroker = brokerSelect.value;
       const currentAgent = agentSelect.value;
       const actor = selectedActor();
-      const actorCanSend = actor && ["Broker", "Special Broker"].includes(actor.role);
+      const actorCanSend = actor && actorCanInitiateOrders(actor.role);
       const brokerOptions = actorCanSend && actor.role !== "Master"
         ? [actor]
         : actorsByRoles(["Broker", "Special Broker"]);
@@ -5001,7 +5030,7 @@
               <button class="btn secondary save-actor-name" data-id="${actor.id}" type="button">Save</button>
             </div>
           `;
-        const currencyLabel = actor.role === "Special Agent"
+        const currencyLabel = actorHasSpecialPayout(actor.role)
           ? `${escapeHtml(actor.currency)} / ${(actor.workingCurrencies || [actor.currency]).map(escapeHtml).join(", ")}`
           : escapeHtml(actor.currency);
         const currencyCell = actor.role === "Master"
@@ -5133,7 +5162,7 @@
         ...state.ledger.filter((line) => !lineBelongsToActor(line, actor))
       ];
       actor.currency = nextCurrency;
-      if (actor.role === "Special Agent") {
+      if (actorHasSpecialPayout(actor.role)) {
         actor.workingCurrencies = Array.from(new Set([nextCurrency, ...(actor.workingCurrencies || [])]))
           .filter((currency) => supportedCurrencies.includes(currency))
           .slice(0, 5);
@@ -5158,7 +5187,7 @@
                 : "None";
           const transferStatusClass = transferMode === "none" ? "danger" : transferMode === "both" ? "good" : "warn";
           const orderMultiCurrency = actor.orderMultiCurrencyEnabled === true;
-          const orderCurrencyControl = ["Broker", "Special Broker"].includes(actor.role)
+          const orderCurrencyControl = actorCanInitiateOrders(actor.role)
             ? `
               <div class="setting-inline">
                 <span class="state-pill ${orderMultiCurrency ? "good" : "warn"}">${orderMultiCurrency ? "Multi-currency" : "Base only"}</span>
@@ -5168,10 +5197,10 @@
               </div>
             `
             : '<span class="muted">Not applicable</span>';
-          const specialCurrencies = actor.role === "Special Agent" ? actorTransferCurrencies(actor) : [];
+          const specialCurrencies = actorHasSpecialPayout(actor.role) ? actorTransferCurrencies(actor) : [];
           const specialExpanded = state.expandedSpecialDividerActorId === actor.id;
           const activeSpecialCount = specialCurrencies.filter((currency) => specialPayoutSettingFor(actor, currency).enabled).length;
-          const specialDividerControl = actor.role === "Special Agent"
+          const specialDividerControl = actorHasSpecialPayout(actor.role)
             ? `
               <div class="special-divider-panel">
                 <button class="btn secondary expand-special-divider" data-id="${actor.id}" type="button">
@@ -5200,7 +5229,7 @@
             <tr>
               <td><strong>${escapeHtml(actor.name)}</strong></td>
               <td>${escapeHtml(actor.role)}</td>
-              <td>${actor.role === "Special Agent" ? `${escapeHtml(actor.currency)} / ${(actor.workingCurrencies || [actor.currency]).map(escapeHtml).join(", ")}` : escapeHtml(actor.currency)}</td>
+              <td>${actorHasSpecialPayout(actor.role) ? `${escapeHtml(actor.currency)} / ${(actor.workingCurrencies || [actor.currency]).map(escapeHtml).join(", ")}` : escapeHtml(actor.currency)}</td>
               <td><span class="state-pill ${transferStatusClass}">${transferTargetLabel}</span></td>
               <td>
                 <label class="currency-check">
@@ -6073,11 +6102,11 @@
     }
 
     function showMasterOrderInfoColumns(viewer, ledgerActor) {
-      return viewer?.role === "Master" && ["Agent", "Special Agent"].includes(ledgerActor?.role);
+      return viewer?.role === "Master" && actorCanReceivePayouts(ledgerActor?.role);
     }
 
     function showSpecialAgentPaidOutColumn(viewer, ledgerActor) {
-      return viewer?.role === "Master" && ledgerActor?.role === "Special Agent";
+      return viewer?.role === "Master" && actorHasSpecialPayout(ledgerActor?.role);
     }
 
     function ledgerColumnCount(showOrderInfo, showPaidOutInfo = false) {
@@ -6141,21 +6170,40 @@
         .reduce((sum, line) => sum + Number(line.amountMinor || 0), 0);
     }
 
-    function specialAgentErnBaseUsdMinorForOrder(order, journalLines) {
-      const payoutCurrency = order.payoutCurrency || order.sourceCurrency || "USD";
-      if (payoutCurrency !== "ERN") return 0;
-      return payerAgentPayoutMinorForOrder(order, journalLines, "USD");
+    function currencyAmountToUsdMinor(currency, amountMinor) {
+      const amount = Number(amountMinor || 0);
+      if (amount <= 0) return 0;
+      const code = currency || "USD";
+      if (code === "USD") return amount;
+      const major = majorAmount(amount, code);
+      const rates = buyingRates();
+      if (code === "EUR" && rates.eurToUsd > 0) return minorFromMajor(major * rates.eurToUsd, "USD");
+      if (code === "ETB" && rates.usdToEtb > 0) return minorFromMajor(major / rates.usdToEtb, "USD");
+      if (code === "ERN" && rates.usdToErn > 0) return minorFromMajor(major / rates.usdToErn, "USD");
+      return 0;
+    }
+
+    function specialPayoutBaseUsdMinorForOrder(order, journalLines) {
+      const payingActor = activeActors().find((actor) => actor.name === order.agent);
+      if (!actorHasSpecialPayout(payingActor?.role)) return 0;
+      const agentAccount = `${order.agent} ACTOR_CLEARING`;
+      const line = journalLines.find((item) =>
+        item.account === agentAccount &&
+        item.direction === "Credit" &&
+        Number(item.amountMinor || 0) > 0
+      );
+      return line ? currencyAmountToUsdMinor(line.currency, line.amountMinor) : 0;
     }
 
     function masterIncomeAmountForOrder(order, journalLines) {
       const baseCurrency = "USD";
       const payoutCurrency = order.payoutCurrency || order.sourceCurrency || baseCurrency;
       const payoutAmountMinor = Number(order.payoutAmountMinor || order.sourceAmountMinor || 0);
+      const specialPayoutBaseUsdMinor = specialPayoutBaseUsdMinorForOrder(order, journalLines);
+      if (specialPayoutBaseUsdMinor > 0) return specialPayoutBaseUsdMinor;
       if (payoutCurrency === baseCurrency) {
         return payerAgentPayoutMinorForOrder(order, journalLines, baseCurrency) || payoutAmountMinor;
       }
-      const specialAgentBaseUsdMinor = specialAgentErnBaseUsdMinorForOrder(order, journalLines);
-      if (specialAgentBaseUsdMinor > 0) return specialAgentBaseUsdMinor;
       const setting = masterRateDivisorSettingFor(payoutCurrency);
       if (setting.enabled === true && Number(setting.divider) > 0) {
         const baseMajor = majorAmount(payoutAmountMinor, payoutCurrency) / Number(setting.divider);
@@ -6231,9 +6279,9 @@
       let profitMinor = Number.isFinite(Number(collected.buyingProfitMinor))
         ? Number(collected.buyingProfitMinor)
         : collected.collectedUsdMinor - baseAmountMinor;
-      const specialAgentBaseUsdMinor = specialAgentErnBaseUsdMinorForOrder(order, journalLines);
-      if (specialAgentBaseUsdMinor > 0) {
-        baseAmountMinor = specialAgentBaseUsdMinor;
+      const specialPayoutBaseUsdMinor = specialPayoutBaseUsdMinorForOrder(order, journalLines);
+      if (specialPayoutBaseUsdMinor > 0) {
+        baseAmountMinor = specialPayoutBaseUsdMinor;
         profitMinor = collected.collectedUsdMinor - baseAmountMinor;
       } else if (Number.isFinite(Number(collected.buyingProfitMinor))) {
         baseAmountMinor = collected.collectedUsdMinor - profitMinor;
@@ -7634,7 +7682,7 @@
         if (hasForwardedPercent) major *= 1 + forwardedPercent / 100;
         return minorFromMajor(major, currency);
       };
-      if (actor?.role !== "Special Agent") {
+      if (!actorHasSpecialPayout(actor?.role)) {
         return {
           currency: payoutCurrency,
           amountMinor: hasForwardedDivider || hasForwardedPercent ? applyForwardedTerms(payoutAmountMinor, payoutCurrency) : payoutAmountMinor
@@ -8710,7 +8758,8 @@
       const key = settingsToggle.dataset.settingsToggle || settingsToggle.closest("[data-settings-panel]")?.dataset.settingsPanel;
       if (!Object.prototype.hasOwnProperty.call(settingsPanelDefaults, key)) return;
       state.settingsPanels = normalizeSettingsPanels(state.settingsPanels, state);
-      state.settingsPanels[key] = !settingsPanelExpanded(key);
+      const wasExpanded = settingsPanelExpanded(key);
+      state.settingsPanels[key] = !wasExpanded;
       state.invitePanelExpanded = state.settingsPanels.inviteCodes;
       renderSettingsCollapses();
       saveState();
@@ -8733,9 +8782,8 @@
       const selectedWorkingCurrencies = Array.from(workingInput.querySelectorAll("input:checked"))
         .map((input) => input.value)
         .filter((currency) => supportedCurrencies.includes(currency));
-      const workingCurrencies = roleInput.value === "Special Agent"
-        ? Array.from(new Set([currencyInput.value, ...selectedWorkingCurrencies])).slice(0, 5)
-        : [];
+      const workingCurrencies = normalizedWorkingCurrenciesForRole(roleInput.value, currencyInput.value, selectedWorkingCurrencies);
+      const hasSpecialPayout = actorHasSpecialPayout(roleInput.value);
       state.actors.push({
         id: "ACT-" + state.actorCounter,
         name,
@@ -8748,11 +8796,11 @@
         orderVisibilityPermissions: ["Agent", "Special Agent"].includes(roleInput.value)
           ? normalizeOrderVisibilityPermissions()
           : undefined,
-        workingCurrencies,
-        specialPayoutDivider: roleInput.value === "Special Agent" ? 1 : undefined,
+        workingCurrencies: hasSpecialPayout ? workingCurrencies : [],
+        specialPayoutDivider: hasSpecialPayout ? 1 : undefined,
         specialPayoutDividerEnabled: false,
-        specialPayoutPercent: roleInput.value === "Special Agent" ? 0 : undefined,
-        specialPayoutSettings: roleInput.value === "Special Agent"
+        specialPayoutPercent: hasSpecialPayout ? 0 : undefined,
+        specialPayoutSettings: hasSpecialPayout
           ? Object.fromEntries(workingCurrencies.map((currency) => [currency, { enabled: false, divider: 1, percent: 0 }]))
           : undefined
       });
@@ -8826,7 +8874,7 @@
         return;
       }
       const brokerActor = activeActors().find((actor) => actor.name === input.broker);
-      if (brokerActor && ["Broker", "Special Broker"].includes(brokerActor.role) && brokerActor.orderMultiCurrencyEnabled !== true && input.sourceCurrency !== brokerActor.currency) {
+      if (brokerActor && actorCanInitiateOrders(brokerActor.role) && brokerActor.orderMultiCurrencyEnabled !== true && input.sourceCurrency !== brokerActor.currency) {
         showOrderError("This broker is restricted to orders in their base currency.");
         return;
       }
@@ -8850,7 +8898,7 @@
     document.getElementById("orderForm").addEventListener("submit", (event) => {
       event.preventDefault();
       const actor = selectedActor();
-      if (!selectedActorIsOwnLogin() || !["Broker", "Special Broker"].includes(actor?.role)) return;
+      if (!selectedActorIsOwnLogin() || !actorCanInitiateOrders(actor?.role)) return;
       const { input, hasReceiver } = buildJournalPreview();
       if (!hasReceiver) {
         state.orderValidationVisible = true;
@@ -8866,7 +8914,7 @@
         return;
       }
       const brokerActor = activeActors().find((actor) => actor.name === input.broker);
-      if (brokerActor && ["Broker", "Special Broker"].includes(brokerActor.role) && brokerActor.orderMultiCurrencyEnabled !== true && input.sourceCurrency !== brokerActor.currency) {
+      if (brokerActor && actorCanInitiateOrders(brokerActor.role) && brokerActor.orderMultiCurrencyEnabled !== true && input.sourceCurrency !== brokerActor.currency) {
         showOrderError("This broker is restricted to orders in their base currency.");
         return;
       }
@@ -9192,7 +9240,7 @@
         const percentInput = wrapper?.querySelector(".special-agent-percent");
         const divider = Number(input?.value || 0);
         const percent = Number(percentInput?.value || 0);
-        if (!actor || actor.role !== "Special Agent" || !actorTransferCurrencies(actor).includes(currency)) return;
+        if (!actor || !actorHasSpecialPayout(actor.role) || !actorTransferCurrencies(actor).includes(currency)) return;
         if (!Number.isFinite(divider) || divider <= 0) {
           input?.setCustomValidity("Enter a divisor greater than zero.");
           input?.reportValidity();
@@ -9220,7 +9268,7 @@
         if (selectedActor()?.role !== "Master") return;
         const actor = state.actors.find((item) => item.id === toggleSpecialDividerButton.dataset.id);
         const currency = toggleSpecialDividerButton.dataset.currency;
-        if (!actor || actor.role !== "Special Agent" || !actorTransferCurrencies(actor).includes(currency)) return;
+        if (!actor || !actorHasSpecialPayout(actor.role) || !actorTransferCurrencies(actor).includes(currency)) return;
         const wrapper = toggleSpecialDividerButton.closest(".special-divider-currency");
         const input = wrapper?.querySelector(".special-agent-divider");
         const percentInput = wrapper?.querySelector(".special-agent-percent");
