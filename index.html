@@ -529,6 +529,78 @@
       grid-column: 1 / -1;
     }
 
+    .customer-field {
+      position: relative;
+    }
+
+    .customer-input-line {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .customer-input-line input {
+      min-width: 0;
+    }
+
+    .customer-save-button {
+      min-height: 42px;
+      padding: 0 10px;
+      font-size: 11px;
+    }
+
+    .customer-picker {
+      position: absolute;
+      z-index: 20;
+      top: 68px;
+      left: 0;
+      right: 0;
+      max-height: 240px;
+      overflow-y: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #ffffff;
+      box-shadow: 0 12px 28px rgba(15, 23, 42, 0.16);
+    }
+
+    .customer-option {
+      width: 100%;
+      display: block;
+      padding: 9px 10px;
+      border: 0;
+      border-bottom: 1px solid var(--line);
+      background: #ffffff;
+      color: var(--ink);
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .customer-option:last-child {
+      border-bottom: 0;
+    }
+
+    .customer-option:hover,
+    .customer-option:focus-visible {
+      background: var(--panel-2);
+      outline: none;
+    }
+
+    .customer-option strong,
+    .customer-option span {
+      display: block;
+    }
+
+    .customer-option span,
+    .customer-picker-empty {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .customer-picker-empty {
+      padding: 10px;
+    }
+
     .form-grid.invite-grid {
       grid-template-columns: minmax(150px, 1fr) minmax(130px, 0.8fr) minmax(220px, 1.4fr);
       align-items: end;
@@ -2045,13 +2117,21 @@
                         <option value="credit">Credit</option>
                       </select>
                     </div>
-                    <div class="field">
+                    <div class="field customer-field" data-customer-field="sender">
                       <label for="senderName">Sender name</label>
-                      <input id="senderName" value="Samir Ali">
+                      <div class="customer-input-line">
+                        <input id="senderName" value="Samir Ali" autocomplete="off">
+                        <button class="btn secondary customer-save-button" id="saveSenderCustomer" type="button" data-customer-control>Save</button>
+                      </div>
+                      <div class="customer-picker hidden" id="senderCustomerPicker" role="listbox"></div>
                     </div>
-                    <div class="field">
+                    <div class="field customer-field" data-customer-field="receiver">
                       <label for="receiverName">Receiver name</label>
-                      <input id="receiverName" value="Amina Tesfaye">
+                      <div class="customer-input-line">
+                        <input id="receiverName" value="Amina Tesfaye" autocomplete="off">
+                        <button class="btn secondary customer-save-button" id="saveReceiverCustomer" type="button" data-customer-control>Save</button>
+                      </div>
+                      <div class="customer-picker hidden" id="receiverCustomerPicker" role="listbox"></div>
                     </div>
                     <div class="field">
                       <label for="accountNumber">Account number</label>
@@ -2882,6 +2962,7 @@
       orderCounter: 0,
       receivableCounter: 0,
       transferCounter: 0,
+      customerCounter: 0,
       actorCounter: 5,
       chatCounter: 0,
       messageCounter: 0,
@@ -2898,6 +2979,7 @@
         { id: "ACT-5", name: "Multi-Currency Agent", role: "Special Agent", currency: "USD", workingCurrencies: ["USD", "ETB", "EUR"], active: true, transferEnabled: true }
       ],
       orders: [],
+      savedCustomers: [],
       receivables: [],
       transfers: [],
       ledger: [],
@@ -2915,6 +2997,7 @@
           ...saved,
           actors: normalizeActors(Array.isArray(saved.actors) ? saved.actors : structuredClone(defaultState.actors)),
           orders: Array.isArray(saved.orders) ? saved.orders : [],
+          savedCustomers: normalizeSavedCustomers(saved.savedCustomers),
           receivables: Array.isArray(saved.receivables) ? saved.receivables : [],
           transfers: normalizeTransfers(Array.isArray(saved.transfers) ? saved.transfers : []),
           ledger: Array.isArray(saved.ledger) ? saved.ledger : [],
@@ -3014,6 +3097,23 @@
       );
     }
 
+    function normalizeSavedCustomers(customers) {
+      const clean = (value) => String(value ?? "").trim();
+      return (Array.isArray(customers) ? customers : [])
+        .filter((customer) => customer && typeof customer === "object" && clean(customer.id) && clean(customer.actorId))
+        .map((customer) => ({
+          id: clean(customer.id),
+          actorId: clean(customer.actorId),
+          kind: customer.kind === "sender" ? "sender" : "receiver",
+          name: clean(customer.name),
+          accountNumber: clean(customer.accountNumber),
+          phoneNumber: clean(customer.phoneNumber),
+          remarks: clean(customer.remarks),
+          updatedAt: clean(customer.updatedAt) || clean(customer.createdAt) || new Date(0).toISOString()
+        }))
+        .filter((customer) => customer.name || customer.accountNumber || customer.phoneNumber || customer.remarks);
+    }
+
     function transferCommissionPercent(transfer) {
       const percent = Number(transfer?.commissionPercent);
       return Number.isFinite(percent) && percent >= 0 ? percent : 0;
@@ -3069,6 +3169,7 @@
     function replaceState(nextState) {
       const preparedState = {
         ...nextState,
+        savedCustomers: normalizeSavedCustomers(nextState?.savedCustomers),
         settingsPanels: normalizeSettingsPanels(nextState?.settingsPanels, nextState)
       };
       Object.keys(state).forEach((key) => delete state[key]);
@@ -3224,6 +3325,7 @@
       state.actors = normalizeActors(mergeById(state.actors, remoteState.actors || []));
       state.actors = state.actors.filter((actor) => !deletedActorIds.has(actor.id) || remoteActors.some((remoteActor) => remoteActor?.id === actor.id));
       state.orders = mergeOrders(state.orders, remoteState.orders || []);
+      state.savedCustomers = normalizeSavedCustomers(mergeById(state.savedCustomers, remoteState.savedCustomers || []));
       state.receivables = mergeReceivables(state.receivables, remoteState.receivables || []);
       state.transfers = normalizeTransfers(mergeTransfers(state.transfers, remoteState.transfers || []));
       state.ledger = mergeLedgerLines(state.ledger, remoteState.ledger || []);
@@ -3239,6 +3341,7 @@
       state.receivableCounter = Math.max(Number(state.receivableCounter || 0), nextReceivableNumberFromReceivables() - 1, Number(remoteState.receivableCounter || 0));
       state.transferCounter = Math.max(Number(state.transferCounter || 0), nextTransferNumberFromTransfers() - 1, Number(remoteState.transferCounter || 0));
       state.journalCounter = Math.max(Number(state.journalCounter || 0), nextJournalNumberFromLedger() - 1, Number(remoteState.journalCounter || 0));
+      state.customerCounter = Math.max(Number(state.customerCounter || 0), Number(remoteState.customerCounter || 0));
       return true;
     }
 
@@ -3828,6 +3931,140 @@
       document.getElementById("agent")?.closest(".field")?.classList.toggle("hidden", hidePayoutAgent);
       applyFixedOrderRate();
       buildJournalPreview();
+    }
+
+    function canUseSavedCustomers(actor = selectedActor()) {
+      return Boolean(actor && selectedActorIsOwnLogin() && actorCanInitiateOrders(actor.role));
+    }
+
+    function savedCustomersForActor(actor = selectedActor(), kind = "") {
+      if (!actor) return [];
+      return normalizeSavedCustomers(state.savedCustomers).filter((customer) =>
+        customer.actorId === actor.id && (!kind || customer.kind === kind)
+      ).sort((a, b) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime());
+    }
+
+    function nextSavedCustomerId() {
+      const highestStoredId = (state.savedCustomers || []).reduce((highest, customer) => {
+        const match = String(customer?.id || "").match(/^CUST-(\d+)$/);
+        return match ? Math.max(highest, Number(match[1])) : highest;
+      }, 0);
+      state.customerCounter = Math.max(Number(state.customerCounter || 0), highestStoredId) + 1;
+      return `CUST-${state.customerCounter}`;
+    }
+
+    function customerDetailsFromForm(kind) {
+      const isSender = kind === "sender";
+      return {
+        kind,
+        name: text(document.getElementById(isSender ? "senderName" : "receiverName").value),
+        accountNumber: isSender ? "" : text(document.getElementById("accountNumber").value),
+        phoneNumber: isSender ? "" : text(document.getElementById("phoneNumber").value),
+        remarks: isSender ? "" : text(document.getElementById("remarks").value)
+      };
+    }
+
+    function upsertSavedCustomer(actor, details) {
+      if (!actor || !details || (!details.name && !details.accountNumber && !details.phoneNumber && !details.remarks)) return null;
+      state.savedCustomers = normalizeSavedCustomers(state.savedCustomers);
+      const normalizedName = details.name.toLocaleLowerCase();
+      const existing = state.savedCustomers.find((customer) =>
+        customer.actorId === actor.id &&
+        customer.kind === details.kind &&
+        customer.name.toLocaleLowerCase() === normalizedName &&
+        (!details.name || customer.name)
+      );
+      const next = {
+        ...(existing || {}),
+        id: existing?.id || nextSavedCustomerId(),
+        actorId: actor.id,
+        kind: details.kind,
+        name: details.name,
+        accountNumber: details.accountNumber,
+        phoneNumber: details.phoneNumber,
+        remarks: details.remarks,
+        updatedAt: new Date().toISOString()
+      };
+      if (existing) Object.assign(existing, next);
+      else state.savedCustomers.unshift(next);
+      return next;
+    }
+
+    function closeCustomerPickers() {
+      document.querySelectorAll(".customer-picker").forEach((picker) => picker.classList.add("hidden"));
+    }
+
+    function renderCustomerPicker(kind) {
+      const picker = document.getElementById(`${kind}CustomerPicker`);
+      const input = document.getElementById(kind === "sender" ? "senderName" : "receiverName");
+      const actor = selectedActor();
+      if (!picker || !input || !canUseSavedCustomers(actor)) {
+        picker?.classList.add("hidden");
+        return;
+      }
+      const query = text(input.value).toLocaleLowerCase();
+      const customers = savedCustomersForActor(actor, kind).filter((customer) => {
+        const haystack = [customer.name, customer.phoneNumber, customer.accountNumber, customer.remarks]
+          .join(" ").toLocaleLowerCase();
+        return !query || haystack.includes(query);
+      });
+      picker.innerHTML = customers.length
+        ? customers.map((customer) => {
+          const details = [customer.phoneNumber, customer.accountNumber].filter(Boolean).join(" | ");
+          return `<button class="customer-option" type="button" role="option" data-saved-customer-id="${escapeHtml(customer.id)}" data-saved-customer-kind="${kind}">
+            <strong>${escapeHtml(customer.name || customer.phoneNumber || customer.accountNumber)}</strong>
+            ${details ? `<span>${escapeHtml(details)}</span>` : ""}
+          </button>`;
+        }).join("")
+        : `<div class="customer-picker-empty">No saved ${kind} customers match.</div>`;
+      picker.classList.remove("hidden");
+    }
+
+    function applySavedCustomer(customer, kind) {
+      if (!customer) return;
+      const nameInput = document.getElementById(kind === "sender" ? "senderName" : "receiverName");
+      if (nameInput) nameInput.value = customer.name || "";
+      if (kind === "receiver") {
+        document.getElementById("accountNumber").value = customer.accountNumber || "";
+        document.getElementById("phoneNumber").value = customer.phoneNumber || "";
+        document.getElementById("remarks").value = customer.remarks || "";
+      }
+      closeCustomerPickers();
+      state.orderValidationVisible = false;
+      buildJournalPreview();
+    }
+
+    function saveCustomerFromForm(kind) {
+      const actor = selectedActor();
+      if (!canUseSavedCustomers(actor)) return;
+      const details = customerDetailsFromForm(kind);
+      if (!details.name && !details.accountNumber && !details.phoneNumber && !details.remarks) {
+        notifyEvent("Customer not saved", `Enter ${kind} details first.`);
+        return;
+      }
+      upsertSavedCustomer(actor, details);
+      closeCustomerPickers();
+      saveState();
+      notifyEvent("Customer saved", `${kind === "sender" ? "Sender" : "Receiver"} details are ready for the next order.`);
+    }
+
+    function rememberOrderCustomers(input, actor) {
+      const brokerActor = activeActors().find((candidate) => candidate.id === actor?.id && actorCanInitiateOrders(candidate.role));
+      if (!brokerActor) return;
+      upsertSavedCustomer(brokerActor, {
+        kind: "sender",
+        name: input.senderName,
+        accountNumber: "",
+        phoneNumber: "",
+        remarks: ""
+      });
+      upsertSavedCustomer(brokerActor, {
+        kind: "receiver",
+        name: input.receiverName,
+        accountNumber: input.accountNumber,
+        phoneNumber: input.phoneNumber,
+        remarks: input.remarks
+      });
     }
 
     function getOrderInput() {
@@ -5104,6 +5341,11 @@
       document.querySelectorAll("[data-send-action], [data-send-panel]").forEach((el) => {
         el.classList.toggle("hidden", !canActAsSelectedActor || role === "Agent" || role === "Special Agent" || role === "Master");
       });
+      const savedCustomerControlsVisible = canUseSavedCustomers(actor);
+      document.querySelectorAll("[data-customer-control]").forEach((el) => {
+        el.classList.toggle("hidden", !savedCustomerControlsVisible);
+      });
+      if (!savedCustomerControlsVisible) closeCustomerPickers();
       const actorForm = document.getElementById("actorForm");
       const resetForm = document.getElementById("resetForm");
       if (actorForm) actorForm.classList.toggle("hidden", role !== "Master");
@@ -8606,6 +8848,28 @@
       input.addEventListener("change", renderArchive);
     });
 
+    ["sender", "receiver"].forEach((kind) => {
+      const input = document.getElementById(kind === "sender" ? "senderName" : "receiverName");
+      input.addEventListener("focus", () => renderCustomerPicker(kind));
+      input.addEventListener("click", () => renderCustomerPicker(kind));
+      input.addEventListener("input", () => renderCustomerPicker(kind));
+    });
+    document.getElementById("saveSenderCustomer").addEventListener("click", () => saveCustomerFromForm("sender"));
+    document.getElementById("saveReceiverCustomer").addEventListener("click", () => saveCustomerFromForm("receiver"));
+    document.addEventListener("click", (event) => {
+      const option = event.target.closest("[data-saved-customer-id]");
+      if (option) {
+        const customer = savedCustomersForActor(selectedActor(), option.dataset.savedCustomerKind)
+          .find((item) => item.id === option.dataset.savedCustomerId);
+        applySavedCustomer(customer, option.dataset.savedCustomerKind);
+        return;
+      }
+      if (!event.target.closest("[data-customer-field]")) closeCustomerPickers();
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") closeCustomerPickers();
+    });
+
     els.globalSearch?.addEventListener("input", renderGlobalSearch);
     els.globalSearchClear?.addEventListener("click", () => {
       els.globalSearch.value = "";
@@ -9045,6 +9309,7 @@
 
       confirmAction("Send this order to Master for routing?", () => {
         const order = buildOrderRecord(input, "Pending Forward");
+        rememberOrderCustomers(input, actor);
         const receivable = recordCreditReceivable(input, order);
         const existingIndex = state.orders.findIndex((item) => item.id === state.editingOrderId);
         if (existingIndex >= 0) {
