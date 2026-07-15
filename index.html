@@ -459,6 +459,21 @@
       padding: 16px;
     }
 
+    .dashboard-metric {
+      width: 100%;
+      color: inherit;
+      text-align: left;
+      cursor: pointer;
+      font: inherit;
+    }
+
+    .dashboard-metric:hover,
+    .dashboard-metric:focus-visible {
+      border-color: var(--accent);
+      outline: 2px solid var(--accent-soft);
+      outline-offset: 2px;
+    }
+
     .metric-top {
       display: flex;
       justify-content: space-between;
@@ -1887,38 +1902,38 @@
       <main class="workspace">
         <section class="view active" id="dashboard">
           <div class="grid">
-            <div class="panel metric span-3">
+            <button class="panel metric span-3 dashboard-metric" data-dashboard-view="orders" type="button" aria-label="Open orders">
               <div class="metric-top">
                 <label>Open orders</label>
                 <div class="metric-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/></svg></div>
               </div>
               <strong id="metricOrders">3</strong>
               <small>Assigned and pending forward</small>
-            </div>
-            <div class="panel metric span-3">
+            </button>
+            <button class="panel metric span-3 dashboard-metric" data-dashboard-view="transfers" type="button" aria-label="Open pending approvals">
               <div class="metric-top">
                 <label>Pending approvals</label>
                 <div class="metric-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m9 12 2 2 4-4"/><path d="M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/></svg></div>
               </div>
               <strong id="metricApprovals">2</strong>
               <small>Transfers awaiting Master</small>
-            </div>
-            <div class="panel metric span-3">
+            </button>
+            <button class="panel metric span-3 dashboard-metric" data-dashboard-view="ledger" type="button" aria-label="Open journal lines">
               <div class="metric-top">
                 <label>Journal lines</label>
                 <div class="metric-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 19.5V4a2 2 0 0 1 2-2h12v20H6a2 2 0 0 1-2-2.5Z"/><path d="M8 7h8"/><path d="M8 12h8"/></svg></div>
               </div>
               <strong id="metricLines">6</strong>
               <small>Immutable ledger rows</small>
-            </div>
-            <div class="panel metric span-3">
+            </button>
+            <button class="panel metric span-3 dashboard-metric" data-dashboard-view="settlement" type="button" aria-label="Open settlement net">
               <div class="metric-top">
                 <label>Settlement net</label>
                 <div class="metric-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 2v20"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7H14a3.5 3.5 0 0 1 0 7H6"/></svg></div>
               </div>
               <strong id="metricNet">$760.00</strong>
               <small>Master net receivable</small>
-            </div>
+            </button>
 
             <div class="panel span-8">
               <div class="panel-header">
@@ -3631,6 +3646,67 @@
       els.notificationStack.prepend(toast);
       setTimeout(() => toast.remove(), 3800);
       Array.from(els.notificationStack.children).slice(4).forEach((item) => item.remove());
+    }
+
+    const shownPendingNotificationKeys = new Set();
+
+    function pendingActionNotificationsFor(actor) {
+      if (!actor) return [];
+      const notices = [];
+      if (actor.role === "Master") {
+        state.orders
+          .filter((order) => order.state === "Pending Forward")
+          .forEach((order) => notices.push({
+            key: `order:${order.id}:pending-forward:${order.updatedAt || order.sentAt || ""}`,
+            title: "Order needs forwarding",
+            detail: `${orderDisplayNumber(order, actor)} from ${order.broker || "an Actor"} is waiting for Master routing.`
+          }));
+        state.orders
+          .filter((order) => order.state === "Void Requested")
+          .forEach((order) => notices.push({
+            key: `order:${order.id}:void-request:${order.updatedAt || order.voidRequestedAt || ""}`,
+            title: "Void request needs review",
+            detail: `${orderDisplayNumber(order, actor)} is waiting for Master approval.`
+          }));
+        state.transfers
+          .filter((transfer) => transfer.state === "Pending Approval")
+          .forEach((transfer) => notices.push({
+            key: `transfer:${transfer.id}:pending-approval:${transfer.updatedAt || transfer.sentAt || transfer.createdAt || ""}`,
+            title: "Transfer approval needed",
+            detail: `${transfer.id} from ${transfer.from || "an Actor"} is waiting for Master approval.`
+          }));
+      } else {
+        state.orders
+          .filter((order) => order.state === "Assigned" && (order.agent === actor.name || order.agentActorId === actor.id))
+          .forEach((order) => notices.push({
+            key: `order:${order.id}:assigned:${order.updatedAt || order.assignedAt || ""}`,
+            title: "Order payment needed",
+            detail: `${orderDisplayNumber(order, actor)} is assigned to you for payout.`
+          }));
+        state.orders
+          .filter((order) => order.state === "Returned" && order.broker === actor.name)
+          .forEach((order) => notices.push({
+            key: `order:${order.id}:returned:${order.updatedAt || ""}`,
+            title: "Order needs an update",
+            detail: `${orderDisplayNumber(order, actor)} was returned for your review.`
+          }));
+        state.transfers
+          .filter((transfer) => transfer.state === "Returned" && (transfer.from === actor.name || transfer.initiatedBy === actor.name))
+          .forEach((transfer) => notices.push({
+            key: `transfer:${transfer.id}:returned:${transfer.updatedAt || transfer.returnedAt || ""}`,
+            title: "Transfer needs an update",
+            detail: `${transfer.id} was returned for your review.`
+          }));
+      }
+      return notices;
+    }
+
+    function renderPendingActionNotifications() {
+      pendingActionNotificationsFor(selectedActor()).forEach((notice) => {
+        if (shownPendingNotificationKeys.has(notice.key)) return;
+        shownPendingNotificationKeys.add(notice.key);
+        notifyEvent(notice.title, notice.detail);
+      });
     }
 
     async function copyTextToClipboard(value) {
@@ -6654,6 +6730,13 @@
       downloadBlob(buildLedgerPdf(context.title, rows), `${safeFilename(context.title)}.pdf`);
     }
 
+    function payingAgentLabel(order) {
+      const linkedActor = state.actors.find((actor) => actor.id === order?.agentActorId);
+      if (linkedActor?.name) return linkedActor.name;
+      return [order?.agent, order?.payoutAgentName, order?.payoutAgent, order?.payingAgent]
+        .find((name) => name && !["Unassigned", "Forwarded"].includes(name)) || "Unassigned";
+    }
+
     function renderOrders() {
       if (document.activeElement?.closest?.(".forward-agent, .forward-payout-divider, .forward-payout-percent")) return;
       const actor = selectedActor();
@@ -6665,6 +6748,7 @@
         .sort(newestOrderFirst);
       const orderbookOrders = (actor?.role === "Master" ? visibleOrders : activeOrders).slice().sort(newestOrderFirst);
       const rowsForOrders = (orders) => orders.map((order) => {
+        const payoutAgent = payingAgentLabel(order);
         const className = order.state === "Paid"
           ? "good"
           : order.state === "Cancelled" || order.state === "Voided"
@@ -6676,7 +6760,7 @@
           <tr>
             <td>${orderNumberHtml(order, actor)}${orderDetailsHtml(order, actor)}</td>
             <td>${actor?.role === "Master" || order.broker === actor?.name ? escapeHtml(order.broker) : '<span class="muted">Master assigned</span>'}</td>
-            <td>${escapeHtml(order.agent)}</td>
+            <td>${escapeHtml(payoutAgent)}</td>
             <td>${orderTableAmountHtml(order, actor)}</td>
             <td><span class="state-pill ${className}">${order.state}</span></td>
             <td>${orderActionsHtml(order, actor)}</td>
@@ -8375,6 +8459,11 @@
     });
 
     document.addEventListener("click", async (event) => {
+      const dashboardMetric = event.target.closest("[data-dashboard-view]");
+      if (dashboardMetric) {
+        setView(dashboardMetric.dataset.dashboardView);
+        return;
+      }
       const profileButton = event.target.closest(".profile-button");
       if (!profileButton) return;
       state.selectedActorId = profileButton.dataset.profileId;
@@ -9792,6 +9881,7 @@
       renderArchive();
       renderGlobalSearch();
       renderMetrics();
+      renderPendingActionNotifications();
       updateOrderFundingMode();
       saveState();
     }
