@@ -2144,6 +2144,10 @@
                       <label for="transferPayoutAmount">Total payout</label>
                       <input id="transferPayoutAmount" inputmode="decimal" placeholder="0.00">
                     </div>
+                    <div class="field">
+                      <label for="transferPercent">Commission %</label>
+                      <input id="transferPercent" inputmode="decimal" value="0">
+                    </div>
                     <div class="field full">
                       <label for="transferRemarks">Remarks</label>
                       <textarea id="transferRemarks" placeholder="Add transfer notes"></textarea>
@@ -2995,6 +2999,18 @@
       );
     }
 
+    function transferCommissionPercent(transfer) {
+      const percent = Number(transfer?.commissionPercent);
+      return Number.isFinite(percent) && percent >= 0 ? percent : 0;
+    }
+
+    function transferCommissionMinor(transfer) {
+      const stored = Number(transfer?.commissionMinor);
+      if (Number.isFinite(stored) && stored >= 0) return Math.round(stored);
+      const sourceAmountMinor = Number(transfer?.sourceAmountMinor || transfer?.amountMinor || 0);
+      return Math.round(sourceAmountMinor * transferCommissionPercent(transfer) / 100);
+    }
+
     const state = loadState();
 
     function saveState() {
@@ -3506,6 +3522,7 @@
       transferAmount: document.getElementById("transferAmount"),
       transferRate: document.getElementById("transferRate"),
       transferPayoutAmount: document.getElementById("transferPayoutAmount"),
+      transferPercent: document.getElementById("transferPercent"),
       transferCurrency: document.getElementById("transferCurrency"),
       transferRemarks: document.getElementById("transferRemarks"),
       transferError: document.getElementById("transferError"),
@@ -4580,6 +4597,7 @@
       els.transferAmount.value = formatMinor(transfer.sourceAmountMinor || transfer.amountMinor, transfer.sourceCurrency || transfer.currency);
       els.transferRate.value = transfer.rate || "1.00";
       els.transferPayoutAmount.value = formatMinor(transfer.amountMinor, transfer.currency);
+      els.transferPercent.value = formatRate(transferCommissionPercent(transfer));
       els.transferCurrency.value = transfer.currency;
       els.transferRemarks.value = transfer.remarks || "";
     }
@@ -6069,11 +6087,14 @@
       if (!transfer) return "";
       const sourceCurrency = transfer.sourceCurrency || transfer.currency || "USD";
       const payoutCurrency = transfer.currency || sourceCurrency;
+      const commissionPercent = transferCommissionPercent(transfer);
+      const commissionMinor = transferCommissionMinor(transfer);
       const bits = [
         `${transfer.from || "Unknown"} -> ${transfer.to || "Unknown"}`,
         `Source: ${money(sourceCurrency, transfer.sourceAmountMinor || transfer.amountMinor || 0)}`,
         `Payout: ${money(payoutCurrency, transfer.amountMinor || 0)}`,
         `Rate: ${formatRate(transfer.rate || 1)}`,
+        commissionPercent > 0 ? `Commission: ${money(sourceCurrency, commissionMinor)} (${formatRate(commissionPercent)}%)` : "",
         transfer.remarks ? `Remarks: ${transfer.remarks}` : ""
       ];
       return bits.filter(Boolean).join(" - ");
@@ -6918,12 +6939,15 @@
     function transferDetailsForSearch(transfer) {
       const sourceCurrency = transfer.sourceCurrency || transfer.currency || "USD";
       const payoutCurrency = transfer.currency || sourceCurrency;
+      const commissionPercent = transferCommissionPercent(transfer);
+      const commissionMinor = transferCommissionMinor(transfer);
       return [
         transfer.from ? `From: ${transfer.from}` : "",
         transfer.to ? `To: ${transfer.to}` : "",
         `Source Amount: ${money(sourceCurrency, transfer.sourceAmountMinor || transfer.amountMinor || 0)}`,
         `Payout Amount: ${money(payoutCurrency, transfer.amountMinor || 0)}`,
         transfer.rate ? `Rate: ${formatRate(transfer.rate)}` : "",
+        commissionPercent > 0 ? `Commission: ${money(sourceCurrency, commissionMinor)} (${formatRate(commissionPercent)}%)` : "",
         transfer.remarks ? `Remarks: ${transfer.remarks}` : "",
         transfer.journal ? `Journal: ${transfer.journal}` : "",
         transfer.createdAt ? `Created: ${displayDate(transfer.createdAt)}` : "",
@@ -7398,12 +7422,15 @@
           transfer.returnedAt ? `Returned: ${displayDate(transfer.returnedAt)}` : "",
           transfer.rejectedAt ? `Rejected: ${displayDate(transfer.rejectedAt)}` : ""
         ].filter(Boolean);
+        const transferPercent = transferCommissionPercent(transfer);
+        const transferCommission = transferCommissionMinor(transfer);
         return `
         <div class="transfer-row">
           <div>
             <strong>${transfer.from} -> ${transfer.to}</strong>
             ${transfer.remarks ? `<span>Remarks: ${escapeHtml(transfer.remarks)}</span>` : ""}
             <span>${money(transfer.sourceCurrency || transfer.currency, transfer.sourceAmountMinor || transfer.amountMinor)} -> ${money(transfer.currency, transfer.amountMinor)} at ${escapeHtml(transfer.rate || "1")} · ${transfer.state}</span>
+            ${transferPercent > 0 ? `<span>Commission: ${escapeHtml(formatRate(transferPercent))}% (${money(transfer.sourceCurrency || transfer.currency, transferCommission)})</span>` : ""}
             <span>Sent: ${escapeHtml(displayDate(transfer.sentAt || transfer.createdAt))}${transfer.paidOutAt ? ` · Paid out: ${escapeHtml(displayDate(transfer.paidOutAt))}` : ""}</span>
             <span>${escapeHtml(dateBits.join(" - "))}</span>
           </div>
@@ -7639,6 +7666,8 @@
       const sourceCurrency = transfer.sourceCurrency || transfer.currency;
       const sourceAmountMinor = Number(transfer.sourceAmountMinor || transfer.amountMinor);
       const payoutAmountMinor = Number(transfer.amountMinor || 0);
+      const commissionMinor = transferCommissionMinor(transfer);
+      transfer.commissionMinor = commissionMinor;
       const details = transferLedgerDetails(transfer);
       state.ledger.unshift(
         { journal: journalId, transferId: transfer.id, source: "TRANSFER", account: transfer.to, direction: "Debit", currency: transfer.currency, amountMinor: payoutAmountMinor, details, postedAt },
@@ -7646,6 +7675,12 @@
         { journal: journalId, transferId: transfer.id, source: "TRANSFER", account: "MASTER_FX_CLEARING", direction: "Debit", currency: sourceCurrency, amountMinor: sourceAmountMinor, details, postedAt },
         { journal: journalId, transferId: transfer.id, source: "TRANSFER", account: transfer.from, direction: "Credit", currency: sourceCurrency, amountMinor: sourceAmountMinor, details, postedAt }
       );
+      if (commissionMinor > 0) {
+        state.ledger.unshift(
+          { journal: journalId, transferId: transfer.id, source: "TRANSFER", account: transfer.from, direction: "Debit", currency: sourceCurrency, amountMinor: commissionMinor, details, postedAt },
+          { journal: journalId, transferId: transfer.id, source: "TRANSFER", account: "MASTER_FEE_REVENUE", direction: "Credit", currency: sourceCurrency, amountMinor: commissionMinor, details, postedAt }
+        );
+      }
       syncTransferLedgerDetails(transfer);
       syncSettlementsFromLedger();
     }
@@ -8946,16 +8981,20 @@
       const to = els.transferTo.value;
       updateTransferConversion("submit", false);
       const rate = Number(els.transferRate.value) || 0;
+      const commissionPercent = Number(els.transferPercent.value) || 0;
       const sourceCurrency = els.transferSourceCurrency.value;
       const currency = els.transferCurrency.value;
       const sourceAmountMinor = parseMoney(els.transferAmount.value, sourceCurrency);
       const amountMinor = parseMoney(els.transferPayoutAmount.value, currency);
+      const commissionMinor = Math.round(sourceAmountMinor * commissionPercent / 100);
       const remarks = els.transferRemarks.value.trim();
-      const invalid = !from || !to || !sourceCurrency || !currency || from === to || sourceAmountMinor <= 0 || amountMinor <= 0 || rate <= 0;
+      const invalid = !from || !to || !sourceCurrency || !currency || from === to || sourceAmountMinor <= 0 || amountMinor <= 0 || rate <= 0 || commissionPercent < 0;
       els.transferError.textContent = from === to
         ? "Sender and receiver must be different."
         : !sourceCurrency || !currency
           ? "Choose both transfer currencies."
+          : commissionPercent < 0
+            ? "Enter a percentage of zero or more."
           : "Enter transfer amount, rate, payout amount, and choose both actors.";
       els.transferError.classList.toggle("visible", invalid);
       if (invalid) return;
@@ -8970,6 +9009,8 @@
         currency,
         amountMinor,
         sourceAmountMinor,
+        commissionPercent,
+        commissionMinor,
         rate,
         remarks,
         state: actor?.role === "Master" ? "Approved" : "Pending Approval",
@@ -8997,6 +9038,7 @@
         transferConversionTouches = [];
         els.transferAmount.value = "";
         els.transferPayoutAmount.value = "";
+        els.transferPercent.value = "0";
         els.transferRemarks.value = "";
         els.transferError.classList.remove("visible");
         notifyEvent("New transfer", transfer.state === "Pending Approval"
