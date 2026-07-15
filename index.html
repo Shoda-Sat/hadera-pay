@@ -6991,6 +6991,9 @@
       const orderbookOrders = (actor?.role === "Master" ? visibleOrders : activeOrders).slice().sort(newestOrderFirst);
       const rowsForOrders = (orders) => orders.map((order) => {
         const payoutAgent = payingAgentLabel(order);
+        const stateLabel = actor?.role === "Master" && order.state === "Assigned" && payoutAgent !== "Unassigned"
+          ? `Assigned to '${escapeHtml(payoutAgent)}'`
+          : escapeHtml(order.state);
         const className = order.state === "Paid"
           ? "good"
           : order.state === "Cancelled" || order.state === "Voided"
@@ -7004,7 +7007,7 @@
             <td>${actor?.role === "Master" || order.broker === actor?.name ? escapeHtml(order.broker) : '<span class="muted">Master assigned</span>'}</td>
             <td>${escapeHtml(payoutAgent)}</td>
             <td>${orderTableAmountHtml(order, actor)}</td>
-            <td><span class="state-pill ${className}">${order.state}</span></td>
+            <td><span class="state-pill ${className}">${stateLabel}</span></td>
             <td>${orderActionsHtml(order, actor)}</td>
           </tr>
         `;
