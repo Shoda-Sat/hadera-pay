@@ -1,6 +1,7 @@
 import type { Currency, TransferDraft, TransferQuote } from "../types";
 
 export const currencies: Currency[] = ["USD", "ETB", "EUR", "ERN"];
+const decimalCurrencies = new Set<Currency>(["USD", "EUR"]);
 
 export function parseAmount(value: string): number {
   const numeric = Number(String(value || "").replace(/,/g, "").trim());
@@ -8,7 +9,23 @@ export function parseAmount(value: string): number {
 }
 
 export function currencyDecimals(currency: Currency): number {
-  return currency === "ETB" || currency === "ERN" ? 2 : 2;
+  return decimalCurrencies.has(currency) ? 2 : 0;
+}
+
+export function currencyFactor(currency: Currency): number {
+  return decimalCurrencies.has(currency) ? 100 : 1;
+}
+
+export function minorFromMajor(value: number, currency: Currency): number {
+  return Math.round((Number.isFinite(value) ? value : 0) * currencyFactor(currency));
+}
+
+export function majorFromMinor(value: number, currency: Currency): number {
+  return Number(value || 0) / currencyFactor(currency);
+}
+
+function normalizedMajor(value: number, currency: Currency): number {
+  return majorFromMinor(minorFromMajor(value, currency), currency);
 }
 
 export function formatAmount(currency: Currency, amount: number): string {
@@ -30,17 +47,19 @@ export function compactAmount(currency: Currency, amount: number): string {
 }
 
 export function calculateQuote(draft: TransferDraft): TransferQuote {
-  const sourceAmount = parseAmount(draft.sourceAmount);
-  const manualPayout = parseAmount(draft.payoutAmount);
-  const rate = parseAmount(draft.rate) || 1;
+  const sourceAmount = normalizedMajor(parseAmount(draft.sourceAmount), draft.sourceCurrency);
+  const manualPayout = normalizedMajor(parseAmount(draft.payoutAmount), draft.payoutCurrency);
+  const rate = parseAmount(draft.rate);
   const commissionPercent = parseAmount(draft.commissionPercent);
-  const commissionAmount = sourceAmount * commissionPercent / 100;
-  const payoutAmount = manualPayout > 0 ? manualPayout : sourceAmount * rate;
+  const commissionAmount = normalizedMajor(sourceAmount * commissionPercent / 100, draft.sourceCurrency);
+  const payoutAmount = manualPayout > 0
+    ? manualPayout
+    : normalizedMajor(sourceAmount * rate, draft.payoutCurrency);
 
   return {
     sourceAmount,
     commissionAmount,
-    grossAmount: sourceAmount + commissionAmount,
+    grossAmount: normalizedMajor(sourceAmount + commissionAmount, draft.sourceCurrency),
     payoutAmount,
     rate,
     sourceCurrency: draft.sourceCurrency,

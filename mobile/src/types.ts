@@ -1,6 +1,6 @@
 export type Currency = "USD" | "ETB" | "EUR" | "ERN";
 export type AuthMode = "login" | "signup";
-export type AppScreen = "home" | "transfer" | "conversion" | "confirmation";
+export type AppScreen = "home" | "settlement" | "transfer" | "conversion" | "confirmation";
 export type FundingType = "cash" | "credit";
 export type MembershipRole = "Owner" | "Master" | "Actor";
 export type ActorRole = "Owner" | "Master" | "Broker" | "Agent" | "Special Broker" | "Special Agent";
@@ -63,6 +63,8 @@ export type OrderState =
 
 export interface OrderRecord {
   id: string;
+  brokerOrderNumber?: string;
+  brokerActorId?: string;
   broker: string;
   agent: string;
   agentActorId?: string;
@@ -112,12 +114,42 @@ export interface ReceivableRecord {
   payments: Array<{ amountMinor: number; paidAt: string; receivedBy: string }>;
 }
 
+export interface SavedCustomerRecord {
+  id: string;
+  actorId: string;
+  kind: "sender" | "receiver";
+  name: string;
+  accountNumber: string;
+  phoneNumber: string;
+  remarks: string;
+  updatedAt: string;
+}
+
+export interface LedgerLine {
+  account: string;
+  direction: "Debit" | "Credit";
+  currency: Currency;
+  amountMinor: number;
+  [key: string]: unknown;
+}
+
+export interface ArchiveRecord {
+  actor?: string;
+  closedAt?: string;
+  orders?: OrderRecord[];
+  [key: string]: unknown;
+}
+
 export interface WorkspaceState {
   actors: ActorRecord[];
   orders: OrderRecord[];
   receivables: ReceivableRecord[];
+  savedCustomers: SavedCustomerRecord[];
+  ledger: LedgerLine[];
+  archives: ArchiveRecord[];
   orderCounter?: number;
   receivableCounter?: number;
+  customerCounter?: number;
   [key: string]: unknown;
 }
 

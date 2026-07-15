@@ -520,6 +520,7 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   nextState.actors = mergeById(currentState.actors, incomingState.actors);
   nextState.actors = nextState.actors.filter((actor) => !deletedActorIds.has(actor?.id));
   nextState.orders = mergeOrders(currentState.orders, incomingState.orders);
+  nextState.savedCustomers = mergeById(currentState.savedCustomers, incomingState.savedCustomers);
   nextState.receivables = mergeReceivables(currentState.receivables, incomingState.receivables);
   nextState.transfers = mergeTransfers(currentState.transfers, incomingState.transfers);
   nextState.ledger = mergeByKey(currentState.ledger, incomingState.ledger, (line) =>
@@ -537,6 +538,7 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   nextState.deletedChatIds = Array.from(deletedChatIds);
   nextState.orderCounter = Math.max(Number(currentState.orderCounter || 0), Number(incomingState.orderCounter || 0), nextOrderNumberFromOrders(nextState.orders) - 1);
   nextState.receivableCounter = Math.max(Number(currentState.receivableCounter || 0), Number(incomingState.receivableCounter || 0), nextReceivableNumberFromReceivables(nextState.receivables) - 1);
+  nextState.customerCounter = Math.max(Number(currentState.customerCounter || 0), Number(incomingState.customerCounter || 0));
   nextState.transferCounter = Math.max(Number(currentState.transferCounter || 0), Number(incomingState.transferCounter || 0), nextTransferNumberFromTransfers(nextState.transfers) - 1);
   nextState.journalCounter = Math.max(Number(currentState.journalCounter || 0), Number(incomingState.journalCounter || 0), nextJournalNumberFromLedger(nextState.ledger) - 1);
   return nextState;
@@ -562,6 +564,7 @@ function resetWorkspaceState(db, workspaceId, scope = "data") {
     ...currentState,
     actors,
     orders: [],
+    savedCustomers: [],
     receivables: [],
     transfers: [],
     ledger: [],
@@ -574,6 +577,7 @@ function resetWorkspaceState(db, workspaceId, scope = "data") {
     journalCounter: 0,
     orderCounter: 0,
     receivableCounter: 0,
+    customerCounter: 0,
     transferCounter: 0,
     editingOrderId: "",
     editingTransferId: "",

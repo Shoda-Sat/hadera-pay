@@ -19,6 +19,7 @@ import {
   LogOut,
   RefreshCw,
   Repeat2,
+  Scale,
   Send,
   ShieldCheck,
   UserPlus
@@ -42,12 +43,13 @@ import type {
   Currency,
   FundingType,
   OrderRecord,
+  SavedCustomerRecord,
   SubmittedOrder,
   TransferDraft,
   UserSession,
   WorkspaceState
 } from "./src/types";
-import { calculateQuote, compactAmount, currencies, formatAmount } from "./src/utils/money";
+import { calculateQuote, compactAmount, currencies, formatAmount, majorFromMinor } from "./src/utils/money";
 
 type IconComponent = React.ComponentType<LucideProps>;
 
@@ -80,10 +82,6 @@ function actorForSession(session: UserSession, workspaceState: WorkspaceState | 
     workspaceState?.actors.find((actor) => actor.name === session.actorName);
 }
 
-function majorFromMinor(amountMinor = 0): number {
-  return Number(amountMinor || 0) / 100;
-}
-
 function newestOrders(a: OrderRecord, b: OrderRecord): number {
   return new Date(b.createdAt || b.updatedAt || 0).getTime() - new Date(a.createdAt || a.updatedAt || 0).getTime();
 }
@@ -108,6 +106,44 @@ function stateTone(state: OrderRecord["state"]): "neutral" | "good" | "warn" | "
   if (["Pending Forward", "Assigned", "Returned", "Void Requested"].includes(state)) return "warn";
   if (["Voided", "Cancelled"].includes(state)) return "danger";
   return "neutral";
+}
+
+function orderNumber(order: OrderRecord): string {
+  return order.brokerOrderNumber || order.id;
+}
+
+function orderStateLabel(session: UserSession, order: OrderRecord): string {
+  if (session.actorRole === "Master" && order.state === "Assigned" && order.agent && order.agent !== "Unassigned") {
+    return `Assigned to '${order.agent}'`;
+  }
+  return order.state;
+}
+
+function savedCustomersFor(session: UserSession, workspaceState: WorkspaceState | null, kind: SavedCustomerRecord["kind"]): SavedCustomerRecord[] {
+  return (workspaceState?.savedCustomers || [])
+    .filter((customer) => customer.actorId === session.actorId && customer.kind === kind)
+    .slice()
+    .sort((a, b) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime());
+}
+
+type SettlementRow = { actor: ActorRecord; currency: Currency; netMinor: number };
+
+function settlementRowsFor(session: UserSession, workspaceState: WorkspaceState | null): SettlementRow[] {
+  const actors = (workspaceState?.actors || []).filter((actor) => actor.active !== false && actor.role !== "Master");
+  const visibleActors = session.actorRole === "Master" ? actors : actors.filter((actor) => actor.id === session.actorId);
+  const balances = new Map<string, Partial<Record<Currency, number>>>();
+  (workspaceState?.ledger || []).forEach((line) => {
+    const actor = actors.find((candidate) => line.account === candidate.name || line.account === `${candidate.name} ACTOR_CLEARING`);
+    if (!actor) return;
+    const balance = balances.get(actor.id) || {};
+    balance[line.currency] = Number(balance[line.currency] || 0) + (line.direction === "Debit" ? 1 : -1) * Number(line.amountMinor || 0);
+    balances.set(actor.id, balance);
+  });
+  return visibleActors.flatMap((actor) => currencies.map((currency) => ({
+    actor,
+    currency,
+    netMinor: Number(balances.get(actor.id)?.[currency] || 0)
+  })).filter((row) => row.netMinor !== 0 || row.currency === actor.currency));
 }
 
 export default function App() {
@@ -160,10 +196,10 @@ export default function App() {
   }, [session?.workspaceId]);
 
   const orderFlowAllowed = canCreateOrders(session);
-  const currentScreen = orderFlowAllowed ? screen : "home";
+  const currentScreen = !orderFlowAllowed && ["transfer", "conversion", "confirmation"].includes(screen) ? "home" : screen;
 
   useEffect(() => {
-    if (!orderFlowAllowed && screen !== "home") setScreen("home");
+    if (!orderFlowAllowed && ["transfer", "conversion", "confirmation"].includes(screen)) setScreen("home");
   }, [orderFlowAllowed, screen]);
 
   const refreshWorkspace = async () => {
@@ -225,7 +261,11 @@ export default function App() {
               onRefresh={refreshWorkspace}
               onTransfer={() => setScreen("transfer")}
               onConversion={() => setScreen("conversion")}
+              onSettlement={() => setScreen("settlement")}
             />
+          )}
+          {currentScreen === "settlement" && (
+            <SettlementScreen session={session} workspaceState={workspaceState} />
           )}
           {orderFlowAllowed && currentScreen === "transfer" && (
             <TransferScreen
@@ -393,7 +433,8 @@ function HomeScreen({
   stateLoading,
   onRefresh,
   onTransfer,
-  onConversion
+  onConversion,
+  onSettlement
 }: {
   session: UserSession;
   workspaceState: WorkspaceState | null;
@@ -401,6 +442,7 @@ function HomeScreen({
   onRefresh: () => void;
   onTransfer: () => void;
   onConversion: () => void;
+  onSettlement: () => void;
 }) {
   const orders = visibleOrdersFor(session, workspaceState);
   const assignedOrders = orders.filter((order) => order.state === "Assigned");
@@ -424,19 +466,22 @@ function HomeScreen({
             <Button label="Convert" onPress={onConversion} variant="secondary" icon={<Repeat2 size={17} color={colors.ink} />} style={styles.actionButton} />
           </>
         ) : (
-          <Button label="Refresh" onPress={onRefresh} loading={stateLoading} variant="secondary" icon={<RefreshCw size={17} color={colors.ink} />} style={styles.actionButton} />
+          <>
+            <Button label="Refresh" onPress={onRefresh} loading={stateLoading} variant="secondary" icon={<RefreshCw size={17} color={colors.ink} />} style={styles.actionButton} />
+            <Button label="Settlement" onPress={onSettlement} variant="secondary" icon={<Scale size={17} color={colors.ink} />} style={styles.actionButton} />
+          </>
         )}
       </View>
       <Panel title="Orderbook" badge={session.actorRole}>
         {orders.length ? orders.map((order) => (
           <View key={order.id} style={styles.orderRow}>
             <View style={{ flex: 1 }}>
-              <Text style={styles.orderId}>{order.id}</Text>
+              <Text style={styles.orderId}>{orderNumber(order)}</Text>
               <Text style={styles.mutedText}>{order.broker === session.actorName ? order.receiverName : order.broker}</Text>
             </View>
             <View style={styles.orderRight}>
-              <Text style={styles.orderAmount}>{compactAmount(order.payoutCurrency, majorFromMinor(order.payoutAmountMinor))}</Text>
-              <Pill label={order.state} tone={stateTone(order.state)} />
+              <Text style={styles.orderAmount}>{compactAmount(order.payoutCurrency, majorFromMinor(order.payoutAmountMinor, order.payoutCurrency))}</Text>
+              <Pill label={orderStateLabel(session, order)} tone={stateTone(order.state)} />
             </View>
           </View>
         )) : (
@@ -450,6 +495,55 @@ function HomeScreen({
           <SummaryRow label="New orders" value="Broker only" strong />
         </Panel>
       ) : null}
+    </View>
+  );
+}
+
+function SettlementScreen({
+  session,
+  workspaceState
+}: {
+  session: UserSession;
+  workspaceState: WorkspaceState | null;
+}) {
+  const rows = settlementRowsFor(session, workspaceState);
+  const groups = [
+    { label: "Brokers & Special Brokers", roles: ["Broker", "Special Broker"] },
+    { label: "Agents", roles: ["Agent"] },
+    { label: "Special Agents", roles: ["Special Agent"] }
+  ].map((group) => ({
+    ...group,
+    rows: rows.filter((row) => group.roles.includes(row.actor.role))
+  })).filter((group) => session.actorRole === "Master" || group.rows.length > 0);
+
+  return (
+    <View style={styles.screen}>
+      <HeaderTitle title="Settlement" subtitle="Net positions against Master" />
+      {groups.length ? groups.map((group) => (
+        <View key={group.label} style={styles.settlementGroup}>
+          <Text style={styles.settlementGroupTitle}>{group.label}</Text>
+          {group.rows.length ? group.rows.map((row) => {
+            const positive = row.netMinor > 0;
+            const settled = row.netMinor === 0;
+            const positiveTone = session.actorRole === "Master" ? styles.settlementOwed : styles.settlementDue;
+            const negativeTone = session.actorRole === "Master" ? styles.settlementDue : styles.settlementOwed;
+            return (
+              <View key={`${row.actor.id}-${row.currency}`} style={styles.settlementRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.orderId}>{row.actor.name}</Text>
+                  <Text style={styles.mutedText}>{settled ? "Zero balance" : positive ? "Actor owes Master" : "Master owes actor"}</Text>
+                </View>
+                <Text style={[
+                  styles.settlementAmount,
+                  settled ? styles.settlementZero : positive ? positiveTone : negativeTone
+                ]}>
+                  {settled ? compactAmount(row.currency, 0) : `${positive ? "+" : "-"}${compactAmount(row.currency, majorFromMinor(Math.abs(row.netMinor), row.currency))}`}
+                </Text>
+              </View>
+            );
+          }) : <Text style={styles.mutedText}>No actors in this category.</Text>}
+        </View>
+      )) : <View style={styles.settlementGroup}><Text style={styles.mutedText}>No settlement balances yet.</Text></View>}
     </View>
   );
 }
@@ -472,12 +566,28 @@ function TransferScreen({
   onContinue: () => void;
 }) {
   const actor = actorForSession(session, workspaceState);
+  const [activeCustomerPicker, setActiveCustomerPicker] = useState<SavedCustomerRecord["kind"] | null>(null);
+  const senderCustomers = savedCustomersFor(session, workspaceState, "sender");
+  const receiverCustomers = savedCustomersFor(session, workspaceState, "receiver");
   const sourceOptions = actor?.orderMultiCurrencyEnabled === true
     ? currencies
     : [actor?.currency || session.currency].filter((currency): currency is Currency => currencies.includes(currency));
   const sourceCurrency = sourceOptions.includes(draft.sourceCurrency) ? draft.sourceCurrency : sourceOptions[0] || session.currency;
   const setField = <K extends keyof TransferDraft>(key: K, value: TransferDraft[K]) => {
     setDraft((current) => ({ ...current, broker: session.actorName, [key]: value }));
+  };
+  const chooseCustomer = (customer: SavedCustomerRecord) => {
+    setDraft((current) => customer.kind === "sender"
+      ? { ...current, senderName: customer.name, broker: session.actorName }
+      : {
+        ...current,
+        broker: session.actorName,
+        receiverName: customer.name,
+        phoneNumber: customer.phoneNumber,
+        accountNumber: customer.accountNumber,
+        remarks: customer.remarks
+      });
+    setActiveCustomerPicker(null);
   };
 
   return (
@@ -496,8 +606,10 @@ function TransferScreen({
         <SelectRow<FundingType> label="Payment type" options={["cash", "credit"]} value={draft.fundingType} onChange={(value) => setField("fundingType", value)} />
       </Panel>
       <Panel title="Receiver Details" badge="Required">
-        <Field label="Sender name" value={draft.senderName} onChangeText={(value) => setField("senderName", value)} />
-        <Field label="Receiver name" value={draft.receiverName} onChangeText={(value) => setField("receiverName", value)} />
+        <Field label="Sender name" value={draft.senderName} onChangeText={(value) => setField("senderName", value)} onFocus={() => setActiveCustomerPicker("sender")} />
+        {activeCustomerPicker === "sender" ? <SavedCustomerSuggestions customers={senderCustomers} onSelect={chooseCustomer} /> : null}
+        <Field label="Receiver name" value={draft.receiverName} onChangeText={(value) => setField("receiverName", value)} onFocus={() => setActiveCustomerPicker("receiver")} />
+        {activeCustomerPicker === "receiver" ? <SavedCustomerSuggestions customers={receiverCustomers} onSelect={chooseCustomer} /> : null}
         <Field label="Phone number" value={draft.phoneNumber} onChangeText={(value) => setField("phoneNumber", value)} keyboardType="phone-pad" />
         <Field label="Account number" value={draft.accountNumber} onChangeText={(value) => setField("accountNumber", value)} keyboardType="number-pad" />
         <Field label="Remarks" value={draft.remarks} onChangeText={(value) => setField("remarks", value)} multiline />
@@ -507,6 +619,29 @@ function TransferScreen({
         <Button label="Preview" onPress={onConversion} variant="secondary" icon={<Repeat2 size={17} color={colors.ink} />} style={styles.actionButton} />
         <Button label="Review" onPress={onContinue} icon={<ArrowRight size={17} color="#ffffff" />} style={styles.actionButton} />
       </View>
+    </View>
+  );
+}
+
+function SavedCustomerSuggestions({
+  customers,
+  onSelect
+}: {
+  customers: SavedCustomerRecord[];
+  onSelect: (customer: SavedCustomerRecord) => void;
+}) {
+  if (!customers.length) return null;
+  return (
+    <View style={styles.savedCustomerList}>
+      {customers.map((customer) => {
+        const details = [customer.phoneNumber, customer.accountNumber].filter(Boolean).join(" | ");
+        return (
+          <Pressable key={customer.id} onPress={() => onSelect(customer)} style={styles.savedCustomerRow}>
+            <Text style={styles.savedCustomerName}>{customer.name || customer.phoneNumber || customer.accountNumber}</Text>
+            {details ? <Text style={styles.savedCustomerDetail}>{details}</Text> : null}
+          </Pressable>
+        );
+      })}
     </View>
   );
 }
@@ -666,7 +801,8 @@ function BottomTabs({
   onChange: (screen: AppScreen) => void;
 }) {
   const tabs: Array<{ id: AppScreen; label: string; Icon: IconComponent }> = [
-    { id: "home", label: "Home", Icon: LayoutDashboard }
+    { id: "home", label: "Home", Icon: LayoutDashboard },
+    { id: "settlement", label: "Settlement", Icon: Scale }
   ];
   if (canCreateOrders(session)) {
     tabs.push(
@@ -827,6 +963,58 @@ const styles = StyleSheet.create({
   },
   twoColumn: {
     gap: spacing.md
+  },
+  savedCustomerList: {
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: radius.md,
+    backgroundColor: colors.panel2,
+    overflow: "hidden"
+  },
+  savedCustomerRow: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.line,
+    gap: 2
+  },
+  savedCustomerName: {
+    color: colors.ink,
+    fontWeight: "800"
+  },
+  savedCustomerDetail: {
+    color: colors.muted,
+    fontSize: 12
+  },
+  settlementGroup: {
+    gap: spacing.sm
+  },
+  settlementGroupTitle: {
+    color: colors.ink,
+    fontSize: 15,
+    fontWeight: "900"
+  },
+  settlementRow: {
+    minHeight: 64,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.md,
+    borderTopWidth: 1,
+    borderTopColor: colors.line,
+    paddingVertical: spacing.sm
+  },
+  settlementAmount: {
+    fontWeight: "900",
+    textAlign: "right"
+  },
+  settlementOwed: {
+    color: colors.good
+  },
+  settlementDue: {
+    color: colors.danger
+  },
+  settlementZero: {
+    color: colors.muted
   },
   quoteTop: {
     flexDirection: "row",

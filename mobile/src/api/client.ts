@@ -5,12 +5,13 @@ import type {
   FundingType,
   OrderRecord,
   ReceivableRecord,
+  SavedCustomerRecord,
   SubmittedOrder,
   TransferDraft,
   UserSession,
   WorkspaceState
 } from "../types";
-import { calculateQuote, compactAmount } from "../utils/money";
+import { calculateQuote, compactAmount, minorFromMajor } from "../utils/money";
 
 declare const process: { env?: Record<string, string | undefined> } | undefined;
 
@@ -81,7 +82,10 @@ function normalizeState(state: Partial<WorkspaceState> | null | undefined): Work
     ...(state || {}),
     actors: Array.isArray(state?.actors) ? state.actors : [],
     orders: Array.isArray(state?.orders) ? state.orders : [],
-    receivables: Array.isArray(state?.receivables) ? state.receivables : []
+    receivables: Array.isArray(state?.receivables) ? state.receivables : [],
+    savedCustomers: Array.isArray(state?.savedCustomers) ? state.savedCustomers : [],
+    ledger: Array.isArray(state?.ledger) ? state.ledger : [],
+    archives: Array.isArray(state?.archives) ? state.archives : []
   };
 }
 
@@ -147,10 +151,6 @@ async function saveWorkspaceState(state: WorkspaceState): Promise<void> {
   });
 }
 
-function minorFromMajor(value: number): number {
-  return Math.round((Number.isFinite(value) ? value : 0) * 100);
-}
-
 function nextOrderNumberFromOrders(orders: OrderRecord[]): number {
   return orders.reduce((next, order) => {
     const match = String(order?.id || "").match(/^ORD-(\d+)$/);
@@ -169,6 +169,34 @@ function nextOrderId(state: WorkspaceState): string {
   const nextNumber = Math.max(Number(state.orderCounter || 0) + 1, nextOrderNumberFromOrders(state.orders));
   state.orderCounter = nextNumber;
   return `ORD-${nextNumber}`;
+}
+
+function actorOrderPrefix(name: string): string {
+  const clean = String(name || "ACT").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return `${clean}XXX`.slice(0, 3);
+}
+
+function nextBrokerOrderNumber(session: UserSession, state: WorkspaceState): string {
+  const prefix = actorOrderPrefix(session.actorName);
+  const pattern = new RegExp(`^${prefix}(\\d+)$`);
+  const latestClose = state.archives
+    .filter((archive) => archive.actor === session.actorName)
+    .reduce((latest, archive) => Math.max(latest, new Date(archive.closedAt || 0).getTime() || 0), 0);
+  const records = [
+    ...state.orders.map((order) => ({ order, current: true, closedAt: "" })),
+    ...state.archives.flatMap((archive) => (archive.orders || []).map((order) => ({ order, current: false, closedAt: archive.closedAt || "" })))
+  ];
+  const usedNumbers = new Set(records.reduce<number[]>((used, record) => {
+    const actorMatches = record.order.brokerActorId === session.actorId || (!record.order.brokerActorId && record.order.broker === session.actorName);
+    const recordClosedAt = new Date(record.closedAt || 0).getTime();
+    const reserve = record.current || record.order.state === "Voided" || Boolean(record.order.voidJournal) || !latestClose || recordClosedAt > latestClose;
+    const match = String(record.order.brokerOrderNumber || record.order.id || "").match(pattern);
+    if (actorMatches && reserve && match) used.push(Number(match[1]));
+    return used;
+  }, []));
+  let next = 1;
+  while (usedNumbers.has(next)) next += 1;
+  return `${prefix}${String(next).padStart(3, "0")}`;
 }
 
 function nextReceivableId(state: WorkspaceState): string {
@@ -203,12 +231,61 @@ function buildReceivable(session: UserSession, draft: TransferDraft, order: Orde
   };
 }
 
+function nextSavedCustomerId(state: WorkspaceState): string {
+  const highestStoredId = state.savedCustomers.reduce((highest, customer) => {
+    const match = String(customer.id || "").match(/^CUST-(\d+)$/);
+    return match ? Math.max(highest, Number(match[1])) : highest;
+  }, 0);
+  state.customerCounter = Math.max(Number(state.customerCounter || 0), highestStoredId) + 1;
+  return `CUST-${state.customerCounter}`;
+}
+
+function upsertSavedCustomer(state: WorkspaceState, actor: ActorRecord | undefined, details: Omit<SavedCustomerRecord, "id" | "actorId" | "updatedAt">): void {
+  if (!actor || (!details.name && !details.accountNumber && !details.phoneNumber && !details.remarks)) return;
+  const normalizedName = details.name.toLocaleLowerCase();
+  const existing = state.savedCustomers.find((customer) =>
+    customer.actorId === actor.id &&
+    customer.kind === details.kind &&
+    customer.name.toLocaleLowerCase() === normalizedName
+  );
+  const next: SavedCustomerRecord = {
+    ...(existing || {}),
+    id: existing?.id || nextSavedCustomerId(state),
+    actorId: actor.id,
+    kind: details.kind,
+    name: details.name,
+    accountNumber: details.accountNumber,
+    phoneNumber: details.phoneNumber,
+    remarks: details.remarks,
+    updatedAt: new Date().toISOString()
+  };
+  if (existing) Object.assign(existing, next);
+  else state.savedCustomers.unshift(next);
+}
+
+function rememberOrderCustomers(state: WorkspaceState, actor: ActorRecord | undefined, draft: TransferDraft): void {
+  upsertSavedCustomer(state, actor, {
+    kind: "sender",
+    name: draft.senderName.trim(),
+    accountNumber: "",
+    phoneNumber: "",
+    remarks: ""
+  });
+  upsertSavedCustomer(state, actor, {
+    kind: "receiver",
+    name: draft.receiverName.trim(),
+    accountNumber: draft.accountNumber.trim(),
+    phoneNumber: draft.phoneNumber.trim(),
+    remarks: draft.remarks.trim()
+  });
+}
+
 export async function submitTransferOrder(session: UserSession, draft: TransferDraft): Promise<SubmittedOrder> {
   if (!canCreateOrders(session)) {
     throw new Error("Only Brokers and Special Brokers can send new orders.");
   }
-  if (!draft.senderName.trim() || !draft.receiverName.trim()) {
-    throw new Error("Sender and receiver names are required.");
+  if (!draft.receiverName.trim() && !draft.phoneNumber.trim() && !draft.accountNumber.trim() && !draft.remarks.trim()) {
+    throw new Error("Enter at least one receiver detail.");
   }
   if (!draft.fundingType) {
     throw new Error("Choose Cash or Credit before sending.");
@@ -225,15 +302,17 @@ export async function submitTransferOrder(session: UserSession, draft: TransferD
   const now = new Date().toISOString();
   const order: OrderRecord = {
     id: nextOrderId(state),
+    brokerOrderNumber: nextBrokerOrderNumber(session, state),
+    brokerActorId: actor?.id || session.actorId,
     broker: session.actorName,
     agent: "Unassigned",
     agentActorId: "",
     sourceCurrency,
     payoutCurrency: draft.payoutCurrency,
-    sourceAmountMinor: minorFromMajor(quote.sourceAmount),
-    payoutAmountMinor: minorFromMajor(quote.payoutAmount),
-    commissionMinor: minorFromMajor(quote.commissionAmount),
-    grossMinor: minorFromMajor(quote.grossAmount),
+    sourceAmountMinor: minorFromMajor(quote.sourceAmount, sourceCurrency),
+    payoutAmountMinor: minorFromMajor(quote.payoutAmount, draft.payoutCurrency),
+    commissionMinor: minorFromMajor(quote.commissionAmount, sourceCurrency),
+    grossMinor: minorFromMajor(quote.grossAmount, sourceCurrency),
     rate: quote.rate,
     commissionPercent: Number(draft.commissionPercent || 0) || 0,
     senderName: draft.senderName.trim(),
@@ -254,6 +333,7 @@ export async function submitTransferOrder(session: UserSession, draft: TransferD
   };
 
   state.orders = [order, ...state.orders.filter((item) => item.id !== order.id)];
+  rememberOrderCustomers(state, actor, draft);
   if (draft.fundingType === "credit") {
     state.receivables = [buildReceivable(session, draft, order, state), ...state.receivables];
   }
