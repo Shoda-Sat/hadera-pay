@@ -46,6 +46,14 @@ export function compactAmount(currency: Currency, amount: number): string {
   return `${currency}${formatted}`;
 }
 
+export function inputAmount(currency: Currency, amount: number): string {
+  if (!Number.isFinite(amount) || amount <= 0) return "";
+  return amount
+    .toFixed(currencyDecimals(currency))
+    .replace(/(\.\d*?[1-9])0+$/, "$1")
+    .replace(/\.0+$/, "");
+}
+
 export function calculateQuote(draft: TransferDraft): TransferQuote {
   const sourceAmount = normalizedMajor(parseAmount(draft.sourceAmount), draft.sourceCurrency);
   const manualPayout = normalizedMajor(parseAmount(draft.payoutAmount), draft.payoutCurrency);

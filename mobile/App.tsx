@@ -49,7 +49,7 @@ import type {
   UserSession,
   WorkspaceState
 } from "./src/types";
-import { calculateQuote, compactAmount, currencies, formatAmount, majorFromMinor } from "./src/utils/money";
+import { calculateQuote, compactAmount, currencies, formatAmount, inputAmount, majorFromMinor } from "./src/utils/money";
 
 type IconComponent = React.ComponentType<LucideProps>;
 
@@ -108,7 +108,14 @@ function stateTone(state: OrderRecord["state"]): "neutral" | "good" | "warn" | "
   return "neutral";
 }
 
-function orderNumber(order: OrderRecord): string {
+function actorCanReceivePayouts(role: UserSession["actorRole"]): boolean {
+  return ["Agent", "Special Agent", "Special Broker"].includes(role);
+}
+
+function orderNumber(order: OrderRecord, session: UserSession): string {
+  if (actorCanReceivePayouts(session.actorRole) && (order.agentActorId === session.actorId || order.agent === session.actorName)) {
+    return order.agentOrderNumbers?.[session.actorName] || order.agentOrderNumber || order.brokerOrderNumber || order.id;
+  }
   return order.brokerOrderNumber || order.id;
 }
 
@@ -476,7 +483,7 @@ function HomeScreen({
         {orders.length ? orders.map((order) => (
           <View key={order.id} style={styles.orderRow}>
             <View style={{ flex: 1 }}>
-              <Text style={styles.orderId}>{orderNumber(order)}</Text>
+              <Text style={styles.orderId}>{orderNumber(order, session)}</Text>
               <Text style={styles.mutedText}>{order.broker === session.actorName ? order.receiverName : order.broker}</Text>
             </View>
             <View style={styles.orderRight}>
@@ -576,6 +583,16 @@ function TransferScreen({
   const setField = <K extends keyof TransferDraft>(key: K, value: TransferDraft[K]) => {
     setDraft((current) => ({ ...current, broker: session.actorName, [key]: value }));
   };
+  const setConversionField = (key: "sourceCurrency" | "payoutCurrency" | "sourceAmount" | "rate", value: Currency | string) => {
+    setDraft((current) => {
+      const next = { ...current, broker: session.actorName, [key]: value } as TransferDraft;
+      const calculated = calculateQuote({ ...next, payoutAmount: "" });
+      return {
+        ...next,
+        payoutAmount: inputAmount(next.payoutCurrency, calculated.payoutAmount)
+      };
+    });
+  };
   const chooseCustomer = (customer: SavedCustomerRecord) => {
     setDraft((current) => customer.kind === "sender"
       ? { ...current, senderName: customer.name, broker: session.actorName }
@@ -596,11 +613,11 @@ function TransferScreen({
       <Panel title="Money Transfer" badge="Draft">
         <SummaryRow label="Broker" value={session.actorName} strong />
         <View style={styles.twoColumn}>
-          <SelectRow<Currency> label="Source currency" options={sourceOptions} value={sourceCurrency} onChange={(value) => setField("sourceCurrency", value)} />
-          <SelectRow<Currency> label="Payout currency" options={currencies} value={draft.payoutCurrency} onChange={(value) => setField("payoutCurrency", value)} />
+          <SelectRow<Currency> label="Source currency" options={sourceOptions} value={sourceCurrency} onChange={(value) => setConversionField("sourceCurrency", value)} />
+          <SelectRow<Currency> label="Payout currency" options={currencies} value={draft.payoutCurrency} onChange={(value) => setConversionField("payoutCurrency", value)} />
         </View>
-        <Field label="Source amount" value={draft.sourceAmount} onChangeText={(value) => setField("sourceAmount", value)} keyboardType="decimal-pad" />
-        <Field label="Exchange rate" value={draft.rate} onChangeText={(value) => setField("rate", value)} keyboardType="decimal-pad" />
+        <Field label="Source amount" value={draft.sourceAmount} onChangeText={(value) => setConversionField("sourceAmount", value)} keyboardType="decimal-pad" />
+        <Field label="Exchange rate" value={draft.rate} onChangeText={(value) => setConversionField("rate", value)} keyboardType="decimal-pad" />
         <Field label="Total payout" value={draft.payoutAmount} onChangeText={(value) => setField("payoutAmount", value)} keyboardType="decimal-pad" placeholder="Auto from source and rate" />
         <Field label="Commission %" value={draft.commissionPercent} onChangeText={(value) => setField("commissionPercent", value)} keyboardType="decimal-pad" />
         <SelectRow<FundingType> label="Payment type" options={["cash", "credit"]} value={draft.fundingType} onChange={(value) => setField("fundingType", value)} />
@@ -715,7 +732,7 @@ function ConfirmationScreen({
     return (
       <View style={styles.screen}>
         <HeaderTitle title="Submitted" subtitle="Sent to Master for routing" />
-        <Panel title={submittedOrder.orderId} badge={submittedOrder.status}>
+        <Panel title={submittedOrder.orderNumber} badge={submittedOrder.status}>
           <View style={styles.successIcon}>
             <CheckCircle2 size={44} color={colors.good} />
           </View>

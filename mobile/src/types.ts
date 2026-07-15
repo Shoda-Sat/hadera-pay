@@ -65,6 +65,9 @@ export interface OrderRecord {
   id: string;
   brokerOrderNumber?: string;
   brokerActorId?: string;
+  agentOrderNumber?: string;
+  agentOrderActor?: string;
+  agentOrderNumbers?: Record<string, string>;
   broker: string;
   agent: string;
   agentActorId?: string;
@@ -74,6 +77,7 @@ export interface OrderRecord {
   payoutAmountMinor: number;
   commissionMinor: number;
   grossMinor: number;
+  moneyUnitVersion?: 2;
   rate: number;
   commissionPercent: number;
   senderName: string;
@@ -181,6 +185,7 @@ export interface TransferQuote {
 
 export interface SubmittedOrder {
   orderId: string;
+  orderNumber: string;
   status: "Pending Master Approval";
   createdAt: string;
   state: WorkspaceState;

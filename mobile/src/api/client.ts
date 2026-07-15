@@ -313,6 +313,7 @@ export async function submitTransferOrder(session: UserSession, draft: TransferD
     payoutAmountMinor: minorFromMajor(quote.payoutAmount, draft.payoutCurrency),
     commissionMinor: minorFromMajor(quote.commissionAmount, sourceCurrency),
     grossMinor: minorFromMajor(quote.grossAmount, sourceCurrency),
+    moneyUnitVersion: 2,
     rate: quote.rate,
     commissionPercent: Number(draft.commissionPercent || 0) || 0,
     senderName: draft.senderName.trim(),
@@ -341,6 +342,7 @@ export async function submitTransferOrder(session: UserSession, draft: TransferD
   await saveWorkspaceState(state);
   return {
     orderId: order.id,
+    orderNumber: order.brokerOrderNumber || order.id,
     status: "Pending Master Approval",
     createdAt: now,
     state
