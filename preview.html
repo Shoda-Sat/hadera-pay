@@ -1197,7 +1197,32 @@
     .settlement-grid {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 12px;
+      gap: 18px;
+      align-items: start;
+    }
+
+    .settlement-group {
+      min-width: 0;
+    }
+
+    .settlement-group h3 {
+      margin: 0 0 10px;
+      color: var(--ink);
+      font-size: 14px;
+    }
+
+    .settlement-group-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .settlement-group-empty {
+      padding: 12px;
+      border: 1px dashed var(--line);
+      border-radius: 8px;
+      color: var(--muted);
+      background: var(--panel-2);
+      font-size: 12px;
     }
 
     .settlement-card {
@@ -7948,16 +7973,35 @@
         els.metricNet.textContent = "All zero";
         return;
       }
-      els.settlementCards.innerHTML = visibleSettlements.map((item) => {
+      const settlementCard = (item) => {
         const positive = item.netMinor > 0;
         const amountMinor = Math.abs(item.netMinor);
         const settled = item.netMinor === 0;
         return `
           <div class="settlement-card">
-            <b>${item.actor}</b>
+            <b>${escapeHtml(item.actor)}</b>
             <strong class="${settled ? "" : toneClass(positive ? "debit" : "credit")}">${settled ? money(item.currency, 0) : `${positive ? "+" : "-"}${money(item.currency, amountMinor)}`}</strong>
             <span>${settled ? "Zero balance" : positive ? "Actor owes Master" : "Master owes actor"}</span>
           </div>
+        `;
+      };
+      const settlementGroups = [
+        { label: "Brokers & Special Brokers", roles: ["Broker", "Special Broker"] },
+        { label: "Agents", roles: ["Agent"] },
+        { label: "Special Agents", roles: ["Special Agent"] }
+      ];
+      els.settlementCards.innerHTML = settlementGroups.map((group) => {
+        const groupRows = visibleSettlements.filter((item) => {
+          const actorProfile = activeActors().find((candidate) => candidate.name === item.actor);
+          return group.roles.includes(actorProfile?.role);
+        });
+        return `
+          <section class="settlement-group">
+            <h3>${group.label}</h3>
+            <div class="settlement-group-list">
+              ${groupRows.length ? groupRows.map(settlementCard).join("") : '<div class="settlement-group-empty">No actors in this category.</div>'}
+            </div>
+          </section>
         `;
       }).join("");
       const netByCurrency = visibleSettlements
