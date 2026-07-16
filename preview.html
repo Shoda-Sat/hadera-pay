@@ -850,6 +850,130 @@
       overflow-x: auto;
     }
 
+    .ledger-table-region {
+      position: relative;
+      min-width: 0;
+    }
+
+    .ledger-table-wrap {
+      scrollbar-width: none;
+      overscroll-behavior-x: contain;
+    }
+
+    .ledger-table-wrap::-webkit-scrollbar {
+      width: 0;
+      height: 0;
+    }
+
+    .ledger-table {
+      width: max-content;
+      min-width: 100%;
+    }
+
+    .ledger-table th {
+      vertical-align: bottom;
+      white-space: normal;
+      line-height: 1.2;
+    }
+
+    .ledger-head-lines {
+      display: inline-flex;
+      flex-direction: column;
+      gap: 1px;
+    }
+
+    .ledger-head-lines span {
+      white-space: nowrap;
+    }
+
+    .ledger-date-cell,
+    .ledger-journal-cell,
+    .ledger-reference-cell,
+    .ledger-source-cell,
+    .ledger-order-info-cell,
+    .ledger-direction-cell {
+      white-space: nowrap;
+    }
+
+    .ledger-date-cell { min-width: 118px; }
+    .ledger-journal-cell { min-width: 94px; }
+    .ledger-reference-cell { min-width: 112px; }
+    .ledger-source-cell { min-width: 110px; }
+    .ledger-ordering-cell { min-width: 110px; }
+    .ledger-ordered-cell { min-width: 104px; }
+    .ledger-rate-cell { min-width: 66px; }
+    .ledger-percent-cell { min-width: 48px; }
+    .ledger-payout-cell { min-width: 82px; }
+    .ledger-paid-out-cell { min-width: 100px; }
+    .ledger-direction-cell { min-width: 78px; }
+
+    .ledger-details-cell {
+      width: 320px;
+      min-width: 280px;
+      max-width: 360px;
+      vertical-align: top;
+    }
+
+    .ledger-account-cell {
+      min-width: 170px;
+      max-width: 220px;
+      overflow-wrap: anywhere;
+    }
+
+    .ledger-detail {
+      min-width: 0;
+    }
+
+    .ledger-detail-text {
+      display: -webkit-box;
+      overflow: hidden;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 3;
+      line-clamp: 3;
+      line-height: 1.45;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+
+    .ledger-detail.expanded .ledger-detail-text {
+      display: block;
+      overflow: visible;
+    }
+
+    .ledger-detail-toggle {
+      border: 0;
+      background: transparent;
+      color: var(--accent);
+      cursor: pointer;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 900;
+      padding: 5px 0 0;
+    }
+
+    .ledger-detail-toggle[hidden] {
+      display: none;
+    }
+
+    .ledger-scroll-dock {
+      height: 18px;
+      overflow-x: auto;
+      overflow-y: hidden;
+      background: #ffffff;
+      border-top: 1px solid var(--line);
+      z-index: 6;
+    }
+
+    .ledger-scroll-dock.is-fixed {
+      position: fixed;
+      bottom: 0;
+      box-shadow: 0 -5px 12px rgba(24, 48, 43, 0.12);
+    }
+
+    .ledger-scroll-spacer {
+      height: 1px;
+    }
+
     .search-toolbar {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
@@ -2461,13 +2585,18 @@
                 </div>
               </div>
             </div>
-            <div class="panel-body table-wrap">
-              <table>
-                <thead>
-                  <tr id="ledgerHeadRow"><th>Date</th><th>Journal</th><th>Order / Transfer No.</th><th>Source</th><th>Details</th><th>Account</th><th>Direction</th><th>USD</th><th>ETB</th><th>EUR</th><th>ERN</th></tr>
-                </thead>
-                <tbody id="ledgerRows"></tbody>
-              </table>
+            <div class="ledger-table-region" id="ledgerTableRegion">
+              <div class="panel-body table-wrap ledger-table-wrap" id="ledgerTableWrap">
+                <table class="ledger-table" id="ledgerTable">
+                  <thead>
+                    <tr id="ledgerHeadRow"><th>Date</th><th>Journal</th><th>Order / Transfer No.</th><th>Source</th><th>Details</th><th>Account</th><th>Direction</th><th>USD</th><th>ETB</th><th>EUR</th><th>ERN</th></tr>
+                  </thead>
+                  <tbody id="ledgerRows"></tbody>
+                </table>
+              </div>
+              <div class="ledger-scroll-dock hidden" id="ledgerScrollDock" aria-label="Ledger horizontal scrollbar">
+                <div class="ledger-scroll-spacer" id="ledgerScrollSpacer"></div>
+              </div>
             </div>
             <div class="panel-body trial-balance-section" id="trialBalanceSection" data-master-action>
               <div class="trial-balance-head">
@@ -2861,6 +2990,9 @@
     const processingTransferIds = new Set();
     const receivablePaymentDrafts = new Map();
     const expandedCompactOrderIds = new Set();
+    const expandedLedgerDetailKeys = new Set();
+    let ledgerScrollUpdateFrame = null;
+    let syncingLedgerScroll = false;
     const authIdleMs = 1000 * 60 * 60 * 3;
     const maxProofFileBytes = 4 * 1024 * 1024;
     const supportedCurrencies = ["USD", "ETB", "EUR", "ERN"];
@@ -3113,7 +3245,8 @@
           orderVisibilityPermissions: ["Agent", "Special Agent"].includes(actor.role)
             ? normalizeOrderVisibilityPermissions(actor.orderVisibilityPermissions)
             : normalizeOrderVisibilityPermissions(),
-          incomeStatementVisible: actor.role === "Master" ? true : actor.incomeStatementVisible !== false
+          incomeStatementVisible: actor.role === "Master" ? true : actor.incomeStatementVisible !== false,
+          managedByMaster: actor.role !== "Master" && actor.managedByMaster === true
         };
       });
     }
@@ -3526,6 +3659,7 @@
       startInactivityWatch();
       els.authScreen.classList.add("hidden");
       renderAll();
+      setView(viewFromLocation() || state.activeView, { historyMode: "replace" });
     }
 
     function showAuthError(el, message) {
@@ -3597,6 +3731,10 @@
       receivableRows: document.getElementById("receivableRows"),
       ledgerRows: document.getElementById("ledgerRows"),
       ledgerHeadRow: document.getElementById("ledgerHeadRow"),
+      ledgerTable: document.getElementById("ledgerTable"),
+      ledgerTableWrap: document.getElementById("ledgerTableWrap"),
+      ledgerScrollDock: document.getElementById("ledgerScrollDock"),
+      ledgerScrollSpacer: document.getElementById("ledgerScrollSpacer"),
       trialBalanceSection: document.getElementById("trialBalanceSection"),
       trialBalanceToggle: document.getElementById("trialBalanceToggle"),
       trialBalanceToggleText: document.getElementById("trialBalanceToggleText"),
@@ -4560,6 +4698,25 @@
       return state.actors.filter((actor) => actor.active !== false);
     }
 
+    function nextManagedActorId() {
+      const reservedIds = new Set([
+        ...state.actors.map((actor) => actor.id),
+        ...(state.deletedActorIds || [])
+      ]);
+      const highestActorId = Array.from(reservedIds).reduce((highest, actorId) => {
+        const match = String(actorId || "").match(/^ACT-(\d+)$/);
+        return match ? Math.max(highest, Number(match[1])) : highest;
+      }, 0);
+      let counter = Math.max(Number(state.actorCounter || 0), highestActorId);
+      let actorId = "";
+      do {
+        counter += 1;
+        actorId = `ACT-${counter}`;
+      } while (reservedIds.has(actorId));
+      state.actorCounter = counter;
+      return actorId;
+    }
+
     function sessionActorProfile() {
       const membership = currentAuth?.membership;
       if (!membership || membership.role === "Master" || membership.role === "Owner") return null;
@@ -4574,7 +4731,8 @@
         active: true,
         transferEnabled: true,
         transferMode: "master",
-        incomeStatementVisible: true
+        incomeStatementVisible: true,
+        managedByMaster: false
       };
     }
 
@@ -4610,7 +4768,10 @@
 
     function selectedActorIsOwnLogin() {
       if (!currentAuth) return true;
-      if (currentAuth.membership?.role === "Master") return selectedActor()?.role === "Master";
+      if (currentAuth.membership?.role === "Master") {
+        const actor = selectedActor();
+        return actor?.role === "Master" || actor?.managedByMaster === true;
+      }
       return selectedActor()?.id === currentAuth.membership?.actorId;
     }
 
@@ -4958,7 +5119,7 @@
       }
       els.profileList.innerHTML = actors.map((actor) => `
         <button class="profile-button ${actor.id === state.selectedActorId ? "active" : ""}" type="button" data-profile-id="${actor.id}">
-          <strong>${actor.name}</strong>
+          <strong>${actor.name}${actor.managedByMaster ? " (Managed)" : ""}</strong>
           <span>${actor.role} · ${actor.currency}</span>
         </button>
       `).join("");
@@ -5388,6 +5549,7 @@
       if (resetForm) resetForm.classList.toggle("hidden", role !== "Master");
       if (!allowedViews.includes(state.activeView)) {
         state.activeView = allowedViews[0] || "dashboard";
+        if (currentAuth) updateViewHistory(state.activeView, "replace");
       }
     }
 
@@ -5421,7 +5583,7 @@
             <td>${nameCell}</td>
             <td>${escapeHtml(actor.role)}</td>
             <td>${currencyCell}</td>
-            <td><span class="state-pill ${actor.active === false ? "danger" : "good"}">${actor.active === false ? "Inactive" : "Active"}</span></td>
+            <td><span class="state-pill ${actor.active === false ? "danger" : "good"}">${actor.active === false ? "Inactive" : actor.managedByMaster ? "Active / Managed" : "Active"}</span></td>
             <td>
               <button class="btn ${removable ? "danger" : "secondary"} remove-actor" data-id="${actor.id}" type="button" ${removable ? "" : "disabled"}>
                 Remove
@@ -6502,6 +6664,35 @@
       return 7 + supportedCurrencies.length + (showOrderInfo ? 5 : 0) + (showPaidOutInfo ? 1 : 0);
     }
 
+    function ledgerHeaderCell(header) {
+      const linesByHeader = {
+        "Order / Transfer No.": ["Order /", "Transfer No."],
+        "Ordering Broker": ["Ordering", "Broker"],
+        "Ordered Amount": ["Ordered", "Amount"],
+        "Payout Currency": ["Payout", "Currency"]
+      };
+      const classesByHeader = {
+        Date: "ledger-date-cell",
+        Journal: "ledger-journal-cell",
+        "Order / Transfer No.": "ledger-reference-cell",
+        Source: "ledger-source-cell",
+        Details: "ledger-details-cell",
+        "Ordering Broker": "ledger-order-info-cell ledger-ordering-cell",
+        "Ordered Amount": "ledger-order-info-cell ledger-ordered-cell",
+        Rate: "ledger-order-info-cell ledger-rate-cell",
+        "%": "ledger-order-info-cell ledger-percent-cell",
+        "Payout Currency": "ledger-order-info-cell ledger-payout-cell",
+        "Paid Out": "ledger-order-info-cell ledger-paid-out-cell",
+        Account: "ledger-account-cell",
+        Direction: "ledger-direction-cell"
+      };
+      const lines = linesByHeader[header];
+      const content = lines
+        ? `<span class="ledger-head-lines">${lines.map((line) => `<span>${escapeHtml(line)}</span>`).join("")}</span>`
+        : escapeHtml(header);
+      return `<th class="${classesByHeader[header] || ""}">${content}</th>`;
+    }
+
     function renderLedgerHeader(showOrderInfo, showPaidOutInfo = false) {
       const headers = ["Date", "Journal", "Order / Transfer No.", "Source", "Details"];
       if (showOrderInfo) {
@@ -6509,7 +6700,7 @@
         if (showPaidOutInfo) headers.push("Paid Out");
       }
       headers.push("Account", "Direction", ...supportedCurrencies);
-      els.ledgerHeadRow.innerHTML = headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("");
+      els.ledgerHeadRow.innerHTML = headers.map(ledgerHeaderCell).join("");
     }
 
     function ledgerOrderPercent(order) {
@@ -6531,7 +6722,14 @@
 
     function ledgerOrderInfoCells(line, showPaidOutInfo = false) {
       const order = orderForLedgerLine(line);
-      if (!order) return `<td></td><td></td><td></td><td></td><td></td>${showPaidOutInfo ? "<td></td>" : ""}`;
+      if (!order) return `
+        <td class="ledger-order-info-cell ledger-ordering-cell"></td>
+        <td class="ledger-order-info-cell ledger-ordered-cell"></td>
+        <td class="ledger-order-info-cell ledger-rate-cell"></td>
+        <td class="ledger-order-info-cell ledger-percent-cell"></td>
+        <td class="ledger-order-info-cell ledger-payout-cell"></td>
+        ${showPaidOutInfo ? '<td class="ledger-order-info-cell ledger-paid-out-cell"></td>' : ""}
+      `;
       const sourceCurrency = order.sourceCurrency || "USD";
       const sourceAmount = `${formatMinor(order.sourceAmountMinor || 0, sourceCurrency)} ${sourceCurrency}`;
       const rate = Number(order.rate || 0);
@@ -6539,12 +6737,12 @@
       const payoutCurrency = order.payoutCurrency || sourceCurrency;
       const paidOut = compactCurrencyAmount(payoutCurrency, order.payoutAmountMinor || order.sourceAmountMinor || 0);
       return `
-        <td>${escapeHtml(order.broker || "")}</td>
-        <td>${escapeHtml(sourceAmount)}</td>
-        <td>${Number.isFinite(rate) && rate > 0 ? escapeHtml(formatRate(rate)) : ""}</td>
-        <td>${percent === null ? "" : `${escapeHtml(formatRate(percent))}%`}</td>
-        <td>${escapeHtml(payoutCurrency)}</td>
-        ${showPaidOutInfo ? `<td>${escapeHtml(paidOut)}</td>` : ""}
+        <td class="ledger-order-info-cell ledger-ordering-cell">${escapeHtml(order.broker || "")}</td>
+        <td class="ledger-order-info-cell ledger-ordered-cell">${escapeHtml(sourceAmount)}</td>
+        <td class="ledger-order-info-cell ledger-rate-cell">${Number.isFinite(rate) && rate > 0 ? escapeHtml(formatRate(rate)) : ""}</td>
+        <td class="ledger-order-info-cell ledger-percent-cell">${percent === null ? "" : `${escapeHtml(formatRate(percent))}%`}</td>
+        <td class="ledger-order-info-cell ledger-payout-cell">${escapeHtml(payoutCurrency)}</td>
+        ${showPaidOutInfo ? `<td class="ledger-order-info-cell ledger-paid-out-cell">${escapeHtml(paidOut)}</td>` : ""}
       `;
     }
 
@@ -7670,6 +7868,103 @@
       `;
     }
 
+    function ledgerDetailKey(line) {
+      return [
+        line.entryId,
+        line.journal,
+        line.orderId,
+        line.transferId,
+        line.source,
+        line.account,
+        line.direction,
+        line.currency,
+        line.amountMinor,
+        line.postedAt
+      ].map((value) => String(value ?? "")).join("|");
+    }
+
+    function ledgerDetailsCell(line, actor, ledgerActor) {
+      const details = ledgerLineDetails(line, actor, ledgerActor);
+      if (actor?.role !== "Master") {
+        return `<td class="ledger-details-cell">${escapeHtml(details)}</td>`;
+      }
+      const detailKey = ledgerDetailKey(line);
+      const expanded = expandedLedgerDetailKeys.has(detailKey);
+      return `
+        <td class="ledger-details-cell">
+          <div class="ledger-detail${expanded ? " expanded" : ""}" data-ledger-detail-key="${escapeHtml(detailKey)}">
+            <span class="ledger-detail-text">${escapeHtml(details)}</span>
+            <button class="ledger-detail-toggle" type="button" aria-expanded="${expanded ? "true" : "false"}">${expanded ? "Show less" : "Show more"}</button>
+          </div>
+        </td>
+      `;
+    }
+
+    function refreshLedgerDetailToggles() {
+      els.ledgerRows.querySelectorAll(".ledger-detail").forEach((detail) => {
+        const detailText = detail.querySelector(".ledger-detail-text");
+        const button = detail.querySelector(".ledger-detail-toggle");
+        if (!detailText || !button) return;
+        if (detail.classList.contains("expanded")) {
+          button.hidden = false;
+          return;
+        }
+        button.hidden = detailText.scrollHeight <= detailText.clientHeight + 1;
+      });
+    }
+
+    function updateLedgerScrollDock() {
+      const wrap = els.ledgerTableWrap;
+      const dock = els.ledgerScrollDock;
+      const spacer = els.ledgerScrollSpacer;
+      const ledgerView = document.getElementById("ledger");
+      if (!wrap || !dock || !spacer || !ledgerView) return;
+      const hasOverflow = wrap.scrollWidth > wrap.clientWidth + 1;
+      const viewActive = ledgerView.classList.contains("active");
+      if (!viewActive || !hasOverflow) {
+        dock.classList.add("hidden");
+        dock.classList.remove("is-fixed");
+        dock.style.removeProperty("left");
+        dock.style.removeProperty("width");
+        return;
+      }
+      spacer.style.width = `${wrap.scrollWidth}px`;
+      const rect = wrap.getBoundingClientRect();
+      const dockHeight = dock.offsetHeight || 18;
+      const intersectsViewport = rect.bottom > 0 && rect.top < window.innerHeight - dockHeight;
+      if (!intersectsViewport) {
+        dock.classList.add("hidden");
+        dock.classList.remove("is-fixed");
+        dock.style.removeProperty("left");
+        dock.style.removeProperty("width");
+        return;
+      }
+      dock.classList.remove("hidden");
+      const shouldFloat = rect.bottom > window.innerHeight && rect.top < window.innerHeight - dockHeight;
+      dock.classList.toggle("is-fixed", shouldFloat);
+      if (shouldFloat) {
+        dock.style.left = `${rect.left}px`;
+        dock.style.width = `${rect.width}px`;
+      } else {
+        dock.style.removeProperty("left");
+        dock.style.removeProperty("width");
+      }
+      if (!syncingLedgerScroll && dock.scrollLeft !== wrap.scrollLeft) {
+        syncingLedgerScroll = true;
+        dock.scrollLeft = wrap.scrollLeft;
+        syncingLedgerScroll = false;
+      }
+    }
+
+    function scheduleLedgerLayoutUpdate() {
+      if (ledgerScrollUpdateFrame !== null) return;
+      ledgerScrollUpdateFrame = window.requestAnimationFrame(() => {
+        ledgerScrollUpdateFrame = null;
+        refreshLedgerDetailToggles();
+        updateLedgerScrollDock();
+      });
+    }
+
     function renderLedger() {
       const { actor, ledgerActor, lines: visibleLines } = currentLedgerContext();
       const showOrderInfo = showMasterOrderInfoColumns(actor, ledgerActor);
@@ -7683,23 +7978,25 @@
         const emptyName = actor?.role === "Master" && ledgerActor ? `${escapeHtml(ledgerActor.name)} ledger is empty.` : "No journal entries posted. Ledger balance is zero.";
         els.ledgerRows.innerHTML = `<tr><td colspan="${ledgerColumnCount(showOrderInfo, showPaidOutInfo)}">${emptyName}</td></tr>`;
         els.metricLines.textContent = "0";
+        scheduleLedgerLayoutUpdate();
         return;
       }
       const lineRows = visibleLines.map((line) => `
         <tr class="${line.source === "ORDER_VOID" ? "void-row" : ""}">
-          <td>${escapeHtml(displayDate(line.postedAt))}</td>
-          <td><strong>${line.journal}</strong></td>
-          <td>${escapeHtml(ledgerReferenceNumber(line, actor, ledgerActor))}</td>
-          <td>${line.source}</td>
-          <td>${escapeHtml(ledgerLineDetails(line, actor, ledgerActor))}</td>
+          <td class="ledger-date-cell">${escapeHtml(displayDate(line.postedAt))}</td>
+          <td class="ledger-journal-cell"><strong>${escapeHtml(line.journal)}</strong></td>
+          <td class="ledger-reference-cell">${escapeHtml(ledgerReferenceNumber(line, actor, ledgerActor))}</td>
+          <td class="ledger-source-cell">${escapeHtml(line.source)}</td>
+          ${ledgerDetailsCell(line, actor, ledgerActor)}
           ${showOrderInfo ? ledgerOrderInfoCells(line, showPaidOutInfo) : ""}
-          <td>${line.account}</td>
-          <td class="${toneClass(line.direction.toLowerCase())}"><strong>${line.direction}</strong></td>
+          <td class="ledger-account-cell">${escapeHtml(line.account)}</td>
+          <td class="ledger-direction-cell ${toneClass(line.direction.toLowerCase())}"><strong>${escapeHtml(line.direction)}</strong></td>
           ${currencyCells(line.currency, line.amountMinor)}
         </tr>
       `).join("");
       els.ledgerRows.innerHTML = lineRows + ledgerBalanceRows(visibleLines, ledgerActor, showOrderInfo, showPaidOutInfo);
       els.metricLines.textContent = String(visibleLines.length);
+      scheduleLedgerLayoutUpdate();
     }
 
     function archivedIncomeStatementRows(actor) {
@@ -8445,9 +8742,11 @@
     function actorCanPayOrder(order, actor = selectedActor()) {
       if (!order || order.state !== "Assigned") return false;
       if (!["Agent", "Special Agent", "Special Broker"].includes(actor?.role)) return false;
-      if (currentAuth?.membership?.role === "Master" || currentAuth?.membership?.role === "Owner") return false;
+      if (currentAuth?.membership?.role === "Owner") return false;
+      if (currentAuth?.membership?.role === "Master" && actor?.managedByMaster !== true) return false;
       if (!currentAuth) return order.agent === actor.name || (order.agentActorId && order.agentActorId === actor.id);
       if (order.agent === actor.name || (order.agentActorId && order.agentActorId === actor.id)) return true;
+      if (currentAuth.membership?.role === "Master") return false;
       const membership = currentAuth.membership || {};
       const role = membership.actorRole || actor?.role;
       if (!["Agent", "Special Agent", "Special Broker"].includes(role)) return false;
@@ -8459,9 +8758,11 @@
     function actorCanRequestVoidOrder(order, actor = selectedActor()) {
       if (!order || order.state !== "Paid" || order.voidRequested || order.locked) return false;
       if (!["Agent", "Special Agent", "Special Broker"].includes(actor?.role)) return false;
-      if (currentAuth?.membership?.role === "Master" || currentAuth?.membership?.role === "Owner") return false;
+      if (currentAuth?.membership?.role === "Owner") return false;
+      if (currentAuth?.membership?.role === "Master" && actor?.managedByMaster !== true) return false;
       if (!currentAuth) return order.agent === actor.name || (order.agentActorId && order.agentActorId === actor.id);
       if (order.agent === actor.name || (order.agentActorId && order.agentActorId === actor.id)) return true;
+      if (currentAuth.membership?.role === "Master") return false;
       const membership = currentAuth.membership || {};
       const role = membership.actorRole || actor?.role;
       if (!["Agent", "Special Agent", "Special Broker"].includes(role)) return false;
@@ -8561,18 +8862,53 @@
       }
     }
 
-    function setView(viewId) {
+    function viewFromLocation() {
+      try {
+        const viewId = decodeURIComponent(window.location.hash.replace(/^#/, ""));
+        return Object.prototype.hasOwnProperty.call(titles, viewId) ? viewId : "";
+      } catch {
+        return "";
+      }
+    }
+
+    function updateViewHistory(viewId, mode = "push") {
+      const currentHistoryState = window.history.state;
+      const historyState = {
+        ...(currentHistoryState && typeof currentHistoryState === "object" ? currentHistoryState : {}),
+        haderaPayView: true,
+        view: viewId
+      };
+      const url = new URL(window.location.href);
+      url.hash = encodeURIComponent(viewId);
+      if (mode === "replace") {
+        window.history.replaceState(historyState, "", url);
+      } else {
+        window.history.pushState(historyState, "", url);
+      }
+    }
+
+    function displayView(viewId) {
+      const [title, subtitle] = titles[viewId] || titles.dashboard;
+      document.querySelectorAll(".view").forEach((view) => view.classList.toggle("active", view.id === viewId));
+      document.querySelectorAll(".nav button").forEach((button) => button.classList.toggle("active", button.dataset.view === viewId));
+      els.pageTitle.textContent = title;
+      els.pageSubtitle.textContent = subtitle;
+    }
+
+    function setView(viewId, { historyMode = "push" } = {}) {
       if (!canUseView(viewId)) {
         viewId = privilegeViews(selectedActor()?.role)[0] || "dashboard";
       }
+      const viewChanged = state.activeView !== viewId;
       state.activeView = viewId;
-      document.querySelectorAll(".view").forEach((view) => view.classList.toggle("active", view.id === viewId));
-      document.querySelectorAll(".nav button").forEach((button) => button.classList.toggle("active", button.dataset.view === viewId));
-      const [title, subtitle] = titles[viewId];
-      els.pageTitle.textContent = title;
-      els.pageSubtitle.textContent = subtitle;
+      displayView(viewId);
+      if (historyMode === "replace" || (historyMode === "push" && viewChanged)) {
+        updateViewHistory(viewId, historyMode);
+      }
       closeDrawer();
       saveState();
+      scheduleLedgerLayoutUpdate();
+      return viewId;
     }
 
     function openDrawer() {
@@ -8789,6 +9125,14 @@
       button.addEventListener("click", () => setView(button.dataset.view));
     });
 
+    window.addEventListener("popstate", (event) => {
+      if (!currentAuth) return;
+      const historyView = event.state?.haderaPayView ? event.state.view : "";
+      const requestedView = historyView || viewFromLocation();
+      const displayedView = setView(requestedView, { historyMode: "none" });
+      if (displayedView !== requestedView) updateViewHistory(displayedView, "replace");
+    });
+
     document.addEventListener("click", async (event) => {
       const dashboardMetric = event.target.closest("[data-dashboard-view]");
       if (dashboardMetric) {
@@ -8799,7 +9143,7 @@
       if (!profileButton) return;
       state.selectedActorId = profileButton.dataset.profileId;
       applyPrivileges();
-      setView(canUseView(state.activeView) ? state.activeView : privilegeViews(selectedActor()?.role)[0]);
+      setView(canUseView(state.activeView) ? state.activeView : privilegeViews(selectedActor()?.role)[0], { historyMode: "replace" });
       renderAll();
     });
 
@@ -8830,7 +9174,7 @@
       actor.transferMode = transferModeFromTargets(toMaster, toActors);
       actor.transferEnabled = actor.transferMode !== "none";
       if (state.selectedActorId === actor.id && state.activeView === "transfers" && actor.transferEnabled === false) {
-        state.activeView = "dashboard";
+        setView("dashboard", { historyMode: "replace" });
       }
       renderAll();
     });
@@ -9216,6 +9560,47 @@
       saveState();
     });
 
+    els.ledgerRows.addEventListener("click", (event) => {
+      const button = event.target.closest(".ledger-detail-toggle");
+      const detail = button?.closest(".ledger-detail");
+      if (!button || !detail) return;
+      const detailKey = detail.dataset.ledgerDetailKey || "";
+      const expanded = !detail.classList.contains("expanded");
+      detail.classList.toggle("expanded", expanded);
+      button.textContent = expanded ? "Show less" : "Show more";
+      button.setAttribute("aria-expanded", expanded ? "true" : "false");
+      if (expanded) {
+        expandedLedgerDetailKeys.add(detailKey);
+      } else {
+        expandedLedgerDetailKeys.delete(detailKey);
+      }
+      scheduleLedgerLayoutUpdate();
+    });
+
+    els.ledgerTableWrap.addEventListener("scroll", () => {
+      if (!syncingLedgerScroll) {
+        syncingLedgerScroll = true;
+        els.ledgerScrollDock.scrollLeft = els.ledgerTableWrap.scrollLeft;
+        syncingLedgerScroll = false;
+      }
+      scheduleLedgerLayoutUpdate();
+    }, { passive: true });
+
+    els.ledgerScrollDock.addEventListener("scroll", () => {
+      if (syncingLedgerScroll) return;
+      syncingLedgerScroll = true;
+      els.ledgerTableWrap.scrollLeft = els.ledgerScrollDock.scrollLeft;
+      syncingLedgerScroll = false;
+    }, { passive: true });
+
+    window.addEventListener("scroll", scheduleLedgerLayoutUpdate, { passive: true });
+    window.addEventListener("resize", scheduleLedgerLayoutUpdate, { passive: true });
+    if (window.ResizeObserver) {
+      const ledgerResizeObserver = new ResizeObserver(scheduleLedgerLayoutUpdate);
+      ledgerResizeObserver.observe(els.ledgerTable);
+      ledgerResizeObserver.observe(els.ledgerTableWrap);
+    }
+
     els.incomeStatementToggle.addEventListener("click", () => {
       state.incomeStatementExpanded = state.incomeStatementExpanded !== true;
       renderLedger();
@@ -9242,31 +9627,34 @@
       saveState();
     });
 
-    document.getElementById("actorForm").addEventListener("submit", (event) => {
+    document.getElementById("actorForm").addEventListener("submit", async (event) => {
       event.preventDefault();
+      if (currentAuth && !signedInAsMaster()) return;
       const nameInput = document.getElementById("actorName");
       const roleInput = document.getElementById("actorRole");
       const currencyInput = document.getElementById("actorCurrency");
       const workingInput = document.getElementById("actorWorkingCurrencies");
+      const submitButton = event.submitter;
       const name = nameInput.value.trim();
       const exists = state.actors.some((actor) => actor.name.toLowerCase() === name.toLowerCase());
       const invalid = !name || exists;
       els.actorError.textContent = exists ? "Actor name must be unique." : "Actor name is required.";
       els.actorError.classList.toggle("visible", invalid);
-      if (invalid) return;
+      if (invalid || submitButton?.disabled) return;
 
-      state.actorCounter += 1;
+      if (submitButton) submitButton.disabled = true;
       const selectedWorkingCurrencies = Array.from(workingInput.querySelectorAll("input:checked"))
         .map((input) => input.value)
         .filter((currency) => supportedCurrencies.includes(currency));
       const workingCurrencies = normalizedWorkingCurrenciesForRole(roleInput.value, currencyInput.value, selectedWorkingCurrencies);
       const hasSpecialPayout = actorHasSpecialPayout(roleInput.value);
       state.actors.push({
-        id: "ACT-" + state.actorCounter,
+        id: nextManagedActorId(),
         name,
         role: roleInput.value,
         currency: currencyInput.value,
         active: true,
+        managedByMaster: true,
         transferEnabled: true,
         transferMode: "master",
         incomeStatementVisible: true,
@@ -9285,6 +9673,9 @@
       nameInput.value = "";
       els.actorError.classList.remove("visible");
       renderAll();
+      await saveStateNow();
+      if (submitButton) submitButton.disabled = false;
+      notifyEvent("Actor created", `${name} is active and managed by Master.`);
     });
 
     document.getElementById("resetForm").addEventListener("submit", async (event) => {
@@ -10211,6 +10602,7 @@
 
     function renderAll() {
       applyPrivileges();
+      displayView(state.activeView);
       repairPostedOrderStates();
       renderCurrencyOptions();
       renderActorSelectors();

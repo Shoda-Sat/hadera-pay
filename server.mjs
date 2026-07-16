@@ -338,6 +338,7 @@ function workspaceActors(db, workspaceId) {
       transferEnabled: true,
       transferMode: "master",
       incomeStatementVisible: true,
+      managedByMaster: false,
     }));
 }
 
@@ -531,7 +532,11 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   );
   nextState.chatConversations = mergeChatConversations(currentState.chatConversations, incomingState.chatConversations)
     .filter((chat) => !deletedChatIds.has(chat?.id));
-  nextState.actors = mergeById(membershipActors, nextState.actors);
+  nextState.actors = mergeById(membershipActors, nextState.actors)
+    .map((actor) => ({
+      ...actor,
+      managedByMaster: actor?.role !== "Master" && !activeActorIds.has(actor?.id),
+    }));
   nextState.actors = nextState.actors.filter((actor) => activeActorIds.has(actor?.id) || !deletedActorIds.has(actor?.id));
   nextState.deletedActorIds = Array.from(deletedActorIds);
   nextState.deletedActorNames = [];
