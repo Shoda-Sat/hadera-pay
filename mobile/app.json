@@ -2,14 +2,14 @@
   "expo": {
     "name": "HaderaPay",
     "slug": "haderapay-mobile",
-    "version": "0.1.2",
+    "version": "0.1.3",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "scheme": "haderapay",
     "icon": "./assets/haderapay-icon.jpg",
     "android": {
       "package": "com.haderapay.mobile",
-      "versionCode": 3,
+      "versionCode": 4,
       "adaptiveIcon": {
         "foregroundImage": "./assets/haderapay-icon.jpg",
         "backgroundColor": "#ffffff"

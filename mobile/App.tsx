@@ -12,9 +12,14 @@ import {
   View
 } from "react-native";
 import {
+  Archive as ArchiveIcon,
   ArrowRight,
+  CalendarDays,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   LayoutDashboard,
+  LockKeyhole,
   LogIn,
   LogOut,
   RefreshCw,
@@ -39,6 +44,7 @@ import { colors, radius, shadow, spacing } from "./src/theme";
 import type {
   ActorRecord,
   AppScreen,
+  ArchiveRecord,
   AuthMode,
   Currency,
   FundingType,
@@ -124,6 +130,30 @@ function orderStateLabel(session: UserSession, order: OrderRecord): string {
     return `Assigned to '${order.agent}'`;
   }
   return order.state;
+}
+
+function archiveMonthKey(value: string | undefined): string {
+  const date = new Date(value || "");
+  if (Number.isNaN(date.getTime())) return "";
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function archiveMonthLabel(monthKey: string): string {
+  const [year, month] = monthKey.split("-").map(Number);
+  if (!year || !month) return "Unknown month";
+  return new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric" }).format(new Date(year, month - 1, 1));
+}
+
+function archiveClosedLabel(value: string | undefined): string {
+  const date = new Date(value || "");
+  return Number.isNaN(date.getTime()) ? "Unknown close time" : date.toLocaleString();
+}
+
+function visibleArchivesFor(session: UserSession, workspaceState: WorkspaceState | null): ArchiveRecord[] {
+  return (workspaceState?.archives || [])
+    .filter((archive) => session.actorRole === "Master" || archive.actor === session.actorName)
+    .slice()
+    .sort((a, b) => new Date(b.closedAt || 0).getTime() - new Date(a.closedAt || 0).getTime());
 }
 
 function savedCustomersFor(session: UserSession, workspaceState: WorkspaceState | null, kind: SavedCustomerRecord["kind"]): SavedCustomerRecord[] {
@@ -273,6 +303,14 @@ export default function App() {
           )}
           {currentScreen === "settlement" && (
             <SettlementScreen session={session} workspaceState={workspaceState} />
+          )}
+          {currentScreen === "archive" && (
+            <ArchiveScreen
+              session={session}
+              workspaceState={workspaceState}
+              stateLoading={stateLoading}
+              onRefresh={refreshWorkspace}
+            />
           )}
           {orderFlowAllowed && currentScreen === "transfer" && (
             <TransferScreen
@@ -426,9 +464,14 @@ function AppTopBar({
       <BrandHeader subtitle={session.workspace} />
       <View style={styles.sessionTools}>
         <Pill label={session.actorRole} tone={canCreateOrders(session) ? "good" : "neutral"} />
-        <Pressable accessibilityRole="button" accessibilityLabel="Logout" onPress={onLogout} style={styles.iconButton} disabled={loggingOut}>
-          {loggingOut ? <ActivityIndicator size="small" color={colors.accent} /> : <LogOut size={20} color={colors.ink} />}
-        </Pressable>
+        <Button
+          label="Log out"
+          variant="secondary"
+          onPress={onLogout}
+          loading={loggingOut}
+          icon={<LogOut size={18} color={colors.ink} />}
+          style={styles.logoutButton}
+        />
       </View>
     </View>
   );
@@ -551,6 +594,175 @@ function SettlementScreen({
           }) : <Text style={styles.mutedText}>No actors in this category.</Text>}
         </View>
       )) : <View style={styles.settlementGroup}><Text style={styles.mutedText}>No settlement balances yet.</Text></View>}
+    </View>
+  );
+}
+
+function ArchiveScreen({
+  session,
+  workspaceState,
+  stateLoading,
+  onRefresh
+}: {
+  session: UserSession;
+  workspaceState: WorkspaceState | null;
+  stateLoading: boolean;
+  onRefresh: () => void;
+}) {
+  const [selectedMonth, setSelectedMonth] = useState("");
+  const [monthMenuOpen, setMonthMenuOpen] = useState(false);
+  const [expandedStatements, setExpandedStatements] = useState<string[]>([]);
+  const archives = visibleArchivesFor(session, workspaceState);
+  const months = Array.from(new Set(archives.map((archive) => archiveMonthKey(archive.closedAt)).filter(Boolean))).sort().reverse();
+  const activeMonth = months.includes(selectedMonth) ? selectedMonth : "";
+  const filteredArchives = activeMonth
+    ? archives.filter((archive) => archiveMonthKey(archive.closedAt) === activeMonth)
+    : archives;
+  const monthOptions = ["", ...months];
+
+  const toggleStatement = (statementId: string) => {
+    setExpandedStatements((current) => current.includes(statementId)
+      ? current.filter((id) => id !== statementId)
+      : [...current, statementId]);
+  };
+
+  return (
+    <View style={styles.screen}>
+      <HeaderTitle title="Archive" subtitle="Monthly closed statements" />
+      <Button
+        label="Refresh archive"
+        variant="secondary"
+        onPress={onRefresh}
+        loading={stateLoading}
+        icon={<RefreshCw size={17} color={colors.ink} />}
+      />
+      <Panel title="Closed month" badge={`${filteredArchives.length} close${filteredArchives.length === 1 ? "" : "s"}`}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Select closed month"
+          onPress={() => setMonthMenuOpen((open) => !open)}
+          style={styles.archiveSelector}
+        >
+          <CalendarDays size={19} color={colors.accent} />
+          <Text style={styles.archiveSelectorText}>{activeMonth ? archiveMonthLabel(activeMonth) : "All months"}</Text>
+          <ChevronDown size={19} color={colors.muted} />
+        </Pressable>
+        {monthMenuOpen ? (
+          <View style={styles.archiveMonthMenu}>
+            {monthOptions.map((month) => {
+              const active = month === activeMonth;
+              return (
+                <Pressable
+                  key={month || "all"}
+                  accessibilityRole="button"
+                  onPress={() => {
+                    setSelectedMonth(month);
+                    setMonthMenuOpen(false);
+                  }}
+                  style={[styles.archiveMonthOption, active && styles.archiveMonthOptionActive]}
+                >
+                  <Text style={[styles.archiveMonthOptionText, active && styles.archiveMonthOptionTextActive]}>
+                    {month ? archiveMonthLabel(month) : "All months"}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        ) : null}
+      </Panel>
+
+      {filteredArchives.length ? filteredArchives.map((archive, index) => {
+        const statementId = archive.id || `${archive.actor || "actor"}-${archive.closedAt || index}`;
+        const expanded = expandedStatements.includes(statementId);
+        const balanceRows = currencies
+          .map((currency) => ({ currency, netMinor: Number(archive.balances?.[currency] || 0) }))
+          .filter((row) => row.netMinor !== 0);
+        const orders = archive.orders || [];
+        const transfers = archive.transfers || [];
+        const ledger = archive.ledger || [];
+        const detailCount = orders.length + transfers.length + ledger.length;
+
+        return (
+          <Panel
+            key={statementId}
+            title={session.actorRole === "Master" ? archive.actor || "Actor" : "Closed statement"}
+            badge={archiveMonthLabel(archiveMonthKey(archive.closedAt))}
+          >
+            <View style={styles.archiveStatementHead}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.archiveStatementDate}>{archiveClosedLabel(archive.closedAt)}</Text>
+                <Text style={styles.archiveStatementReference}>{archive.id || "Archived close"}</Text>
+              </View>
+              <LockKeyhole size={20} color={colors.danger} />
+            </View>
+
+            {balanceRows.length ? balanceRows.map((row) => {
+              const actorOwesMaster = row.netMinor > 0;
+              const goodForViewer = session.actorRole === "Master" ? actorOwesMaster : !actorOwesMaster;
+              return (
+                <View key={`${statementId}-${row.currency}`} style={styles.archiveBalanceRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.archiveBalanceCurrency}>{row.currency}</Text>
+                    <Text style={styles.archiveBalanceDirection}>
+                      {actorOwesMaster ? "Actor owes Master" : "Master owes Actor"}
+                    </Text>
+                  </View>
+                  <Text style={[styles.archiveBalanceAmount, goodForViewer ? styles.archiveBalanceGood : styles.archiveBalanceDanger]}>
+                    {compactAmount(row.currency, majorFromMinor(Math.abs(row.netMinor), row.currency))}
+                  </Text>
+                </View>
+              );
+            }) : <Text style={styles.mutedText}>Closed with a zero balance.</Text>}
+
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={expanded ? "Hide statement details" : "Show statement details"}
+              onPress={() => toggleStatement(statementId)}
+              style={styles.archiveToggle}
+            >
+              <Text style={styles.archiveToggleText}>{expanded ? "Hide details" : `Show details (${detailCount})`}</Text>
+              {expanded ? <ChevronUp size={18} color={colors.accent} /> : <ChevronDown size={18} color={colors.accent} />}
+            </Pressable>
+
+            {expanded ? (
+              <View style={styles.archiveDetails}>
+                {orders.map((order) => (
+                  <View key={`order-${statementId}-${order.id}`} style={styles.archiveDetailRow}>
+                    <Text style={styles.archiveDetailTitle}>Order {orderNumber(order, session)}</Text>
+                    <Text style={styles.archiveDetailMeta}>{order.receiverName || order.accountNumber || order.phoneNumber || "No receiver details"}</Text>
+                    <Text style={styles.archiveDetailAmount}>
+                      {compactAmount(order.sourceCurrency, majorFromMinor(order.sourceAmountMinor, order.sourceCurrency))} to {compactAmount(order.payoutCurrency, majorFromMinor(order.payoutAmountMinor, order.payoutCurrency))}
+                    </Text>
+                  </View>
+                ))}
+                {transfers.map((transfer, transferIndex) => {
+                  const currency = transfer.currency || transfer.sourceCurrency || session.currency;
+                  return (
+                    <View key={`transfer-${statementId}-${transfer.id || transferIndex}`} style={styles.archiveDetailRow}>
+                      <Text style={styles.archiveDetailTitle}>Transfer {transfer.id || transferIndex + 1}</Text>
+                      <Text style={styles.archiveDetailMeta}>{transfer.from || "Unknown"} to {transfer.to || "Unknown"}</Text>
+                      <Text style={styles.archiveDetailAmount}>{compactAmount(currency, majorFromMinor(Number(transfer.amountMinor || 0), currency))}</Text>
+                      {transfer.remarks ? <Text style={styles.archiveDetailMeta}>{transfer.remarks}</Text> : null}
+                    </View>
+                  );
+                })}
+                {ledger.map((line, lineIndex) => (
+                  <View key={`ledger-${statementId}-${line.entryId || line.journal || lineIndex}`} style={styles.archiveDetailRow}>
+                    <Text style={styles.archiveDetailTitle}>{line.source || "Ledger"} - {line.direction}</Text>
+                    <Text style={styles.archiveDetailMeta}>{line.details || line.account}</Text>
+                    <Text style={styles.archiveDetailAmount}>{compactAmount(line.currency, majorFromMinor(line.amountMinor, line.currency))}</Text>
+                  </View>
+                ))}
+                {!detailCount ? <Text style={styles.mutedText}>No archived transaction details.</Text> : null}
+              </View>
+            ) : null}
+          </Panel>
+        );
+      }) : (
+        <Panel title="No statements">
+          <Text style={styles.mutedText}>{activeMonth ? `No balances were closed in ${archiveMonthLabel(activeMonth)}.` : "No closed balances have been archived yet."}</Text>
+        </Panel>
+      )}
     </View>
   );
 }
@@ -819,7 +1031,8 @@ function BottomTabs({
 }) {
   const tabs: Array<{ id: AppScreen; label: string; Icon: IconComponent }> = [
     { id: "home", label: "Home", Icon: LayoutDashboard },
-    { id: "settlement", label: "Settlement", Icon: Scale }
+    { id: "settlement", label: "Settle", Icon: Scale },
+    { id: "archive", label: "Archive", Icon: ArchiveIcon }
   ];
   if (canCreateOrders(session)) {
     tabs.push(
@@ -896,15 +1109,9 @@ const styles = StyleSheet.create({
     alignItems: "flex-end",
     gap: spacing.sm
   },
-  iconButton: {
-    width: 42,
-    height: 42,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.line,
-    backgroundColor: colors.panel,
-    alignItems: "center",
-    justifyContent: "center"
+  logoutButton: {
+    minHeight: 40,
+    paddingHorizontal: spacing.md
   },
   screen: {
     gap: spacing.lg
@@ -1032,6 +1239,118 @@ const styles = StyleSheet.create({
   },
   settlementZero: {
     color: colors.muted
+  },
+  archiveSelector: {
+    minHeight: 46,
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: radius.md,
+    backgroundColor: colors.panel2,
+    paddingHorizontal: spacing.md,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm
+  },
+  archiveSelectorText: {
+    flex: 1,
+    color: colors.ink,
+    fontWeight: "800"
+  },
+  archiveMonthMenu: {
+    borderTopWidth: 1,
+    borderTopColor: colors.line
+  },
+  archiveMonthOption: {
+    minHeight: 42,
+    justifyContent: "center",
+    paddingHorizontal: spacing.md,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.line
+  },
+  archiveMonthOptionActive: {
+    backgroundColor: colors.accentSoft
+  },
+  archiveMonthOptionText: {
+    color: colors.ink,
+    fontWeight: "700"
+  },
+  archiveMonthOptionTextActive: {
+    color: colors.accent
+  },
+  archiveStatementHead: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.md
+  },
+  archiveStatementDate: {
+    color: colors.ink,
+    fontWeight: "900"
+  },
+  archiveStatementReference: {
+    color: colors.muted,
+    fontSize: 12,
+    marginTop: 2
+  },
+  archiveBalanceRow: {
+    minHeight: 58,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.md,
+    borderTopWidth: 1,
+    borderTopColor: colors.line,
+    paddingVertical: spacing.sm
+  },
+  archiveBalanceCurrency: {
+    color: colors.ink,
+    fontWeight: "900"
+  },
+  archiveBalanceDirection: {
+    color: colors.muted,
+    fontSize: 12,
+    marginTop: 2
+  },
+  archiveBalanceAmount: {
+    fontWeight: "900",
+    textAlign: "right"
+  },
+  archiveBalanceGood: {
+    color: colors.good
+  },
+  archiveBalanceDanger: {
+    color: colors.danger
+  },
+  archiveToggle: {
+    minHeight: 42,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    borderTopWidth: 1,
+    borderTopColor: colors.line
+  },
+  archiveToggleText: {
+    color: colors.accent,
+    fontWeight: "900"
+  },
+  archiveDetails: {
+    gap: 0
+  },
+  archiveDetailRow: {
+    borderTopWidth: 1,
+    borderTopColor: colors.line,
+    paddingVertical: spacing.md,
+    gap: 3
+  },
+  archiveDetailTitle: {
+    color: colors.ink,
+    fontWeight: "900"
+  },
+  archiveDetailMeta: {
+    color: colors.muted,
+    fontSize: 12
+  },
+  archiveDetailAmount: {
+    color: colors.ink,
+    fontWeight: "800"
   },
   quoteTop: {
     flexDirection: "row",

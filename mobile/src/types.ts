@@ -1,6 +1,6 @@
 export type Currency = "USD" | "ETB" | "EUR" | "ERN";
 export type AuthMode = "login" | "signup";
-export type AppScreen = "home" | "settlement" | "transfer" | "conversion" | "confirmation";
+export type AppScreen = "home" | "settlement" | "archive" | "transfer" | "conversion" | "confirmation";
 export type FundingType = "cash" | "credit";
 export type MembershipRole = "Owner" | "Master" | "Actor";
 export type ActorRole = "Owner" | "Master" | "Broker" | "Agent" | "Special Broker" | "Special Agent";
@@ -138,9 +138,36 @@ export interface LedgerLine {
 }
 
 export interface ArchiveRecord {
+  id?: string;
   actor?: string;
   closedAt?: string;
+  balances?: Partial<Record<Currency, number>>;
   orders?: OrderRecord[];
+  transfers?: Array<{
+    id?: string;
+    from?: string;
+    to?: string;
+    sourceCurrency?: Currency;
+    sourceAmountMinor?: number;
+    currency?: Currency;
+    amountMinor?: number;
+    rate?: string | number;
+    remarks?: string;
+    state?: string;
+    createdAt?: string;
+    sentAt?: string;
+    approvedAt?: string;
+    paidOutAt?: string;
+  }>;
+  ledger?: Array<LedgerLine & {
+    journal?: string;
+    entryId?: string;
+    transferId?: string;
+    orderId?: string;
+    source?: string;
+    postedAt?: string;
+    details?: string;
+  }>;
   [key: string]: unknown;
 }
 

@@ -2531,6 +2531,12 @@
                   <select id="archiveActorFilter"></select>
                 </div>
                 <div class="field">
+                  <label for="archiveMonthFilter">Closed month</label>
+                  <select id="archiveMonthFilter">
+                    <option value="">All months</option>
+                  </select>
+                </div>
+                <div class="field">
                   <label for="archiveDatePreset">Period</label>
                   <select id="archiveDatePreset">
                     <option value="custom">Custom dates</option>
@@ -3651,6 +3657,7 @@
       actorCount: document.getElementById("actorCount"),
       actorError: document.getElementById("actorError"),
       archiveActorFilter: document.getElementById("archiveActorFilter"),
+      archiveMonthFilter: document.getElementById("archiveMonthFilter"),
       archiveDatePreset: document.getElementById("archiveDatePreset"),
       archiveDateFrom: document.getElementById("archiveDateFrom"),
       archiveDateTo: document.getElementById("archiveDateTo"),
@@ -5113,8 +5120,12 @@
     }
 
     function renderChatGroups() {
+      const selectedMembers = new Set(Array.from(els.chatGroupMembers.selectedOptions || []).map((option) => option.value));
       const members = activeActors().filter((actor) => actor.role !== "Master");
       els.chatGroupMembers.innerHTML = members.map((actor) => `<option>${escapeHtml(actor.name)}</option>`).join("");
+      Array.from(els.chatGroupMembers.options).forEach((option) => {
+        option.selected = selectedMembers.has(option.value);
+      });
       els.chatGroupForm.classList.toggle("hidden", selectedActor()?.role !== "Master");
     }
 
@@ -6319,15 +6330,29 @@
       return { from: previous, to: latest };
     }
 
+    function archiveMonthKey(value) {
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return "";
+      return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+    }
+
+    function archiveMonthLabel(monthKey) {
+      const [year, month] = String(monthKey || "").split("-").map(Number);
+      if (!year || !month) return "";
+      return new Date(year, month - 1, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+    }
+
     function archiveFilterValues() {
       const actor = els.archiveActorFilter.value || "All actors";
+      const month = els.archiveMonthFilter.value || "";
       const preset = els.archiveDatePreset.value || "custom";
-      const closedWindow = preset === "sinceLastClosed" ? archiveClosedWindow(actor) : null;
+      const closedWindow = !month && preset === "sinceLastClosed" ? archiveClosedWindow(actor) : null;
       return {
         actor,
+        month,
         preset,
-        from: closedWindow ? closedWindow.from : els.archiveDateFrom.value ? new Date(`${els.archiveDateFrom.value}T00:00:00`).getTime() : null,
-        to: closedWindow ? closedWindow.to : els.archiveDateTo.value ? new Date(`${els.archiveDateTo.value}T23:59:59`).getTime() : null,
+        from: month ? null : closedWindow ? closedWindow.from : els.archiveDateFrom.value ? new Date(`${els.archiveDateFrom.value}T00:00:00`).getTime() : null,
+        to: month ? null : closedWindow ? closedWindow.to : els.archiveDateTo.value ? new Date(`${els.archiveDateTo.value}T23:59:59`).getTime() : null,
         minMinor: parseMoney(els.archiveAmountMin.value),
         maxMinor: parseMoney(els.archiveAmountMax.value),
         search: text(els.archiveSearch?.value || "").toLowerCase()
@@ -7808,16 +7833,25 @@
           ? "All actors"
           : actor?.name || "";
       els.archiveActorFilter.disabled = actor?.role !== "Master";
-      const usingClosedWindow = els.archiveDatePreset.value === "sinceLastClosed";
-      els.archiveDateFrom.disabled = usingClosedWindow;
-      els.archiveDateTo.disabled = usingClosedWindow;
-      const filters = archiveFilterValues();
       const visibleArchives = actor?.role === "Master"
         ? state.archives
         : state.archives.filter((archive) => archive.actor === actor?.name);
-      const filteredArchives = filters.actor === "All actors"
+      const actorFilteredArchives = els.archiveActorFilter.value === "All actors"
         ? visibleArchives
-        : visibleArchives.filter((archive) => archive.actor === filters.actor);
+        : visibleArchives.filter((archive) => archive.actor === els.archiveActorFilter.value);
+      const currentMonthFilter = els.archiveMonthFilter.value || "";
+      const archiveMonths = Array.from(new Set(actorFilteredArchives.map((archive) => archiveMonthKey(archive.closedAt)).filter(Boolean))).sort().reverse();
+      els.archiveMonthFilter.innerHTML = `<option value="">All months</option>${archiveMonths.map((month) => `<option value="${escapeHtml(month)}">${escapeHtml(archiveMonthLabel(month))}</option>`).join("")}`;
+      els.archiveMonthFilter.value = archiveMonths.includes(currentMonthFilter) ? currentMonthFilter : "";
+      const usingMonth = Boolean(els.archiveMonthFilter.value);
+      const usingClosedWindow = !usingMonth && els.archiveDatePreset.value === "sinceLastClosed";
+      els.archiveDatePreset.disabled = usingMonth;
+      els.archiveDateFrom.disabled = usingMonth || usingClosedWindow;
+      els.archiveDateTo.disabled = usingMonth || usingClosedWindow;
+      const filters = archiveFilterValues();
+      const filteredArchives = filters.month
+        ? actorFilteredArchives.filter((archive) => archiveMonthKey(archive.closedAt) === filters.month)
+        : actorFilteredArchives;
       const byActor = filteredArchives.reduce((acc, archive) => {
         acc[archive.actor] ||= [];
         acc[archive.actor].push(archive);
@@ -7829,6 +7863,7 @@
           .slice()
           .sort((a, b) => new Date(b.closedAt).getTime() - new Date(a.closedAt).getTime())
           .forEach((archive) => {
+            const closureRows = [];
             const balances = archive.balances && typeof archive.balances === "object"
               ? archive.balances
               : archivedBalances(archive.actor, archive.ledger || []);
@@ -7837,7 +7872,7 @@
               const amountMinor = Math.abs(netMinor);
               if (amountMinor === 0 || !archiveRowVisible(archive.closedAt, amountMinor, filters)) return;
               if (!archiveSearchVisible([archive.actor, archive.id, "Closed Balance", currency, netMinor > 0 ? "Owes Master" : "Master owes"], filters)) return;
-              actorRows.push(`
+              closureRows.push(`
                 <tr>
                   <td>${escapeHtml(displayDate(archive.closedAt))}</td>
                   <td>Closed Balance</td>
@@ -7885,7 +7920,7 @@
                 order.voidJournal,
                 detail
               ], filters)) return;
-              actorRows.push(`
+              closureRows.push(`
                 <tr>
                   <td>${escapeHtml(displayDate(date))}</td>
                   <td>Order</td>
@@ -7916,7 +7951,7 @@
                 transfer.journal,
                 detail
               ], filters)) return;
-              actorRows.push(`
+              closureRows.push(`
                 <tr>
                   <td>${escapeHtml(displayDate(date))}</td>
                   <td>Transfer</td>
@@ -7944,7 +7979,7 @@
                 line.details,
                 detail
               ], filters)) return;
-              actorRows.push(`
+              closureRows.push(`
                 <tr>
                   <td>${escapeHtml(displayDate(date))}</td>
                   <td>Ledger</td>
@@ -7955,6 +7990,13 @@
                 </tr>
               `);
             });
+            if (closureRows.length) {
+              actorRows.push(`
+                <tr>
+                  <td colspan="6"><strong>${escapeHtml(archiveMonthLabel(archiveMonthKey(archive.closedAt)))} closed statement</strong> - ${escapeHtml(displayDate(archive.closedAt))} - ${escapeHtml(archive.id || "")}</td>
+                </tr>
+              `, ...closureRows);
+            }
           });
         return actorRows.length > 1 ? actorRows : [];
       });
@@ -8890,7 +8932,7 @@
       saveState();
     });
 
-    [els.archiveActorFilter, els.archiveDatePreset, els.archiveDateFrom, els.archiveDateTo, els.archiveAmountMin, els.archiveAmountMax, els.archiveSearch].forEach((input) => {
+    [els.archiveActorFilter, els.archiveMonthFilter, els.archiveDatePreset, els.archiveDateFrom, els.archiveDateTo, els.archiveAmountMin, els.archiveAmountMax, els.archiveSearch].forEach((input) => {
       input.addEventListener("input", renderArchive);
       input.addEventListener("change", renderArchive);
     });
