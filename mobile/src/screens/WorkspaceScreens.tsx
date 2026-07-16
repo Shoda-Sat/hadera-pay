@@ -7,6 +7,7 @@ import {
   ChevronUp,
   ImagePlus,
   MessageSquare,
+  Pencil,
   Plus,
   RefreshCw,
   Send,
@@ -28,6 +29,7 @@ import { Button, Field, Panel, Pill, SelectRow, SummaryRow } from "../components
 import {
   activeActors,
   actorCanPayoutCurrency,
+  actorCanReceivePayouts,
   actorForSession,
   actorTransferCurrencies,
   approveOrderVoid,
@@ -42,7 +44,9 @@ import {
   markOrderPaid,
   postActorJournal,
   postActorWithdrawal,
+  pendingCancelledOrderStates,
   receivableBalance,
+  remindOrderActor,
   rejectOrderVoid,
   requestOrderVoid,
   returnOrder,
@@ -117,7 +121,7 @@ function orderNumber(order: OrderRecord, session: UserSession): string {
 function visibleOrders(session: UserSession, state: WorkspaceState): OrderRecord[] {
   return state.orders
     .filter((order) => isMasterView(session) || order.broker === session.actorName || order.agent === session.actorName || order.agentActorId === session.actorId)
-    .filter((order) => !["Cancelled", "Voided"].includes(order.state) && order.locked !== true)
+    .filter((order) => isMasterView(session) || (!["Cancelled", "Voided"].includes(order.state) && order.locked !== true))
     .slice()
     .sort((a, b) => new Date(b.createdAt || b.updatedAt).getTime() - new Date(a.createdAt || a.updatedAt).getTime());
 }
@@ -126,8 +130,8 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "The action could not be completed.";
 }
 
-export function OrdersScreen(props: CommonProps) {
-  const { session, state, offline, onState, onNavigate, onRefresh } = props;
+export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEditReturnedOrder: (order: OrderRecord) => void }) {
+  const { session, state, offline, onState, onNavigate, onRefresh, onNewOrder, onEditReturnedOrder } = props;
   const [expanded, setExpanded] = useState<string[]>([]);
   const [selectedAgent, setSelectedAgent] = useState<Record<string, string>>({});
   const [divider, setDivider] = useState<Record<string, string>>({});
@@ -176,7 +180,10 @@ export function OrdersScreen(props: CommonProps) {
       <OfflineGuard offline={offline} />
       <View style={styles.rowButtons}>
         {["Broker", "Special Broker"].includes(session.actorRole) ? (
-          <Button label="New order" icon={<Plus size={17} color="#fff" />} onPress={() => onNavigate("newOrder")} style={styles.flexButton} />
+          <Button label="New order" icon={<Plus size={17} color="#fff" />} onPress={onNewOrder} style={styles.flexButton} />
+        ) : null}
+        {isMasterView(session) ? (
+          <Button label="Pending & Cancelled" variant="secondary" onPress={() => onNavigate("pendingCancelled")} style={styles.flexButton} />
         ) : null}
         <Button label="Refresh" icon={<RefreshCw size={17} color={colors.ink} />} variant="secondary" onPress={onRefresh} style={styles.flexButton} />
       </View>
@@ -238,6 +245,7 @@ export function OrdersScreen(props: CommonProps) {
               </View>
             ) : null}
             {isPayer && order.state === "Paid" ? <Button label="Request Void" variant="danger" disabled={offline} onPress={() => run(`void-${order.id}`, () => requestOrderVoid(order.id, session.actorName))} /> : null}
+            {["Broker", "Special Broker"].includes(session.actorRole) && order.state === "Returned" && order.broker === session.actorName ? <Button label="Modify returned order" icon={<Pencil size={17} color={colors.ink} />} variant="secondary" onPress={() => onEditReturnedOrder(order)} /> : null}
             {isMasterView(session) && order.state === "Void Requested" ? (
               <View style={styles.rowButtons}>
                 <Button label="Approve void" variant="danger" disabled={offline} onPress={() => run(`approve-void-${order.id}`, () => approveOrderVoid(order.id, session.actorName))} style={styles.flexButton} />
@@ -247,6 +255,66 @@ export function OrdersScreen(props: CommonProps) {
           </Panel>
         );
       }) : <Panel><Text style={styles.muted}>No active orders.</Text></Panel>}
+    </View>
+  );
+}
+
+function pendingCancelledDate(order: OrderRecord): string {
+  if (order.state === "Assigned") return order.assignedAt || order.updatedAt || order.createdAt;
+  if (order.state === "Returned") return order.returnedAt || order.updatedAt || order.createdAt;
+  if (order.state === "Voided") return order.voidedAt || order.updatedAt || order.createdAt;
+  if (order.state === "Cancelled") return order.cancelledAt || order.updatedAt || order.createdAt;
+  return order.updatedAt || order.createdAt;
+}
+
+function reminderPayer(state: WorkspaceState, order: OrderRecord): ActorRecord | undefined {
+  const payer = activeActors(state).find((actor) => actor.id === order.agentActorId)
+    || activeActors(state).find((actor) => actor.name === order.agent);
+  return payer && actorCanReceivePayouts(payer.role) ? payer : undefined;
+}
+
+export function PendingCancelledScreen({ session, state, offline, onState, onNavigate }: CommonProps) {
+  const [busy, setBusy] = useState("");
+  const orders = state.orders
+    .filter((order) => pendingCancelledOrderStates.has(order.state))
+    .slice()
+    .sort((a, b) => new Date(pendingCancelledDate(b)).getTime() - new Date(pendingCancelledDate(a)).getTime());
+
+  const sendReminder = async (order: OrderRecord) => {
+    if (offline) return Alert.alert("Offline", "Reconnect before sending an order reminder.");
+    setBusy(order.id);
+    try {
+      const nextState = await remindOrderActor(order.id, session.actorName);
+      onState(nextState);
+      const payer = reminderPayer(nextState, order);
+      Alert.alert("Reminder sent", `${orderNumber(order, session)} reminder sent${payer ? ` to ${payer.name}` : ""}.`);
+    } catch (error) {
+      Alert.alert("Could not send reminder", errorMessage(error));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  return (
+    <View style={styles.screen}>
+      <ScreenTitle title="Pending & Cancelled" subtitle="Assigned, returned, voided, and cancelled orders" />
+      <OfflineGuard offline={offline} />
+      <Button label="Orderbook" variant="secondary" onPress={() => onNavigate("orders")} />
+      {orders.length ? orders.map((order) => {
+        const payer = reminderPayer(state, order);
+        const payoutActor = payer?.name || (!["Unassigned", "Cancelled", "Forwarded"].includes(order.agent) ? order.agent : "Unassigned");
+        const stateLabel = order.state === "Assigned" && payoutActor !== "Unassigned" ? `Assigned to ${payoutActor}` : order.state;
+        return (
+          <Panel key={order.id} title={orderNumber(order, session)} badge={stateLabel}>
+            <SummaryRow label="Broker" value={order.broker} />
+            <SummaryRow label="Payout actor" value={payoutActor} />
+            <SummaryRow label="Amount" value={`${compactAmount(order.sourceCurrency, majorFromMinor(order.sourceAmountMinor, order.sourceCurrency))} to ${compactAmount(order.payoutCurrency, majorFromMinor(order.payoutAmountMinor, order.payoutCurrency))}`} />
+            <SummaryRow label="State" value={stateLabel} />
+            <Button label="Remind Actor" variant="secondary" disabled={offline || !payer || busy !== ""} loading={busy === order.id} onPress={() => sendReminder(order)} />
+            {!payer ? <Text style={styles.muted}>No payout actor is available for this order.</Text> : order.lastReminderAt ? <Text style={styles.muted}>Last reminder: {new Date(order.lastReminderAt).toLocaleString()}</Text> : null}
+          </Panel>
+        );
+      }) : <Panel><Text style={styles.muted}>No assigned, returned, voided, or cancelled orders.</Text></Panel>}
     </View>
   );
 }

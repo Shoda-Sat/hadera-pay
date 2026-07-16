@@ -361,11 +361,13 @@ function sessionActor(session: UserSession, state: WorkspaceState): ActorRecord 
     state.actors.find((actor) => actor.name === session.actorName);
 }
 
-function buildReceivable(session: UserSession, draft: TransferDraft, order: OrderRecord, state: WorkspaceState): ReceivableRecord {
+function buildReceivable(session: UserSession, draft: TransferDraft, order: OrderRecord, state: WorkspaceState, existing?: ReceivableRecord): ReceivableRecord {
   const now = new Date().toISOString();
   return {
-    id: nextReceivableId(state),
+    id: existing?.id || nextReceivableId(state),
     orderId: order.id,
+    brokerOrderNumber: order.brokerOrderNumber || order.id,
+    agentOrderNumber: order.agentOrderNumber || existing?.agentOrderNumber || "",
     borrower: session.actorName,
     borrowerActorId: session.actorId,
     currency: order.sourceCurrency,
@@ -375,10 +377,10 @@ function buildReceivable(session: UserSession, draft: TransferDraft, order: Orde
     accountNumber: draft.accountNumber,
     phoneNumber: draft.phoneNumber,
     remarks: draft.remarks,
-    createdAt: now,
+    createdAt: existing?.createdAt || now,
     updatedAt: now,
-    createdBy: session.actorName,
-    payments: []
+    createdBy: existing?.createdBy || session.actorName,
+    payments: existing?.payments || []
   };
 }
 
@@ -431,7 +433,7 @@ function rememberOrderCustomers(state: WorkspaceState, actor: ActorRecord | unde
   });
 }
 
-export async function submitTransferOrder(session: UserSession, draft: TransferDraft): Promise<SubmittedOrder> {
+export async function submitTransferOrder(session: UserSession, draft: TransferDraft, editingOrderId = ""): Promise<SubmittedOrder> {
   if (!canCreateOrders(session)) {
     throw new Error("Only Brokers and Special Brokers can send new orders.");
   }
@@ -444,6 +446,10 @@ export async function submitTransferOrder(session: UserSession, draft: TransferD
 
   const state = await loadWorkspaceState();
   const actor = sessionActor(session, state);
+  const existingOrder = editingOrderId ? state.orders.find((order) => order.id === editingOrderId) : undefined;
+  if (editingOrderId && (!existingOrder || existingOrder.state !== "Returned" || existingOrder.broker !== session.actorName)) {
+    throw new Error("This returned order is no longer available for modification.");
+  }
   const sourceCurrency = actor?.orderMultiCurrencyEnabled === true ? draft.sourceCurrency : safeCurrency(actor?.currency, session.currency);
   const quote = calculateQuote({ ...draft, broker: session.actorName, sourceCurrency });
   if (quote.sourceAmount <= 0 || quote.payoutAmount <= 0 || quote.rate <= 0) {
@@ -452,8 +458,9 @@ export async function submitTransferOrder(session: UserSession, draft: TransferD
 
   const now = new Date().toISOString();
   const order: OrderRecord = {
-    id: nextOrderId(state),
-    brokerOrderNumber: nextBrokerOrderNumber(session, state),
+    ...(existingOrder || {}),
+    id: existingOrder?.id || nextOrderId(state),
+    brokerOrderNumber: existingOrder?.brokerOrderNumber || nextBrokerOrderNumber(session, state),
     brokerActorId: actor?.id || session.actorId,
     broker: session.actorName,
     agent: "Unassigned",
@@ -476,18 +483,33 @@ export async function submitTransferOrder(session: UserSession, draft: TransferD
     fundingType: draft.fundingType as FundingType,
     state: "Pending Forward",
     journal: "",
-    createdAt: now,
-    sentAt: now,
-    paidAt: "",
+    assignedAt: undefined,
+    forwardedPayoutDivider: undefined,
+    forwardedPayoutPercent: undefined,
+    manualSpecialPayoutDivider: undefined,
+    manualSpecialPayoutPercent: undefined,
+    manualMasterRateDivider: undefined,
+    manualMasterRatePercent: undefined,
+    paymentProof: undefined,
+    createdAt: existingOrder?.createdAt || now,
+    sentAt: existingOrder?.sentAt || now,
+    paidAt: existingOrder?.paidAt || "",
     returnedBy: "",
     returnedReason: "",
+    returnedAt: "",
     updatedAt: now
   };
 
   state.orders = [order, ...state.orders.filter((item) => item.id !== order.id)];
   rememberOrderCustomers(state, actor, draft);
+  const existingReceivableIndex = state.receivables.findIndex((item) => item.orderId === order.id);
+  const existingReceivable = existingReceivableIndex >= 0 ? state.receivables[existingReceivableIndex] : undefined;
   if (draft.fundingType === "credit") {
-    state.receivables = [buildReceivable(session, draft, order, state), ...state.receivables];
+    const receivable = buildReceivable(session, draft, order, state, existingReceivable);
+    if (existingReceivableIndex >= 0) state.receivables.splice(existingReceivableIndex, 1, receivable);
+    else state.receivables.unshift(receivable);
+  } else if (existingReceivable && existingReceivable.payments.reduce((sum, payment) => sum + Number(payment.amountMinor || 0), 0) === 0) {
+    state.receivables.splice(existingReceivableIndex, 1);
   }
 
   await saveWorkspaceState(state);

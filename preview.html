@@ -412,6 +412,14 @@
       letter-spacing: 0;
     }
 
+    .panel-header-actions {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
     .settings-heading {
       display: grid;
       gap: 3px;
@@ -2327,7 +2335,10 @@
             <div class="panel span-12">
               <div class="panel-header">
                 <h2>Orderbook</h2>
-                <span class="state-pill">Master Routing</span>
+                <div class="panel-header-actions">
+                  <span class="state-pill">Master Routing</span>
+                  <button class="btn secondary" id="pendingCancelledButton" type="button" data-master-action>Pending &amp; Cancelled</button>
+                </div>
               </div>
               <div class="panel-body table-wrap">
                 <table>
@@ -2335,6 +2346,25 @@
                     <tr><th>Order</th><th>Broker</th><th>Payout actor</th><th>Amount</th><th>State</th><th>Action</th></tr>
                   </thead>
                   <tbody id="orderRows"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="view" id="pendingCancelled">
+          <div class="grid">
+            <div class="panel span-12">
+              <div class="panel-header">
+                <h2>Pending &amp; Cancelled</h2>
+                <button class="btn secondary" id="pendingCancelledBackButton" type="button">Orderbook</button>
+              </div>
+              <div class="panel-body table-wrap">
+                <table>
+                  <thead>
+                    <tr><th>Order</th><th>Broker</th><th>Payout actor</th><th>Amount</th><th>State</th><th>Remind Actor</th></tr>
+                  </thead>
+                  <tbody id="pendingCancelledRows"></tbody>
                 </table>
               </div>
             </div>
@@ -3671,6 +3701,7 @@
       dashboard: ["Dashboard", "Live operating view for the local ledger app."],
       search: ["Search", "Find matching transactions, transfers, journals, and archived records."],
       orders: ["Orders", "Create, assign, pay, and void routed payment orders."],
+      pendingCancelled: ["Pending & Cancelled", "Assigned, returned, voided, and cancelled orders by status date."],
       transfers: ["Transfers", "Create internal transfers and approve pending requests."],
       receivables: ["Receivables", "Credit orders and collections outside the ledger."],
       chat: ["Chat", "Master-only direct chats and Master-created groups."],
@@ -3727,6 +3758,9 @@
       globalSearchCount: document.getElementById("globalSearchCount"),
       globalSearchRows: document.getElementById("globalSearchRows"),
       orderRows: document.getElementById("orderRows"),
+      pendingCancelledButton: document.getElementById("pendingCancelledButton"),
+      pendingCancelledBackButton: document.getElementById("pendingCancelledBackButton"),
+      pendingCancelledRows: document.getElementById("pendingCancelledRows"),
       dashboardOrderRows: document.getElementById("dashboardOrderRows"),
       receivableRows: document.getElementById("receivableRows"),
       ledgerRows: document.getElementById("ledgerRows"),
@@ -4777,7 +4811,7 @@
 
     function privilegeViews(role, actor = selectedActor()) {
       if (role === "Owner") return ["owner"];
-      if (role === "Master") return ["dashboard", "search", "orders", "transfers", "receivables", "chat", "ledger", "settlement", "archive", "actors", "settings"];
+      if (role === "Master") return ["dashboard", "search", "orders", "pendingCancelled", "transfers", "receivables", "chat", "ledger", "settlement", "archive", "actors", "settings"];
       const views = ["dashboard", "search", "orders", "chat", "ledger", "settlement", "archive"];
       if (actor?.transferEnabled !== false) views.splice(views.indexOf("chat"), 0, "transfers");
       if (["Broker", "Special Broker"].includes(role)) views.splice(views.indexOf("chat"), 0, "receivables");
@@ -5499,6 +5533,41 @@
         readBy: [master],
         createdAt: new Date().toISOString()
       });
+    }
+
+    const pendingCancelledOrderStates = new Set(["Assigned", "Returned", "Voided", "Cancelled"]);
+
+    function reminderActorForOrder(order) {
+      const actor = activeActors().find((item) => item.id === order?.agentActorId)
+        || activeActors().find((item) => item.name === order?.agent);
+      return actor && actorCanReceivePayouts(actor.role) ? actor : null;
+    }
+
+    async function sendOrderPaymentReminder(order) {
+      if (selectedActor()?.role !== "Master" || !pendingCancelledOrderStates.has(order?.state)) return;
+      const payer = reminderActorForOrder(order);
+      if (!payer) return;
+      const chat = directChatWithMaster(payer.name);
+      if (!chat) return;
+      const sentAt = new Date().toISOString();
+      const displayNumber = orderDisplayNumber(order, payer);
+      chat.messages.push({
+        id: nextMessageId(),
+        from: masterName(),
+        text: `${displayNumber}: Master is reminding you to pay this order.`,
+        kind: "text",
+        media: "",
+        fileName: "",
+        replyTo: "",
+        reactions: {},
+        readBy: [masterName()],
+        createdAt: sentAt
+      });
+      order.lastReminderAt = sentAt;
+      order.lastReminderBy = masterName();
+      notifyEvent("Reminder sent", `${displayNumber} reminder sent to ${payer.name}.`);
+      renderAll();
+      await saveStateNow();
     }
 
     function sendPaymentProofToMaster(order, actor, proof) {
@@ -7227,6 +7296,63 @@
         .find((name) => name && !["Unassigned", "Forwarded"].includes(name)) || "Unassigned";
     }
 
+    function pendingCancelledOrderDate(order) {
+      const stateDate = order?.state === "Assigned"
+        ? order.assignedAt
+        : order?.state === "Returned"
+          ? order.returnedAt
+          : order?.state === "Voided"
+            ? order.voidedAt
+            : order?.state === "Cancelled"
+              ? order.cancelledAt
+              : "";
+      return stateDate || order?.updatedAt || order?.sentAt || order?.createdAt || "";
+    }
+
+    function newestPendingCancelledFirst(a, b) {
+      const timeA = new Date(pendingCancelledOrderDate(a) || 0).getTime();
+      const timeB = new Date(pendingCancelledOrderDate(b) || 0).getTime();
+      return timeA === timeB ? newestOrderFirst(a, b) : timeB - timeA;
+    }
+
+    function renderPendingCancelledOrders(actor) {
+      if (!els.pendingCancelledRows) return;
+      if (actor?.role !== "Master") {
+        els.pendingCancelledRows.innerHTML = "";
+        return;
+      }
+      const orders = state.orders
+        .filter((order) => pendingCancelledOrderStates.has(order.state))
+        .slice()
+        .sort(newestPendingCancelledFirst);
+      els.pendingCancelledRows.innerHTML = orders.length ? orders.map((order) => {
+        const payer = reminderActorForOrder(order);
+        const payoutActor = payingAgentLabel(order);
+        const stateLabel = order.state === "Assigned" && payoutActor !== "Unassigned"
+          ? `Assigned to '${escapeHtml(payoutActor)}'`
+          : escapeHtml(order.state);
+        const className = order.state === "Voided" || order.state === "Cancelled" ? "danger" : "warn";
+        const reminderStatus = order.lastReminderAt
+          ? `<small class="muted">Last sent ${escapeHtml(displayDate(order.lastReminderAt))}</small>`
+          : "";
+        return `
+          <tr>
+            <td>${orderNumberHtml(order, actor)}${orderDetailsHtml(order, actor)}</td>
+            <td>${escapeHtml(order.broker)}</td>
+            <td>${escapeHtml(payoutActor)}</td>
+            <td>${orderTableAmountHtml(order, actor)}</td>
+            <td><span class="state-pill ${className}">${stateLabel}</span></td>
+            <td>
+              <div class="order-actions">
+                <button class="btn secondary remind-order-actor" data-id="${escapeHtml(order.id)}" type="button" ${payer ? "" : "disabled"}>Remind Actor</button>
+                ${payer ? reminderStatus : '<small class="muted">No payout actor available</small>'}
+              </div>
+            </td>
+          </tr>
+        `;
+      }).join("") : '<tr><td colspan="6">No assigned, returned, voided, or cancelled orders.</td></tr>';
+    }
+
     function renderOrders() {
       if (document.activeElement?.closest?.(".forward-agent, .forward-payout-divider, .forward-payout-percent")) return;
       const actor = selectedActor();
@@ -7263,6 +7389,7 @@
       const emptyRows = '<tr><td colspan="6">No active orders.</td></tr>';
       els.orderRows.innerHTML = orderbookOrders.length ? rowsForOrders(orderbookOrders) : emptyRows;
       els.dashboardOrderRows.innerHTML = activeOrders.length ? rowsForOrders(activeOrders) : emptyRows;
+      renderPendingCancelledOrders(actor);
     }
 
     function receivablePaidMinor(receivable) {
@@ -9125,6 +9252,9 @@
       button.addEventListener("click", () => setView(button.dataset.view));
     });
 
+    els.pendingCancelledButton?.addEventListener("click", () => setView("pendingCancelled"));
+    els.pendingCancelledBackButton?.addEventListener("click", () => setView("orders"));
+
     window.addEventListener("popstate", (event) => {
       if (!currentAuth) return;
       const historyView = event.state?.haderaPayView ? event.state.view : "";
@@ -9956,6 +10086,15 @@
     });
 
     document.addEventListener("click", async (event) => {
+      const remindOrderButton = event.target.closest(".remind-order-actor");
+      if (remindOrderButton) {
+        const order = state.orders.find((item) => item.id === remindOrderButton.dataset.id);
+        if (!order || selectedActor()?.role !== "Master") return;
+        remindOrderButton.disabled = true;
+        await sendOrderPaymentReminder(order);
+        return;
+      }
+
       const copyOrderButton = event.target.closest(".order-copy-details");
       if (copyOrderButton) {
         if (selectedActor()?.role !== "Master") return;
@@ -10344,7 +10483,8 @@
         if (!order || actor?.role !== "Master" || order.state !== "Pending Forward") return;
         order.state = "Returned";
         order.returnedBy = "Master";
-        order.updatedAt = new Date().toISOString();
+        order.returnedAt = new Date().toISOString();
+        order.updatedAt = order.returnedAt;
         order.agent = "Unassigned";
         order.agentActorId = "";
         state.orderState = "Returned";
@@ -10361,7 +10501,8 @@
         if (!order || actor?.role !== "Master" || order.state !== "Pending Forward") return;
         order.state = "Cancelled";
         order.returnedBy = "";
-        order.updatedAt = new Date().toISOString();
+        order.cancelledAt = new Date().toISOString();
+        order.updatedAt = order.cancelledAt;
         order.agent = "Cancelled";
         state.orderState = "Cancelled";
         els.orderState.textContent = "Cancelled";
@@ -10512,7 +10653,8 @@
         if (!order || order.state !== "Assigned" || order.agent !== actor?.name) return;
         order.state = "Returned";
         order.returnedBy = actor.name;
-        order.updatedAt = new Date().toISOString();
+        order.returnedAt = new Date().toISOString();
+        order.updatedAt = order.returnedAt;
         order.agent = "Unassigned";
         state.orderState = "Returned";
         els.orderState.textContent = "Returned";

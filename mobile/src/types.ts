@@ -3,6 +3,7 @@ export type AuthMode = "login" | "signup";
 export type AppScreen =
   | "home"
   | "orders"
+  | "pendingCancelled"
   | "newOrder"
   | "conversion"
   | "confirmation"
@@ -125,6 +126,7 @@ export interface OrderRecord {
   paidAt: string;
   returnedBy: string;
   returnedReason: string;
+  returnedAt?: string;
   updatedAt: string;
   locked?: boolean;
   voidJournal?: string;
@@ -136,6 +138,9 @@ export interface OrderRecord {
   voidedBy?: string;
   voidedAt?: string;
   assignedAt?: string;
+  cancelledAt?: string;
+  lastReminderAt?: string;
+  lastReminderBy?: string;
   forwardedPayoutDivider?: number;
   forwardedPayoutPercent?: number;
   manualSpecialPayoutDivider?: number;
@@ -157,6 +162,8 @@ export interface OrderRecord {
 export interface ReceivableRecord {
   id: string;
   orderId: string;
+  brokerOrderNumber?: string;
+  agentOrderNumber?: string;
   borrower: string;
   borrowerActorId: string;
   currency: Currency;

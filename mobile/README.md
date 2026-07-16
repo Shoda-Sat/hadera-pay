@@ -20,7 +20,9 @@ By default the app talks to `https://haderapay.com`. To point a build at another
 - Role-aware navigation and actions for Owner, Master, Broker, Agent, Special Broker, and Special Agent.
 - Money transfer form with live source-to-payout conversion.
 - Saved sender and receiver details for Brokers and Special Brokers.
+- Contact suggestions dismiss when a new name is typed, and returned orders can be corrected and resubmitted with their original number.
 - Master order forwarding, payer payment confirmation, optional proof photos, and void requests.
+- Master Pending & Cancelled order view with direct payout-actor reminders.
 - Internal transfers with approval, plus Master journal and withdrawal tools.
 - Workspace search, receivable collections, chats and Master-managed groups.
 - Master ledger, permanent income snapshots, Actors management, invite codes, and transfer permissions.

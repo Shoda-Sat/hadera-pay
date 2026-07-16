@@ -15,6 +15,7 @@ import type {
 import { compactAmount, majorFromMinor, minorFromMajor, parseAmount } from "../utils/money";
 
 export const supportedCurrencies: Currency[] = ["USD", "ETB", "EUR", "ERN"];
+export const pendingCancelledOrderStates = new Set<OrderRecord["state"]>(["Assigned", "Returned", "Voided", "Cancelled"]);
 const processingOrderIds = new Set<string>();
 const processingTransferIds = new Set<string>();
 
@@ -312,9 +313,10 @@ export async function returnOrder(orderId: string): Promise<WorkspaceState> {
     if (!order || order.state !== "Pending Forward") return;
     order.state = "Returned";
     order.returnedBy = "Master";
+    order.returnedAt = new Date().toISOString();
     order.agent = "Unassigned";
     order.agentActorId = "";
-    order.updatedAt = new Date().toISOString();
+    order.updatedAt = order.returnedAt;
   });
 }
 
@@ -324,7 +326,8 @@ export async function cancelOrder(orderId: string): Promise<WorkspaceState> {
     if (!order || order.state !== "Pending Forward") return;
     order.state = "Cancelled";
     order.agent = "Cancelled";
-    order.updatedAt = new Date().toISOString();
+    order.cancelledAt = new Date().toISOString();
+    order.updatedAt = order.cancelledAt;
   });
 }
 
@@ -671,6 +674,35 @@ export async function sendChatMessage(chatId: string, from: string, text: string
     const clean = text.trim();
     if (!chat || !clean || !chat.members.includes(from)) throw new Error("Choose a chat and enter a message.");
     chat.messages.push({ id: nextMessageId(state), from, text: clean, kind: "text", reactions: {}, readBy: [from], createdAt: new Date().toISOString() });
+  });
+}
+
+export async function remindOrderActor(orderId: string, masterName: string): Promise<WorkspaceState> {
+  return updateWorkspaceState((state) => {
+    const order = state.orders.find((item) => item.id === orderId);
+    if (!order || !pendingCancelledOrderStates.has(order.state)) throw new Error("This order is no longer available for a reminder.");
+    const master = activeActors(state).find((actor) => actor.role === "Master" && actor.name === masterName)
+      || activeActors(state).find((actor) => actor.role === "Master");
+    if (!master) throw new Error("Only Master can send an order reminder.");
+    const payer = activeActors(state).find((actor) => actor.id === order.agentActorId)
+      || activeActors(state).find((actor) => actor.name === order.agent);
+    if (!payer || !actorCanReceivePayouts(payer.role)) throw new Error("This order does not have an available payout actor.");
+    ensureDirectChats(state);
+    const chat = state.chatConversations.find((item) => item.type === "direct" && item.members.includes(master.name) && item.members.includes(payer.name));
+    if (!chat) throw new Error("The payout actor chat is not available.");
+    const sentAt = new Date().toISOString();
+    const displayNumber = order.agentOrderNumbers?.[payer.name] || order.agentOrderNumber || order.brokerOrderNumber || order.id;
+    chat.messages.push({
+      id: nextMessageId(state),
+      from: master.name,
+      text: `${displayNumber}: Master is reminding you to pay this order.`,
+      kind: "text",
+      reactions: {},
+      readBy: [master.name],
+      createdAt: sentAt
+    });
+    order.lastReminderAt = sentAt;
+    order.lastReminderBy = master.name;
   });
 }
 

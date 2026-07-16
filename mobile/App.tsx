@@ -52,6 +52,7 @@ import {
   NotificationsPanel,
   OwnerScreen,
   OrdersScreen,
+  PendingCancelledScreen,
   ReceivablesScreen,
   SearchScreen,
   SettingsScreen,
@@ -96,6 +97,24 @@ function draftForSession(session: UserSession): TransferDraft {
     ...emptyDraft,
     broker: session.actorName,
     sourceCurrency: session.currency
+  };
+}
+
+function draftForOrder(order: OrderRecord): TransferDraft {
+  return {
+    broker: order.broker,
+    sourceCurrency: order.sourceCurrency,
+    payoutCurrency: order.payoutCurrency,
+    sourceAmount: inputAmount(order.sourceCurrency, majorFromMinor(order.sourceAmountMinor, order.sourceCurrency)),
+    payoutAmount: inputAmount(order.payoutCurrency, majorFromMinor(order.payoutAmountMinor, order.payoutCurrency)),
+    rate: String(order.rate || ""),
+    commissionPercent: String(order.commissionPercent || ""),
+    fundingType: order.fundingType || "cash",
+    senderName: order.senderName || "",
+    receiverName: order.receiverName || "",
+    phoneNumber: order.phoneNumber || "",
+    accountNumber: order.accountNumber || "",
+    remarks: order.remarks || ""
   };
 }
 
@@ -205,6 +224,7 @@ export default function App() {
   const [loggingOut, setLoggingOut] = useState(false);
   const [screen, setScreen] = useState<AppScreen>("home");
   const [selectedActorId, setSelectedActorId] = useState("");
+  const [editingOrderId, setEditingOrderId] = useState("");
   const [draft, setDraft] = useState<TransferDraft>(emptyDraft);
   const [submittedOrder, setSubmittedOrder] = useState<SubmittedOrder | null>(null);
   const [workspaceState, setWorkspaceState] = useState<WorkspaceState | null>(null);
@@ -300,6 +320,7 @@ export default function App() {
     setDraft(draftForSession(nextSession));
     setSubmittedOrder(null);
     setSelectedActorId("");
+    setEditingOrderId("");
     const firstScreen: AppScreen = nextSession.role === "Owner" ? "owner" : "home";
     historyRef.current = [firstScreen];
     setScreen(firstScreen);
@@ -317,6 +338,7 @@ export default function App() {
       setWorkspaceState(null);
       setSubmittedOrder(null);
       setSelectedActorId("");
+      setEditingOrderId("");
       setDraft(emptyDraft);
       historyRef.current = ["home"];
       setScreen("home");
@@ -330,6 +352,20 @@ export default function App() {
   if (!session || !actingSession) {
     return <AuthScreen onAuthenticated={handleAuthenticated} />;
   }
+
+  const startNewOrder = () => {
+    setEditingOrderId("");
+    setSubmittedOrder(null);
+    setDraft(draftForSession(actingSession));
+    navigate("newOrder");
+  };
+
+  const editReturnedOrder = (order: OrderRecord) => {
+    setEditingOrderId(order.id);
+    setSubmittedOrder(null);
+    setDraft(draftForOrder(order));
+    navigate("newOrder");
+  };
 
   const offline = workspaceState?.offlineSnapshot === true;
   const commonProps = workspaceState ? {
@@ -368,7 +404,7 @@ export default function App() {
               workspaceState={workspaceState}
               stateLoading={stateLoading}
               onRefresh={refreshWorkspace}
-              onTransfer={() => navigate("newOrder")}
+              onTransfer={startNewOrder}
               onConversion={() => navigate("conversion")}
               onSettlement={() => navigate("settlement")}
               onOrders={() => navigate("orders")}
@@ -376,7 +412,8 @@ export default function App() {
               onLedger={() => navigate("ledger")}
             />
           )}
-          {commonProps && currentScreen === "orders" ? <OrdersScreen {...commonProps} /> : null}
+          {commonProps && currentScreen === "orders" ? <OrdersScreen {...commonProps} onNewOrder={startNewOrder} onEditReturnedOrder={editReturnedOrder} /> : null}
+          {commonProps && currentScreen === "pendingCancelled" && isMasterView(actingSession) ? <PendingCancelledScreen {...commonProps} /> : null}
           {commonProps && currentScreen === "transfers" ? <TransfersScreen {...commonProps} /> : null}
           {commonProps && currentScreen === "search" ? <SearchScreen {...commonProps} /> : null}
           {commonProps && currentScreen === "receivables" && (isMasterView(actingSession) || ["Broker", "Special Broker"].includes(actingSession.actorRole)) ? <ReceivablesScreen {...commonProps} /> : null}
@@ -392,6 +429,7 @@ export default function App() {
               onNavigate={navigate}
               onSelectActor={(actorId) => {
                 setSelectedActorId(actorId);
+                setEditingOrderId("");
                 const actor = workspaceState.actors.find((item) => item.id === actorId);
                 setDraft(draftForSession(actingSessionFor(session, actor)));
                 navigate("home");
@@ -417,6 +455,7 @@ export default function App() {
               draft={draft}
               setDraft={setDraft}
               quote={quote}
+              editingOrderId={editingOrderId}
               onConversion={() => navigate("conversion")}
               onContinue={() => navigate("confirmation")}
             />
@@ -436,6 +475,7 @@ export default function App() {
               draft={draft}
               quote={quote}
               submittedOrder={submittedOrder}
+              editingOrderId={editingOrderId}
               onSubmitted={(order) => {
                 setSubmittedOrder(order);
                 setWorkspaceState(order.state);
@@ -443,6 +483,7 @@ export default function App() {
               onEdit={() => navigate("newOrder")}
               onHome={() => {
                 setSubmittedOrder(null);
+                setEditingOrderId("");
                 setDraft(draftForSession(actingSession));
                 navigate("home");
               }}
@@ -950,6 +991,7 @@ function TransferScreen({
   draft,
   setDraft,
   quote,
+  editingOrderId,
   onConversion,
   onContinue
 }: {
@@ -958,6 +1000,7 @@ function TransferScreen({
   draft: TransferDraft;
   setDraft: React.Dispatch<React.SetStateAction<TransferDraft>>;
   quote: ReturnType<typeof calculateQuote>;
+  editingOrderId: string;
   onConversion: () => void;
   onContinue: () => void;
 }) {
@@ -971,6 +1014,10 @@ function TransferScreen({
   const sourceCurrency = sourceOptions.includes(draft.sourceCurrency) ? draft.sourceCurrency : sourceOptions[0] || session.currency;
   const setField = <K extends keyof TransferDraft>(key: K, value: TransferDraft[K]) => {
     setDraft((current) => ({ ...current, broker: session.actorName, [key]: value }));
+  };
+  const setCustomerName = (kind: SavedCustomerRecord["kind"], value: string) => {
+    setField(kind === "sender" ? "senderName" : "receiverName", value);
+    setActiveCustomerPicker(null);
   };
   const setConversionField = (key: "sourceCurrency" | "payoutCurrency" | "sourceAmount" | "rate", value: Currency | string) => {
     setDraft((current) => {
@@ -998,8 +1045,8 @@ function TransferScreen({
 
   return (
     <View style={styles.screen}>
-      <HeaderTitle title="Create Order" subtitle="Mobile money transfer form" />
-      <Panel title="Money Transfer" badge="Draft">
+      <HeaderTitle title={editingOrderId ? "Modify Order" : "Create Order"} subtitle={editingOrderId ? "Correct and resubmit the returned order" : "Mobile money transfer form"} />
+      <Panel title="Money Transfer" badge={editingOrderId ? "Returned" : "Draft"}>
         <SummaryRow label="Broker" value={session.actorName} strong />
         <View style={styles.twoColumn}>
           <SelectRow<Currency> label="Source currency" options={sourceOptions} value={sourceCurrency} onChange={(value) => setConversionField("sourceCurrency", value)} />
@@ -1012,13 +1059,13 @@ function TransferScreen({
         <SelectRow<FundingType> label="Payment type" options={["cash", "credit"]} value={draft.fundingType} onChange={(value) => setField("fundingType", value)} />
       </Panel>
       <Panel title="Receiver Details" badge="Required">
-        <Field label="Sender name" value={draft.senderName} onChangeText={(value) => setField("senderName", value)} onFocus={() => setActiveCustomerPicker("sender")} />
+        <Field label="Sender name" value={draft.senderName} onChangeText={(value) => setCustomerName("sender", value)} onFocus={() => setActiveCustomerPicker("sender")} />
         {activeCustomerPicker === "sender" ? <SavedCustomerSuggestions customers={senderCustomers} onSelect={chooseCustomer} /> : null}
-        <Field label="Receiver name" value={draft.receiverName} onChangeText={(value) => setField("receiverName", value)} onFocus={() => setActiveCustomerPicker("receiver")} />
+        <Field label="Receiver name" value={draft.receiverName} onChangeText={(value) => setCustomerName("receiver", value)} onFocus={() => setActiveCustomerPicker("receiver")} />
         {activeCustomerPicker === "receiver" ? <SavedCustomerSuggestions customers={receiverCustomers} onSelect={chooseCustomer} /> : null}
+        <Field label="Remarks" value={draft.remarks} onChangeText={(value) => setField("remarks", value)} multiline />
         <Field label="Phone number" value={draft.phoneNumber} onChangeText={(value) => setField("phoneNumber", value)} keyboardType="phone-pad" />
         <Field label="Account number" value={draft.accountNumber} onChangeText={(value) => setField("accountNumber", value)} keyboardType="number-pad" />
-        <Field label="Remarks" value={draft.remarks} onChangeText={(value) => setField("remarks", value)} multiline />
       </Panel>
       <QuotePanel quote={quote} />
       <View style={styles.quickActions}>
@@ -1089,6 +1136,7 @@ function ConfirmationScreen({
   draft,
   quote,
   submittedOrder,
+  editingOrderId,
   onSubmitted,
   onEdit,
   onHome
@@ -1097,6 +1145,7 @@ function ConfirmationScreen({
   draft: TransferDraft;
   quote: ReturnType<typeof calculateQuote>;
   submittedOrder: SubmittedOrder | null;
+  editingOrderId: string;
   onSubmitted: (order: SubmittedOrder) => void;
   onEdit: () => void;
   onHome: () => void;
@@ -1108,7 +1157,7 @@ function ConfirmationScreen({
     setLoading(true);
     setError("");
     try {
-      const order = await submitTransferOrder(session, draft);
+      const order = await submitTransferOrder(session, draft, editingOrderId);
       onSubmitted(order);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not submit order.");
@@ -1120,7 +1169,7 @@ function ConfirmationScreen({
   if (submittedOrder) {
     return (
       <View style={styles.screen}>
-        <HeaderTitle title="Submitted" subtitle="Sent to Master for routing" />
+        <HeaderTitle title={editingOrderId ? "Resubmitted" : "Submitted"} subtitle="Sent to Master for routing" />
         <Panel title={submittedOrder.orderNumber} badge={submittedOrder.status}>
           <View style={styles.successIcon}>
             <CheckCircle2 size={44} color={colors.good} />
@@ -1135,8 +1184,8 @@ function ConfirmationScreen({
 
   return (
     <View style={styles.screen}>
-      <HeaderTitle title="Confirm Order" subtitle="Review before sending to Master" />
-      <Panel title="Order Summary" badge="Ready">
+      <HeaderTitle title={editingOrderId ? "Confirm Changes" : "Confirm Order"} subtitle="Review before sending to Master" />
+      <Panel title="Order Summary" badge={editingOrderId ? "Modified" : "Ready"}>
         <SummaryRow label="Broker" value={session.actorName} />
         <SummaryRow label="Sender" value={draft.senderName} />
         <SummaryRow label="Receiver" value={draft.receiverName} />
@@ -1150,7 +1199,7 @@ function ConfirmationScreen({
       {error ? <Text style={styles.errorText}>{error}</Text> : null}
       <View style={styles.quickActions}>
         <Button label="Edit" onPress={onEdit} variant="secondary" style={styles.actionButton} />
-        <Button label="Send order" onPress={submit} loading={loading} icon={<Send size={17} color="#ffffff" />} style={styles.actionButton} />
+        <Button label={editingOrderId ? "Resubmit order" : "Send order"} onPress={submit} loading={loading} icon={<Send size={17} color="#ffffff" />} style={styles.actionButton} />
       </View>
     </View>
   );
