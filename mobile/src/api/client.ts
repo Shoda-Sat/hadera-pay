@@ -1,8 +1,12 @@
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import type {
   ActorRecord,
   ApiSession,
   Currency,
   FundingType,
+  InviteRecord,
+  OwnerMasterRecord,
+  OwnerPlan,
   OrderRecord,
   ReceivableRecord,
   SavedCustomerRecord,
@@ -19,6 +23,11 @@ const defaultApiBaseUrl = "https://haderapay.com";
 const apiBaseUrl = (typeof process !== "undefined" && process?.env?.EXPO_PUBLIC_HADERAPAY_API_URL
   ? process.env.EXPO_PUBLIC_HADERAPAY_API_URL
   : defaultApiBaseUrl).replace(/\/+$/, "");
+const sessionCacheKey = "haderapay.mobile.session.v1";
+const workspaceCachePrefix = "haderapay.mobile.workspace.v1.";
+let activeSession: UserSession | null = null;
+
+class OfflineError extends Error {}
 
 type ApiOptions = Omit<RequestInit, "body"> & {
   body?: unknown;
@@ -48,7 +57,7 @@ async function api<T>(path: string, options: ApiOptions = {}): Promise<ApiEnvelo
       body: options.body ? JSON.stringify(options.body) : undefined
     });
   } catch {
-    throw new Error("Could not reach HaderaPay. Check the app server address and internet connection.");
+    throw new OfflineError("Could not reach HaderaPay. Check the app server address and internet connection.");
   }
 
   const text = await response.text();
@@ -57,6 +66,42 @@ async function api<T>(path: string, options: ApiOptions = {}): Promise<ApiEnvelo
     throw new Error(data.error || "HaderaPay could not complete this request.");
   }
   return data;
+}
+
+async function readCache<T>(key: string): Promise<T | null> {
+  try {
+    const value = await AsyncStorage.getItem(key);
+    return value ? JSON.parse(value) as T : null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeCache(key: string, value: unknown): Promise<void> {
+  try {
+    await AsyncStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // A full device or restricted storage must not interrupt live app use.
+  }
+}
+
+async function cacheSession(session: UserSession): Promise<void> {
+  activeSession = session;
+  await writeCache(sessionCacheKey, session);
+}
+
+function workspaceCacheKey(workspaceId: string): string {
+  return `${workspaceCachePrefix}${workspaceId}`;
+}
+
+function cacheableWorkspaceState(state: WorkspaceState): WorkspaceState {
+  return {
+    ...state,
+    orders: state.orders.map((order) => order.paymentProof ? {
+      ...order,
+      paymentProof: { ...order.paymentProof, dataUri: "" }
+    } : order)
+  };
 }
 
 function normalizeSession(session: ApiSession | null | undefined): UserSession | null {
@@ -73,7 +118,8 @@ function normalizeSession(session: ApiSession | null | undefined): UserSession |
     currency: safeCurrency(session.membership.currency),
     workingCurrencies: (session.membership.workingCurrencies || []).map((currency) => safeCurrency(currency)),
     workspaceId: session.workspace.id || "",
-    workspace: session.workspace.name || "HaderaPay Workspace"
+    workspace: session.workspace.name || "HaderaPay Workspace",
+    managedByMaster: false
   };
 }
 
@@ -84,18 +130,38 @@ function normalizeState(state: Partial<WorkspaceState> | null | undefined): Work
     orders: Array.isArray(state?.orders) ? state.orders : [],
     receivables: Array.isArray(state?.receivables) ? state.receivables : [],
     savedCustomers: Array.isArray(state?.savedCustomers) ? state.savedCustomers : [],
+    transfers: Array.isArray(state?.transfers) ? state.transfers : [],
     ledger: Array.isArray(state?.ledger) ? state.ledger : [],
-    archives: Array.isArray(state?.archives) ? state.archives : []
+    archives: Array.isArray(state?.archives) ? state.archives : [],
+    settlements: Array.isArray(state?.settlements) ? state.settlements : [],
+    chatConversations: Array.isArray(state?.chatConversations) ? state.chatConversations : []
   };
 }
 
 export function canCreateOrders(session: UserSession | null | undefined): boolean {
-  return session?.role === "Actor" && ["Broker", "Special Broker"].includes(session.actorRole);
+  return Boolean(
+    session &&
+    ["Broker", "Special Broker"].includes(session.actorRole) &&
+    (session.role === "Actor" || session.managedByMaster === true)
+  );
 }
 
 export async function getCurrentSession(): Promise<UserSession | null> {
-  const result = await api<{ session: ApiSession | null }>("/api/session");
-  return normalizeSession(result.session);
+  try {
+    const result = await api<{ session: ApiSession | null }>("/api/session");
+    const session = normalizeSession(result.session);
+    if (session) await cacheSession(session);
+    else {
+      activeSession = null;
+      await AsyncStorage.removeItem(sessionCacheKey);
+    }
+    return session;
+  } catch (error) {
+    if (!(error instanceof OfflineError)) throw error;
+    const cached = await readCache<UserSession>(sessionCacheKey);
+    activeSession = cached;
+    return cached;
+  }
 }
 
 export async function login(email: string, password: string): Promise<UserSession> {
@@ -108,6 +174,7 @@ export async function login(email: string, password: string): Promise<UserSessio
   });
   const session = normalizeSession(result.session);
   if (!session) throw new Error("This login is not linked to a workspace.");
+  await cacheSession(session);
   return session;
 }
 
@@ -132,23 +199,107 @@ export async function signup(input: {
   });
   const session = normalizeSession(result.session);
   if (!session) throw new Error("This signup was not linked to a workspace.");
+  await cacheSession(session);
   return session;
 }
 
 export async function logout(): Promise<void> {
-  await api<{ ok: boolean }>("/api/auth/logout", { method: "POST" });
+  try {
+    await api<{ ok: boolean }>("/api/auth/logout", { method: "POST" });
+  } finally {
+    activeSession = null;
+    await AsyncStorage.removeItem(sessionCacheKey);
+  }
+}
+
+export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
+  if (!currentPassword || newPassword.length < 6) throw new Error("Enter the current password and a new password of at least 6 characters.");
+  await api<{ ok: boolean }>("/api/auth/password", {
+    method: "POST",
+    body: { currentPassword, newPassword }
+  });
 }
 
 export async function loadWorkspaceState(): Promise<WorkspaceState> {
-  const result = await api<{ state: WorkspaceState }>("/api/app-state");
+  try {
+    const result = await api<{ state: WorkspaceState }>("/api/app-state");
+    const state = { ...normalizeState(result.state), offlineSnapshot: false, lastSyncedAt: new Date().toISOString() };
+    if (activeSession?.workspaceId) await writeCache(workspaceCacheKey(activeSession.workspaceId), cacheableWorkspaceState(state));
+    return state;
+  } catch (error) {
+    if (!(error instanceof OfflineError) || !activeSession?.workspaceId) throw error;
+    const cached = await readCache<WorkspaceState>(workspaceCacheKey(activeSession.workspaceId));
+    if (!cached) throw new Error("Connect once to download this account before using it offline.");
+    return { ...normalizeState(cached), offlineSnapshot: true, lastSyncedAt: cached.lastSyncedAt };
+  }
+}
+
+export async function saveWorkspaceState(state: WorkspaceState): Promise<void> {
+  if (state.offlineSnapshot) throw new Error("Reconnect to the internet before making financial changes.");
+  await api<{ ok: boolean }>("/api/app-state", {
+    method: "PUT",
+    body: { state: { ...state, offlineSnapshot: undefined, lastSyncedAt: undefined } }
+  });
+  if (activeSession?.workspaceId) {
+    await writeCache(workspaceCacheKey(activeSession.workspaceId), cacheableWorkspaceState({
+      ...state,
+      offlineSnapshot: false,
+      lastSyncedAt: new Date().toISOString()
+    }));
+  }
+}
+
+export async function updateWorkspaceState(mutator: (state: WorkspaceState) => void): Promise<WorkspaceState> {
+  const state = await loadWorkspaceState();
+  mutator(state);
+  await saveWorkspaceState(state);
+  return state;
+}
+
+export async function removeWorkspaceActor(actorId: string, actorName: string): Promise<WorkspaceState> {
+  const result = await api<{ state: WorkspaceState }>("/api/app-state/remove-actor", {
+    method: "POST",
+    body: { actorId, actorName }
+  });
   return normalizeState(result.state);
 }
 
-async function saveWorkspaceState(state: WorkspaceState): Promise<void> {
-  await api<{ ok: boolean }>("/api/app-state", {
-    method: "PUT",
-    body: { state }
+export async function resetWorkspaceData(scope: "data" | "wipe"): Promise<WorkspaceState> {
+  const result = await api<{ state: WorkspaceState }>("/api/app-state/reset", {
+    method: "POST",
+    body: { scope }
   });
+  return normalizeState(result.state);
+}
+
+export async function loadInvites(): Promise<InviteRecord[]> {
+  const result = await api<{ invites: InviteRecord[] }>("/api/invites");
+  return Array.isArray(result.invites) ? result.invites : [];
+}
+
+export async function createInvite(input: { actorRole: ActorRecord["role"]; currency: Currency; workingCurrencies: Currency[] }): Promise<InviteRecord> {
+  const result = await api<{ invite: InviteRecord }>("/api/invites", {
+    method: "POST",
+    body: input
+  });
+  return result.invite;
+}
+
+export async function loadOwnerMasters(): Promise<{ users: OwnerMasterRecord[]; plans: OwnerPlan[] }> {
+  const result = await api<{ users: OwnerMasterRecord[]; plans: OwnerPlan[] }>("/api/owner/masters");
+  return { users: Array.isArray(result.users) ? result.users : [], plans: Array.isArray(result.plans) ? result.plans : [] };
+}
+
+export async function createOwnerMaster(input: { name: string; email: string; password: string; plan: string }): Promise<void> {
+  await api<{ ok: boolean }>("/api/owner/masters", { method: "POST", body: input });
+}
+
+export async function setOwnerMasterActive(userId: string, active: boolean): Promise<void> {
+  await api<{ ok: boolean }>("/api/owner/masters/active", { method: "POST", body: { userId, active } });
+}
+
+export async function extendOwnerSubscription(userId: string, plan: string, mode: "extend" | "reset"): Promise<void> {
+  await api<{ ok: boolean }>("/api/owner/subscriptions/extend", { method: "POST", body: { userId, plan, mode } });
 }
 
 function nextOrderNumberFromOrders(orders: OrderRecord[]): number {

@@ -15,11 +15,17 @@ By default the app talks to `https://haderapay.com`. To point a build at another
 ## Included
 
 - HaderaPay branding, colors, and compact operational layout.
-- Login, signup, session restore, and logout using the HaderaPay server.
-- Role-aware mobile dashboard and orderbook.
+- Login, signup, session restore, password reset, and visible logout controls.
+- Offline read access to the last synchronized dashboard, orders, search, ledger, settlement, archive, and receivables. Posting remains online-only.
+- Role-aware navigation and actions for Owner, Master, Broker, Agent, Special Broker, and Special Agent.
 - Money transfer form with live source-to-payout conversion.
 - Saved sender and receiver details for Brokers and Special Brokers.
-- Master-forwarded orders show the payout actor in their state.
+- Master order forwarding, payer payment confirmation, optional proof photos, and void requests.
+- Internal transfers with approval, plus Master journal and withdrawal tools.
+- Workspace search, receivable collections, chats and Master-managed groups.
+- Master ledger, permanent income snapshots, Actors management, invite codes, and transfer permissions.
+- Owner Master creation and subscription controls.
+- Master-forwarded orders show the payout actor and payer-specific order number in their state.
 - Settlement balances grouped by Broker, Agent, and Special Agent roles.
 - Currency-safe storage: USD/EUR use cents, while ETB/ERN use whole units.
 - Currency conversion flow screen.

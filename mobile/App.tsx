@@ -1,7 +1,9 @@
 import { StatusBar } from "expo-status-bar";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
+  BackHandler,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -16,9 +18,11 @@ import {
   ArrowRight,
   CalendarDays,
   CheckCircle2,
+  ChevronLeft,
   ChevronDown,
   ChevronUp,
   LayoutDashboard,
+  Menu,
   LockKeyhole,
   LogIn,
   LogOut,
@@ -26,7 +30,6 @@ import {
   Repeat2,
   Scale,
   Send,
-  ShieldCheck,
   UserPlus
 } from "lucide-react-native";
 import type { LucideProps } from "lucide-react-native";
@@ -41,6 +44,19 @@ import {
 } from "./src/api/client";
 import { BrandHeader, Button, Field, Panel, Pill, SelectRow, SummaryRow } from "./src/components/ui";
 import { colors, radius, shadow, spacing } from "./src/theme";
+import { actingSessionFor, activeActors, isMasterView, transferTargetsFor } from "./src/domain/workspace";
+import {
+  ActorsScreen,
+  ChatScreen,
+  LedgerScreen,
+  NotificationsPanel,
+  OwnerScreen,
+  OrdersScreen,
+  ReceivablesScreen,
+  SearchScreen,
+  SettingsScreen,
+  TransfersScreen
+} from "./src/screens/WorkspaceScreens";
 import type {
   ActorRecord,
   AppScreen,
@@ -188,11 +204,15 @@ export default function App() {
   const [booting, setBooting] = useState(true);
   const [loggingOut, setLoggingOut] = useState(false);
   const [screen, setScreen] = useState<AppScreen>("home");
+  const [selectedActorId, setSelectedActorId] = useState("");
   const [draft, setDraft] = useState<TransferDraft>(emptyDraft);
   const [submittedOrder, setSubmittedOrder] = useState<SubmittedOrder | null>(null);
   const [workspaceState, setWorkspaceState] = useState<WorkspaceState | null>(null);
   const [stateLoading, setStateLoading] = useState(false);
   const [stateError, setStateError] = useState("");
+  const historyRef = useRef<AppScreen[]>(["home"]);
+  const selectedActor = workspaceState?.actors.find((actor) => actor.id === selectedActorId);
+  const actingSession = session ? actingSessionFor(session, selectedActor) : null;
   const quote = useMemo(() => calculateQuote(draft), [draft]);
 
   useEffect(() => {
@@ -202,6 +222,10 @@ export default function App() {
         if (!mounted || !savedSession) return;
         setSession(savedSession);
         setDraft(draftForSession(savedSession));
+        if (savedSession.role === "Owner") {
+          historyRef.current = ["owner"];
+          setScreen("owner");
+        }
       })
       .catch(() => undefined)
       .finally(() => {
@@ -232,12 +256,31 @@ export default function App() {
     };
   }, [session?.workspaceId]);
 
-  const orderFlowAllowed = canCreateOrders(session);
-  const currentScreen = !orderFlowAllowed && ["transfer", "conversion", "confirmation"].includes(screen) ? "home" : screen;
+  const orderFlowAllowed = canCreateOrders(actingSession);
+  const currentScreen = !orderFlowAllowed && ["newOrder", "conversion", "confirmation"].includes(screen) ? "home" : screen;
 
   useEffect(() => {
-    if (!orderFlowAllowed && ["transfer", "conversion", "confirmation"].includes(screen)) setScreen("home");
+    if (!orderFlowAllowed && ["newOrder", "conversion", "confirmation"].includes(screen)) setScreen("home");
   }, [orderFlowAllowed, screen]);
+
+  const navigate = (next: AppScreen) => {
+    if (next === screen) return;
+    historyRef.current.push(next);
+    setScreen(next);
+  };
+
+  const goBack = () => {
+    if (historyRef.current.length <= 1) return false;
+    historyRef.current.pop();
+    setScreen(historyRef.current[historyRef.current.length - 1] || "home");
+    return true;
+  };
+
+  useEffect(() => {
+    if (!session) return;
+    const subscription = BackHandler.addEventListener("hardwareBackPress", () => goBack());
+    return () => subscription.remove();
+  }, [session, screen]);
 
   const refreshWorkspace = async () => {
     if (!session) return;
@@ -256,7 +299,10 @@ export default function App() {
     setSession(nextSession);
     setDraft(draftForSession(nextSession));
     setSubmittedOrder(null);
-    setScreen("home");
+    setSelectedActorId("");
+    const firstScreen: AppScreen = nextSession.role === "Owner" ? "owner" : "home";
+    historyRef.current = [firstScreen];
+    setScreen(firstScreen);
   };
 
   const handleLogout = async () => {
@@ -270,7 +316,9 @@ export default function App() {
       setSession(null);
       setWorkspaceState(null);
       setSubmittedOrder(null);
+      setSelectedActorId("");
       setDraft(emptyDraft);
+      historyRef.current = ["home"];
       setScreen("home");
     }
   };
@@ -279,62 +327,112 @@ export default function App() {
     return <LoadingScreen />;
   }
 
-  if (!session) {
+  if (!session || !actingSession) {
     return <AuthScreen onAuthenticated={handleAuthenticated} />;
   }
+
+  const offline = workspaceState?.offlineSnapshot === true;
+  const commonProps = workspaceState ? {
+    session: actingSession,
+    state: workspaceState,
+    offline,
+    onState: setWorkspaceState,
+    onNavigate: navigate,
+    onRefresh: refreshWorkspace
+  } : null;
 
   return (
     <SafeAreaView style={styles.safe}>
       <StatusBar style="dark" />
       <KeyboardAvoidingView style={styles.app} behavior={Platform.OS === "ios" ? "padding" : undefined}>
         <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-          <AppTopBar session={session} onLogout={handleLogout} loggingOut={loggingOut} />
+          <AppTopBar
+            session={actingSession}
+            offline={offline}
+            lastSyncedAt={workspaceState?.lastSyncedAt}
+            canGoBack={historyRef.current.length > 1}
+            onBack={goBack}
+            onLogout={() => Alert.alert("Log out?", "This account will stay available offline until you log out.", [
+              { text: "Cancel", style: "cancel" },
+              { text: "Log out", style: "destructive", onPress: handleLogout }
+            ])}
+            loggingOut={loggingOut}
+          />
           {stateError ? <Text style={styles.errorText}>{stateError}</Text> : null}
+          {!workspaceState && stateLoading ? <View style={styles.loadingWrap}><ActivityIndicator color={colors.accent} /><Text style={styles.mutedText}>Loading workspace...</Text></View> : null}
+          {workspaceState && actingSession.role !== "Owner" ? <NotificationsPanel session={actingSession} state={workspaceState} onNavigate={navigate} /> : null}
+          {currentScreen === "owner" && actingSession.role === "Owner" ? <OwnerScreen offline={offline} /> : null}
           {currentScreen === "home" && (
             <HomeScreen
-              session={session}
+              session={actingSession}
               workspaceState={workspaceState}
               stateLoading={stateLoading}
               onRefresh={refreshWorkspace}
-              onTransfer={() => setScreen("transfer")}
-              onConversion={() => setScreen("conversion")}
-              onSettlement={() => setScreen("settlement")}
+              onTransfer={() => navigate("newOrder")}
+              onConversion={() => navigate("conversion")}
+              onSettlement={() => navigate("settlement")}
+              onOrders={() => navigate("orders")}
+              onTransfers={() => navigate("transfers")}
+              onLedger={() => navigate("ledger")}
             />
           )}
+          {commonProps && currentScreen === "orders" ? <OrdersScreen {...commonProps} /> : null}
+          {commonProps && currentScreen === "transfers" ? <TransfersScreen {...commonProps} /> : null}
+          {commonProps && currentScreen === "search" ? <SearchScreen {...commonProps} /> : null}
+          {commonProps && currentScreen === "receivables" && (isMasterView(actingSession) || ["Broker", "Special Broker"].includes(actingSession.actorRole)) ? <ReceivablesScreen {...commonProps} /> : null}
+          {commonProps && currentScreen === "chat" ? <ChatScreen {...commonProps} /> : null}
+          {commonProps && currentScreen === "ledger" ? <LedgerScreen {...commonProps} /> : null}
+          {commonProps && currentScreen === "actors" && isMasterView(actingSession) ? <ActorsScreen {...commonProps} /> : null}
+          {commonProps && currentScreen === "settings" ? <SettingsScreen {...commonProps} /> : null}
+          {workspaceState && currentScreen === "more" ? (
+            <MoreScreen
+              loginSession={session}
+              session={actingSession}
+              state={workspaceState}
+              onNavigate={navigate}
+              onSelectActor={(actorId) => {
+                setSelectedActorId(actorId);
+                const actor = workspaceState.actors.find((item) => item.id === actorId);
+                setDraft(draftForSession(actingSessionFor(session, actor)));
+                navigate("home");
+              }}
+              onLogout={() => Alert.alert("Log out?", "Your locally cached account will be removed from this device.", [{ text: "Cancel", style: "cancel" }, { text: "Log out", style: "destructive", onPress: handleLogout }])}
+            />
+          ) : null}
           {currentScreen === "settlement" && (
-            <SettlementScreen session={session} workspaceState={workspaceState} />
+            <SettlementScreen session={actingSession} workspaceState={workspaceState} />
           )}
           {currentScreen === "archive" && (
             <ArchiveScreen
-              session={session}
+              session={actingSession}
               workspaceState={workspaceState}
               stateLoading={stateLoading}
               onRefresh={refreshWorkspace}
             />
           )}
-          {orderFlowAllowed && currentScreen === "transfer" && (
+          {orderFlowAllowed && currentScreen === "newOrder" && (
             <TransferScreen
-              session={session}
+              session={actingSession}
               workspaceState={workspaceState}
               draft={draft}
               setDraft={setDraft}
               quote={quote}
-              onConversion={() => setScreen("conversion")}
-              onContinue={() => setScreen("confirmation")}
+              onConversion={() => navigate("conversion")}
+              onContinue={() => navigate("confirmation")}
             />
           )}
           {orderFlowAllowed && currentScreen === "conversion" && (
             <ConversionScreen
-              session={session}
+              session={actingSession}
               draft={draft}
               quote={quote}
-              onEdit={() => setScreen("transfer")}
-              onContinue={() => setScreen("confirmation")}
+              onEdit={() => navigate("newOrder")}
+              onContinue={() => navigate("confirmation")}
             />
           )}
           {orderFlowAllowed && currentScreen === "confirmation" && (
             <ConfirmationScreen
-              session={session}
+              session={actingSession}
               draft={draft}
               quote={quote}
               submittedOrder={submittedOrder}
@@ -342,16 +440,16 @@ export default function App() {
                 setSubmittedOrder(order);
                 setWorkspaceState(order.state);
               }}
-              onEdit={() => setScreen("transfer")}
+              onEdit={() => navigate("newOrder")}
               onHome={() => {
                 setSubmittedOrder(null);
-                setDraft(draftForSession(session));
-                setScreen("home");
+                setDraft(draftForSession(actingSession));
+                navigate("home");
               }}
             />
           )}
         </ScrollView>
-        <BottomTabs session={session} current={currentScreen} onChange={setScreen} />
+        <BottomTabs session={actingSession} state={workspaceState} current={currentScreen} onChange={navigate} />
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -452,27 +550,99 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (session: UserSessio
 
 function AppTopBar({
   session,
+  offline,
+  lastSyncedAt,
+  canGoBack,
+  onBack,
   onLogout,
   loggingOut
 }: {
   session: UserSession;
+  offline: boolean;
+  lastSyncedAt?: string;
+  canGoBack: boolean;
+  onBack: () => boolean;
   onLogout: () => void;
   loggingOut: boolean;
 }) {
   return (
     <View style={styles.sessionBar}>
-      <BrandHeader subtitle={session.workspace} />
-      <View style={styles.sessionTools}>
-        <Pill label={session.actorRole} tone={canCreateOrders(session) ? "good" : "neutral"} />
-        <Button
-          label="Log out"
-          variant="secondary"
-          onPress={onLogout}
-          loading={loggingOut}
-          icon={<LogOut size={18} color={colors.ink} />}
-          style={styles.logoutButton}
-        />
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Go back"
+        disabled={!canGoBack}
+        onPress={onBack}
+        style={[styles.iconButton, !canGoBack && styles.iconButtonDisabled]}
+      >
+        <ChevronLeft size={22} color={canGoBack ? colors.ink : colors.muted} />
+      </Pressable>
+      <View style={styles.topBrand}>
+        <Text style={styles.topBrandName}>HaderaPay</Text>
+        <Text style={styles.topBrandSub} numberOfLines={1}>{session.actorName} - {session.actorRole}{offline && lastSyncedAt ? ` - synced ${new Date(lastSyncedAt).toLocaleString()}` : ""}</Text>
       </View>
+      <View style={styles.sessionTools}>
+        {offline ? <Pill label="Offline" tone="warn" /> : null}
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Log out"
+          onPress={onLogout}
+          disabled={loggingOut}
+          style={styles.iconButton}
+        >
+          {loggingOut ? <ActivityIndicator color={colors.accent} /> : <LogOut size={21} color={colors.danger} />}
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+function MoreScreen({
+  loginSession,
+  session,
+  state,
+  onNavigate,
+  onSelectActor,
+  onLogout
+}: {
+  loginSession: UserSession;
+  session: UserSession;
+  state: WorkspaceState;
+  onNavigate: (screen: AppScreen) => void;
+  onSelectActor: (actorId: string) => void;
+  onLogout: () => void;
+}) {
+  const links: Array<{ screen: AppScreen; label: string }> = session.role === "Owner" ? [
+    { screen: "owner", label: "Owner console" },
+    { screen: "settings", label: "Password" }
+  ] : [
+    { screen: "search", label: "Search" },
+    { screen: "chat", label: "Chat" },
+    { screen: "settlement", label: "Settlement" },
+    { screen: "archive", label: "Archive" },
+    ...(isMasterView(session) || ["Broker", "Special Broker"].includes(session.actorRole) ? [{ screen: "receivables" as AppScreen, label: "Receivables" }] : []),
+    ...(isMasterView(session) ? [{ screen: "actors" as AppScreen, label: "Actors" }] : []),
+    { screen: "settings", label: "Settings" }
+  ];
+  const managedActors = loginSession.role === "Master" ? activeActors(state).filter((actor) => actor.managedByMaster === true) : [];
+  return (
+    <View style={styles.screen}>
+      <HeaderTitle title="More" subtitle={`${session.actorName} - ${session.actorRole}`} />
+      <Panel title="Workspace tools">
+        <View style={styles.moreGrid}>
+          {links.map((link) => <Button key={link.screen} label={link.label} variant="secondary" onPress={() => onNavigate(link.screen)} style={styles.moreButton} />)}
+        </View>
+      </Panel>
+      {managedActors.length ? (
+        <Panel title="Managed profiles" badge="Master controlled">
+          <Button label={`Master: ${loginSession.actorName}`} variant={!session.managedByMaster ? "primary" : "secondary"} onPress={() => onSelectActor("")} />
+          {managedActors.map((actor) => <Button key={actor.id} label={`${actor.name} - ${actor.role}`} variant={session.actorId === actor.id ? "primary" : "secondary"} onPress={() => onSelectActor(actor.id)} />)}
+        </Panel>
+      ) : null}
+      <Panel title="Account">
+        <SummaryRow label="Workspace" value={session.workspace} />
+        <SummaryRow label="Base currency" value={session.currency} />
+        <Button label="Log out" variant="danger" icon={<LogOut size={18} color={colors.danger} />} onPress={onLogout} />
+      </Panel>
     </View>
   );
 }
@@ -484,7 +654,10 @@ function HomeScreen({
   onRefresh,
   onTransfer,
   onConversion,
-  onSettlement
+  onSettlement,
+  onOrders,
+  onTransfers,
+  onLedger
 }: {
   session: UserSession;
   workspaceState: WorkspaceState | null;
@@ -493,20 +666,24 @@ function HomeScreen({
   onTransfer: () => void;
   onConversion: () => void;
   onSettlement: () => void;
+  onOrders: () => void;
+  onTransfers: () => void;
+  onLedger: () => void;
 }) {
   const orders = visibleOrdersFor(session, workspaceState);
   const assignedOrders = orders.filter((order) => order.state === "Assigned");
-  const paidOrders = orders.filter((order) => order.state === "Paid");
   const actorCanSendOrders = canCreateOrders(session);
+  const pendingTransfers = (workspaceState?.transfers || []).filter((transfer) => transfer.state === "Pending Approval").length;
+  const ledgerLines = (workspaceState?.ledger || []).filter((line) => session.actorRole === "Master" || String(line.account).includes(session.actorName)).length;
 
   return (
     <View style={styles.screen}>
       <Panel title="Dashboard" badge={stateLoading ? "Syncing" : "Live"}>
         <View style={styles.metricsGrid}>
-          <Metric label="Open orders" value={String(orders.length)} />
-          <Metric label="Assigned" value={String(assignedOrders.length)} />
-          <Metric label="Paid" value={String(paidOrders.length)} />
-          <Metric label="Currency" value={session.currency} />
+          <Metric label="Open orders" value={String(orders.length)} onPress={onOrders} />
+          <Metric label="Pending approvals" value={String(session.actorRole === "Master" ? pendingTransfers : assignedOrders.length)} onPress={session.actorRole === "Master" ? onTransfers : onOrders} />
+          <Metric label="Settlement net" value={session.currency} onPress={onSettlement} />
+          <Metric label="Journal lines" value={String(ledgerLines)} onPress={onLedger} />
         </View>
       </Panel>
       <View style={styles.quickActions}>
@@ -1002,12 +1179,12 @@ function QuotePanel({ quote, expanded = false }: { quote: ReturnType<typeof calc
   );
 }
 
-function Metric({ label, value }: { label: string; value: string }) {
+function Metric({ label, value, onPress }: { label: string; value: string; onPress?: () => void }) {
   return (
-    <View style={styles.metric}>
+    <Pressable style={({ pressed }) => [styles.metric, pressed && styles.metricPressed]} onPress={onPress} disabled={!onPress}>
       <Text style={styles.metricLabel}>{label}</Text>
       <Text style={styles.metricValue} numberOfLines={1}>{value}</Text>
-    </View>
+    </Pressable>
   );
 }
 
@@ -1022,25 +1199,28 @@ function HeaderTitle({ title, subtitle }: { title: string; subtitle: string }) {
 
 function BottomTabs({
   session,
+  state,
   current,
   onChange
 }: {
   session: UserSession;
+  state: WorkspaceState | null;
   current: AppScreen;
   onChange: (screen: AppScreen) => void;
 }) {
-  const tabs: Array<{ id: AppScreen; label: string; Icon: IconComponent }> = [
+  const tabs: Array<{ id: AppScreen; label: string; Icon: IconComponent }> = session.role === "Owner" ? [
+    { id: "owner", label: "Owner", Icon: LayoutDashboard },
+    { id: "settings", label: "Password", Icon: LockKeyhole },
+    { id: "more", label: "More", Icon: Menu }
+  ] : [
     { id: "home", label: "Home", Icon: LayoutDashboard },
-    { id: "settlement", label: "Settle", Icon: Scale },
-    { id: "archive", label: "Archive", Icon: ArchiveIcon }
+    { id: "orders", label: "Orders", Icon: Send },
+    state && (isMasterView(session) || transferTargetsFor(session, state).length > 0)
+      ? { id: "transfers", label: "Transfer", Icon: Repeat2 }
+      : { id: "settlement", label: "Settle", Icon: Scale },
+    { id: "ledger", label: "Ledger", Icon: ArchiveIcon },
+    { id: "more", label: "More", Icon: Menu }
   ];
-  if (canCreateOrders(session)) {
-    tabs.push(
-      { id: "transfer", label: "Order", Icon: Send },
-      { id: "conversion", label: "Convert", Icon: Repeat2 },
-      { id: "confirmation", label: "Confirm", Icon: ShieldCheck }
-    );
-  }
 
   return (
     <View style={styles.tabs}>
@@ -1099,19 +1279,46 @@ const styles = StyleSheet.create({
     gap: spacing.md
   },
   sessionBar: {
-    minHeight: 62,
+    minHeight: 54,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    gap: spacing.md
+    gap: spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.line,
+    paddingBottom: spacing.sm
+  },
+  iconButton: {
+    width: 42,
+    height: 42,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: colors.panel,
+    alignItems: "center",
+    justifyContent: "center"
+  },
+  iconButtonDisabled: {
+    opacity: 0.4
+  },
+  topBrand: {
+    flex: 1,
+    minWidth: 0
+  },
+  topBrandName: {
+    color: colors.ink,
+    fontSize: 17,
+    fontWeight: "900"
+  },
+  topBrandSub: {
+    color: colors.muted,
+    fontSize: 11,
+    marginTop: 2
   },
   sessionTools: {
-    alignItems: "flex-end",
+    flexDirection: "row",
+    alignItems: "center",
     gap: spacing.sm
-  },
-  logoutButton: {
-    minHeight: 40,
-    paddingHorizontal: spacing.md
   },
   screen: {
     gap: spacing.lg
@@ -1142,6 +1349,10 @@ const styles = StyleSheet.create({
     backgroundColor: colors.panel2,
     padding: spacing.md,
     justifyContent: "space-between"
+  },
+  metricPressed: {
+    borderColor: colors.accent,
+    backgroundColor: colors.accentSoft
   },
   metricLabel: {
     color: colors.muted,
@@ -1389,6 +1600,14 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     backgroundColor: colors.goodSoft,
     alignSelf: "center"
+  },
+  moreGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: spacing.sm
+  },
+  moreButton: {
+    width: "48%"
   },
   tabs: {
     position: "absolute",

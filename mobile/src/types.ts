@@ -1,6 +1,22 @@
 export type Currency = "USD" | "ETB" | "EUR" | "ERN";
 export type AuthMode = "login" | "signup";
-export type AppScreen = "home" | "settlement" | "archive" | "transfer" | "conversion" | "confirmation";
+export type AppScreen =
+  | "home"
+  | "orders"
+  | "newOrder"
+  | "conversion"
+  | "confirmation"
+  | "transfers"
+  | "search"
+  | "receivables"
+  | "chat"
+  | "ledger"
+  | "settlement"
+  | "archive"
+  | "actors"
+  | "settings"
+  | "owner"
+  | "more";
 export type FundingType = "cash" | "credit";
 export type MembershipRole = "Owner" | "Master" | "Actor";
 export type ActorRole = "Owner" | "Master" | "Broker" | "Agent" | "Special Broker" | "Special Agent";
@@ -17,6 +33,7 @@ export interface UserSession {
   workingCurrencies: Currency[];
   workspaceId: string;
   workspace: string;
+  managedByMaster?: boolean;
 }
 
 export interface ApiSession {
@@ -49,6 +66,20 @@ export interface ActorRecord {
   transferEnabled?: boolean;
   transferMode?: "actor" | "master" | "both" | "none";
   orderMultiCurrencyEnabled?: boolean;
+  managedByMaster?: boolean;
+  incomeStatementVisible?: boolean;
+  specialPayoutDivider?: number;
+  specialPayoutDividerEnabled?: boolean;
+  specialPayoutPercent?: number;
+  specialPayoutSettings?: Partial<Record<Currency, RateSetting>>;
+  orderFixedRates?: Partial<Record<Currency, { enabled?: boolean; rate?: number | string }>>;
+  orderVisibilityPermissions?: Partial<Record<"sourceCurrency" | "rate" | "commission" | "baseAmount", boolean>>;
+}
+
+export interface RateSetting {
+  enabled?: boolean;
+  divider?: number;
+  percent?: number;
 }
 
 export type OrderState =
@@ -98,6 +129,29 @@ export interface OrderRecord {
   locked?: boolean;
   voidJournal?: string;
   voidRequested?: boolean;
+  voidRequestedBy?: string;
+  voidRequestedAt?: string;
+  voidRejectedBy?: string;
+  voidRejectedAt?: string;
+  voidedBy?: string;
+  voidedAt?: string;
+  assignedAt?: string;
+  forwardedPayoutDivider?: number;
+  forwardedPayoutPercent?: number;
+  manualSpecialPayoutDivider?: number;
+  manualSpecialPayoutPercent?: number;
+  manualMasterRateDivider?: number;
+  manualMasterRatePercent?: number;
+  paymentProof?: { dataUri: string; fileName: string; attachedAt: string };
+  incomeBaseCurrency?: Currency;
+  incomeBaseAmountMinor?: number;
+  incomeCollectedCurrency?: Currency;
+  incomeCollectedOriginalMinor?: number;
+  incomeCollectedEurMinor?: number;
+  incomeCollectedUsdMinor?: number;
+  incomeProfitMinor?: number;
+  incomeSnapshotAt?: string;
+  incomeMasterRateSnapshot?: RateSetting & { payoutCurrency?: Currency };
 }
 
 export interface ReceivableRecord {
@@ -115,7 +169,10 @@ export interface ReceivableRecord {
   createdAt: string;
   updatedAt: string;
   createdBy: string;
-  payments: Array<{ amountMinor: number; paidAt: string; receivedBy: string }>;
+  payments: Array<{ id?: string; amountMinor: number; paidAt: string; receivedBy: string }>;
+  voided?: boolean;
+  voidedAt?: string;
+  voidedBy?: string;
 }
 
 export interface SavedCustomerRecord {
@@ -130,11 +187,75 @@ export interface SavedCustomerRecord {
 }
 
 export interface LedgerLine {
+  journal?: string;
+  entryId?: string;
+  transferId?: string;
+  orderId?: string;
+  source?: string;
   account: string;
   direction: "Debit" | "Credit";
   currency: Currency;
   amountMinor: number;
+  postedAt?: string;
+  details?: string;
   [key: string]: unknown;
+}
+
+export type TransferState = "Pending Approval" | "Approved" | "Returned" | "Rejected";
+
+export interface InternalTransferRecord {
+  id: string;
+  from: string;
+  fromActorId?: string;
+  to: string;
+  toActorId?: string;
+  sourceCurrency: Currency;
+  sourceAmountMinor: number;
+  currency: Currency;
+  amountMinor: number;
+  rate: number | string;
+  commissionPercent?: number;
+  commissionMinor?: number;
+  remarks: string;
+  state: TransferState;
+  journal?: string;
+  initiatedBy?: string;
+  createdAt: string;
+  sentAt: string;
+  approvedAt?: string;
+  paidOutAt?: string;
+  returnedAt?: string;
+  returnedBy?: string;
+  returnedReason?: string;
+  rejectedAt?: string;
+}
+
+export interface ChatMessageRecord {
+  id: string;
+  from: string;
+  text: string;
+  kind?: "text" | "photo" | "voice";
+  media?: string;
+  fileName?: string;
+  replyTo?: string;
+  reactions?: Record<string, string>;
+  readBy?: string[];
+  createdAt: string;
+}
+
+export interface ChatConversationRecord {
+  id: string;
+  type: "direct" | "group";
+  name: string;
+  members: string[];
+  messages: ChatMessageRecord[];
+  createdAt: string;
+}
+
+export interface SettlementRecord {
+  actor: string;
+  currency: Currency;
+  netMinor: number;
 }
 
 export interface ArchiveRecord {
@@ -176,12 +297,64 @@ export interface WorkspaceState {
   orders: OrderRecord[];
   receivables: ReceivableRecord[];
   savedCustomers: SavedCustomerRecord[];
+  transfers: InternalTransferRecord[];
   ledger: LedgerLine[];
   archives: ArchiveRecord[];
+  settlements: SettlementRecord[];
+  chatConversations: ChatConversationRecord[];
+  deletedActorIds?: string[];
+  deletedChatIds?: string[];
+  masterRateDivisorSettings?: Partial<Record<Currency, RateSetting>>;
+  buyingRates?: { eurToUsd?: number; usdToEtb?: number; usdToErn?: number };
   orderCounter?: number;
   receivableCounter?: number;
   customerCounter?: number;
+  transferCounter?: number;
+  journalCounter?: number;
+  actorCounter?: number;
+  chatCounter?: number;
+  messageCounter?: number;
+  offlineSnapshot?: boolean;
+  lastSyncedAt?: string;
   [key: string]: unknown;
+}
+
+export interface InternalTransferDraft {
+  toActorId: string;
+  sourceCurrency: Currency;
+  payoutCurrency: Currency;
+  sourceAmount: string;
+  payoutAmount: string;
+  rate: string;
+  commissionPercent: string;
+  remarks: string;
+}
+
+export interface InviteRecord {
+  id?: string;
+  code?: string;
+  actorRole: ActorRole;
+  currency: Currency;
+  workingCurrencies?: Currency[];
+  actorId?: string;
+  actorName?: string;
+  acceptedAt?: string;
+}
+
+export interface OwnerPlan {
+  id: string;
+  label: string;
+}
+
+export interface OwnerMasterRecord {
+  userId: string;
+  name: string;
+  email: string;
+  workspace: string;
+  plan: string;
+  active: boolean;
+  expiresAt: string;
+  expired: boolean;
 }
 
 export interface TransferDraft {
