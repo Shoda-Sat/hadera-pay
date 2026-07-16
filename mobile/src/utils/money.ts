@@ -54,6 +54,44 @@ export function inputAmount(currency: Currency, amount: number): string {
     .replace(/\.0+$/, "");
 }
 
+export type OrderConversionField = "sourceAmount" | "rate" | "payoutAmount";
+
+export function inputRate(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "";
+  const rounded = Math.round(value * 1_000_000) / 1_000_000;
+  return String(rounded);
+}
+
+export function reconcileOrderConversion(draft: TransferDraft, touchedFields: readonly OrderConversionField[]): TransferDraft {
+  const sourceAmount = parseAmount(draft.sourceAmount);
+  const payoutAmount = parseAmount(draft.payoutAmount);
+  const rate = parseAmount(draft.rate);
+  const touched = new Set(touchedFields);
+  const sourceAndPayout = touched.has("sourceAmount") && touched.has("payoutAmount");
+  const rateAndPayout = touched.has("rate") && touched.has("payoutAmount");
+  const sourceAndRate = touched.has("sourceAmount") && touched.has("rate");
+
+  if (sourceAndPayout && sourceAmount > 0 && payoutAmount > 0) {
+    return { ...draft, rate: inputRate(payoutAmount / sourceAmount) };
+  }
+  if (rateAndPayout && rate > 0 && payoutAmount > 0) {
+    return { ...draft, sourceAmount: inputAmount(draft.sourceCurrency, payoutAmount / rate) };
+  }
+  if (sourceAndRate && sourceAmount > 0 && rate > 0) {
+    return { ...draft, payoutAmount: inputAmount(draft.payoutCurrency, sourceAmount * rate) };
+  }
+  if (rate <= 0 && sourceAmount > 0 && payoutAmount > 0) {
+    return { ...draft, rate: inputRate(payoutAmount / sourceAmount) };
+  }
+  if (sourceAmount <= 0 && payoutAmount > 0 && rate > 0) {
+    return { ...draft, sourceAmount: inputAmount(draft.sourceCurrency, payoutAmount / rate) };
+  }
+  if (payoutAmount <= 0 && sourceAmount > 0 && rate > 0) {
+    return { ...draft, payoutAmount: inputAmount(draft.payoutCurrency, sourceAmount * rate) };
+  }
+  return draft;
+}
+
 export function calculateQuote(draft: TransferDraft): TransferQuote {
   const sourceAmount = normalizedMajor(parseAmount(draft.sourceAmount), draft.sourceCurrency);
   const manualPayout = normalizedMajor(parseAmount(draft.payoutAmount), draft.payoutCurrency);

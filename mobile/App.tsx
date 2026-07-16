@@ -72,7 +72,8 @@ import type {
   UserSession,
   WorkspaceState
 } from "./src/types";
-import { calculateQuote, compactAmount, currencies, formatAmount, inputAmount, majorFromMinor } from "./src/utils/money";
+import { calculateQuote, compactAmount, currencies, formatAmount, inputAmount, majorFromMinor, reconcileOrderConversion } from "./src/utils/money";
+import type { OrderConversionField } from "./src/utils/money";
 
 type IconComponent = React.ComponentType<LucideProps>;
 
@@ -1006,6 +1007,7 @@ function TransferScreen({
 }) {
   const actor = actorForSession(session, workspaceState);
   const [activeCustomerPicker, setActiveCustomerPicker] = useState<SavedCustomerRecord["kind"] | null>(null);
+  const orderConversionTouches = useRef<OrderConversionField[]>([]);
   const senderCustomers = savedCustomersFor(session, workspaceState, "sender");
   const receiverCustomers = savedCustomersFor(session, workspaceState, "receiver");
   const sourceOptions = actor?.orderMultiCurrencyEnabled === true
@@ -1019,14 +1021,13 @@ function TransferScreen({
     setField(kind === "sender" ? "senderName" : "receiverName", value);
     setActiveCustomerPicker(null);
   };
-  const setConversionField = (key: "sourceCurrency" | "payoutCurrency" | "sourceAmount" | "rate", value: Currency | string) => {
+  const setConversionField = (key: OrderConversionField, value: string) => {
+    orderConversionTouches.current = orderConversionTouches.current.filter((field) => field !== key);
+    orderConversionTouches.current.push(key);
+    orderConversionTouches.current = orderConversionTouches.current.slice(-2);
     setDraft((current) => {
-      const next = { ...current, broker: session.actorName, [key]: value } as TransferDraft;
-      const calculated = calculateQuote({ ...next, payoutAmount: "" });
-      return {
-        ...next,
-        payoutAmount: inputAmount(next.payoutCurrency, calculated.payoutAmount)
-      };
+      const next = { ...current, broker: session.actorName, [key]: value };
+      return reconcileOrderConversion(next, orderConversionTouches.current);
     });
   };
   const chooseCustomer = (customer: SavedCustomerRecord) => {
@@ -1049,12 +1050,12 @@ function TransferScreen({
       <Panel title="Money Transfer" badge={editingOrderId ? "Returned" : "Draft"}>
         <SummaryRow label="Broker" value={session.actorName} strong />
         <View style={styles.twoColumn}>
-          <SelectRow<Currency> label="Source currency" options={sourceOptions} value={sourceCurrency} onChange={(value) => setConversionField("sourceCurrency", value)} />
-          <SelectRow<Currency> label="Payout currency" options={currencies} value={draft.payoutCurrency} onChange={(value) => setConversionField("payoutCurrency", value)} />
+          <SelectRow<Currency> label="Source currency" options={sourceOptions} value={sourceCurrency} onChange={(value) => setField("sourceCurrency", value)} />
+          <SelectRow<Currency> label="Payout currency" options={currencies} value={draft.payoutCurrency} onChange={(value) => setField("payoutCurrency", value)} />
         </View>
         <Field label="Source amount" value={draft.sourceAmount} onChangeText={(value) => setConversionField("sourceAmount", value)} keyboardType="decimal-pad" />
         <Field label="Exchange rate" value={draft.rate} onChangeText={(value) => setConversionField("rate", value)} keyboardType="decimal-pad" />
-        <Field label="Total payout" value={draft.payoutAmount} onChangeText={(value) => setField("payoutAmount", value)} keyboardType="decimal-pad" placeholder="Auto from source and rate" />
+        <Field label="Total payout" value={draft.payoutAmount} onChangeText={(value) => setConversionField("payoutAmount", value)} keyboardType="decimal-pad" placeholder="Calculated from any other two fields" />
         <Field label="Commission %" value={draft.commissionPercent} onChangeText={(value) => setField("commissionPercent", value)} keyboardType="decimal-pad" />
         <SelectRow<FundingType> label="Payment type" options={["cash", "credit"]} value={draft.fundingType} onChange={(value) => setField("fundingType", value)} />
       </Panel>

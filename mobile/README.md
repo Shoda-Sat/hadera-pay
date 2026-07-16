@@ -19,6 +19,7 @@ By default the app talks to `https://haderapay.com`. To point a build at another
 - Offline read access to the last synchronized dashboard, orders, search, ledger, settlement, archive, and receivables. Posting remains online-only.
 - Role-aware navigation and actions for Owner, Master, Broker, Agent, Special Broker, and Special Agent.
 - Money transfer form with live source-to-payout conversion.
+- Order Source, Rate, and Payout fields calculate the third value from whichever two the Broker enters.
 - Saved sender and receiver details for Brokers and Special Brokers.
 - Contact suggestions dismiss when a new name is typed, and returned orders can be corrected and resubmitted with their original number.
 - Master order forwarding, payer payment confirmation, optional proof photos, and void requests.
