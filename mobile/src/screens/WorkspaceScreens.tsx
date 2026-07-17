@@ -37,6 +37,7 @@ import {
   actorCanReceivePayouts,
   actorForSession,
   actorTransferCurrencies,
+  actorTransferReceiveCurrencies,
   approveOrderVoid,
   assignOrder,
   cancelOrder,
@@ -359,6 +360,8 @@ export function TransfersScreen(props: CommonProps) {
   const [busy, setBusy] = useState(false);
   const [journal, setJournal] = useState({ actorId: "", sourceCurrency: "USD" as Currency, sourceAmount: "", currency: "USD" as Currency, amount: "", rate: "1", remarks: "" });
   const targets = transferTargetsFor(session, state);
+  const receivingActor = targets.find((target) => target.id === draft.toActorId);
+  const payoutCurrencies = actorTransferReceiveCurrencies(receivingActor);
   const transfers = state.transfers.filter((item) => isMasterView(session) || item.from === session.actorName || item.to === session.actorName);
   const master = isMasterView(session);
 
@@ -373,6 +376,16 @@ export function TransfersScreen(props: CommonProps) {
     setDraft((current) => reconcileOrderConversion({ ...current, [key]: value }, conversionTouches.current));
   };
 
+  const selectReceivingActor = (target: ActorRecord) => {
+    conversionTouches.current = [];
+    const allowedCurrencies = actorTransferReceiveCurrencies(target);
+    setDraft((current) => ({
+      ...current,
+      toActorId: target.id,
+      payoutCurrency: allowedCurrencies.includes(current.payoutCurrency) ? current.payoutCurrency : allowedCurrencies[0] || target.currency
+    }));
+  };
+
   return (
     <View style={styles.screen}>
       <ScreenTitle title="Transfers" subtitle="Transfers, journals, and withdrawals" />
@@ -381,10 +394,10 @@ export function TransfersScreen(props: CommonProps) {
       {mode === "Transfer" ? (
         <Panel title="New transfer" badge={master ? "Posts now" : "Needs approval"}>
           <Text style={styles.fieldLabel}>Receiving actor</Text>
-          <View style={styles.choiceWrap}>{targets.map((target) => <Pressable key={target.id} onPress={() => setDraft({ ...draft, toActorId: target.id })} style={[styles.choice, draft.toActorId === target.id && styles.choiceActive]}><Text style={[styles.choiceText, draft.toActorId === target.id && styles.choiceTextActive]}>{target.name}</Text></Pressable>)}</View>
+          <View style={styles.choiceWrap}>{targets.map((target) => <Pressable key={target.id} onPress={() => selectReceivingActor(target)} style={[styles.choice, draft.toActorId === target.id && styles.choiceActive]}><Text style={[styles.choiceText, draft.toActorId === target.id && styles.choiceTextActive]}>{target.name}</Text></Pressable>)}</View>
           <SelectRow label="Source currency" options={currencies.length ? currencies : [session.currency]} value={draft.sourceCurrency} onChange={(value) => setDraft({ ...draft, sourceCurrency: value })} />
           <Field label="Source amount" value={draft.sourceAmount} onChangeText={(value) => setConversionField("sourceAmount", value)} keyboardType="decimal-pad" />
-          <SelectRow label="Payout currency" options={supportedCurrencies} value={draft.payoutCurrency} onChange={(value) => setDraft({ ...draft, payoutCurrency: value })} />
+          <SelectRow label="Payout currency" options={payoutCurrencies.length ? payoutCurrencies : [draft.payoutCurrency]} value={draft.payoutCurrency} onChange={(value) => setDraft({ ...draft, payoutCurrency: value })} />
           <Field label="Rate" value={draft.rate} onChangeText={(value) => setConversionField("rate", value)} keyboardType="decimal-pad" />
           <Field label="Payout amount" value={draft.payoutAmount} onChangeText={(value) => setConversionField("payoutAmount", value)} keyboardType="decimal-pad" />
           <Field label="Percent" value={draft.commissionPercent} onChangeText={(value) => setDraft({ ...draft, commissionPercent: value })} keyboardType="decimal-pad" />
@@ -791,7 +804,29 @@ export function SettingsScreen({ session, state, offline, onState }: CommonProps
             }) : <Text style={styles.muted}>No active USD Agents.</Text>
           ) : null}
         </Panel>
-        <Panel title="Actor permissions" badge="Orders and transfers">{activeActors(state).filter((actor) => actor.role !== "Master").map((actor) => { const visibility = actor.orderVisibilityPermissions || {}; return <View key={actor.id} style={styles.permissionRow}><Text style={styles.primaryLine}>{actor.name} - {actor.role}</Text><SelectRow label="Transfer access" options={["actor", "master", "both", "none"]} value={actor.transferMode || "master"} onChange={(mode) => setMode(actor.id, mode)} />{["Broker", "Special Broker"].includes(actor.role) ? <ToggleChoice label="Multi-currency orders" checked={actor.orderMultiCurrencyEnabled === true} disabled={offline || busy === actor.id} onPress={() => updateActor(actor.id, { orderMultiCurrencyEnabled: actor.orderMultiCurrencyEnabled !== true })} /> : null}{["Agent", "Special Agent", "Special Broker"].includes(actor.role) ? <View style={styles.choiceWrap}>{([['sourceCurrency', 'Source currency'], ['rate', 'Rate'], ['commission', 'Commission'], ['baseAmount', 'Base currency and amount']] as const).map(([key, label]) => <ToggleChoice key={key} label={label} checked={visibility[key] !== false} disabled={offline || busy === actor.id} onPress={() => updateActor(actor.id, { visibility: { [key]: visibility[key] === false } })} />)}</View> : null}</View>; })}</Panel>
+        <Panel title="Actor permissions" badge="Orders and transfers">
+          {activeActors(state).filter((actor) => actor.role !== "Master").map((actor) => {
+            const visibility = actor.orderVisibilityPermissions || {};
+            return (
+              <View key={actor.id} style={styles.permissionRow}>
+                <Text style={styles.primaryLine}>{actor.name} - {actor.role}</Text>
+                <SelectRow label="Transfer access" options={["actor", "master", "both", "none"]} value={actor.transferMode || "master"} onChange={(mode) => setMode(actor.id, mode)} />
+                {actor.role === "Special Broker" ? (
+                  <Pill label="Transfer receipts: Multi-currency" tone="good" />
+                ) : (
+                  <ToggleChoice
+                    label="Receive transfers in multiple currencies"
+                    checked={actor.transferReceiveMultiCurrencyEnabled === true}
+                    disabled={offline || busy === actor.id}
+                    onPress={() => updateActor(actor.id, { transferReceiveMultiCurrencyEnabled: actor.transferReceiveMultiCurrencyEnabled !== true })}
+                  />
+                )}
+                {["Broker", "Special Broker"].includes(actor.role) ? <ToggleChoice label="Multi-currency orders" checked={actor.orderMultiCurrencyEnabled === true} disabled={offline || busy === actor.id} onPress={() => updateActor(actor.id, { orderMultiCurrencyEnabled: actor.orderMultiCurrencyEnabled !== true })} /> : null}
+                {["Agent", "Special Agent", "Special Broker"].includes(actor.role) ? <View style={styles.choiceWrap}>{([['sourceCurrency', 'Source currency'], ['rate', 'Rate'], ['commission', 'Commission'], ['baseAmount', 'Base currency and amount']] as const).map(([key, label]) => <ToggleChoice key={key} label={label} checked={visibility[key] !== false} disabled={offline || busy === actor.id} onPress={() => updateActor(actor.id, { visibility: { [key]: visibility[key] === false } })} />)}</View> : null}
+              </View>
+            );
+          })}
+        </Panel>
         <Panel title="Invite codes"><View style={styles.rowButtons}><Button label="Load codes" variant="secondary" icon={<RefreshCw size={17} color={colors.ink} />} loading={busy === "invites"} onPress={refreshInvites} style={styles.flexButton} /><Button label="New code" icon={<Plus size={17} color="#fff" />} loading={busy === "invite-create"} onPress={addInvite} style={styles.flexButton} /></View><SelectRow label="Role" options={roles} value={inviteRole} onChange={setInviteRole} /><SelectRow label="Base currency" options={supportedCurrencies} value={inviteCurrency} onChange={setInviteCurrency} />{invites.map((invite) => <SummaryRow key={invite.id || invite.code} label={`${invite.actorRole} - ${invite.currency}`} value={invite.code || "Used"} strong />)}</Panel>
         <Panel title="Master reset" badge="Permanent"><Field label="Permit phrase" value={resetPermit} onChangeText={setResetPermit} autoCapitalize="characters" placeholder="MASTER-RESET" /><SelectRow label="Reset scope" options={["data", "wipe"]} value={resetScope} onChange={setResetScope} /><Text style={styles.muted}>{resetScope === "wipe" ? "Wipe data and all linked actors." : "Erase financial data and keep actors."}</Text><Button label={resetScope === "wipe" ? "Wipe data and actors" : "Erase data"} variant="danger" loading={busy === "reset"} disabled={offline} onPress={reset} /></Panel>
       </> : null}

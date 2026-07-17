@@ -70,6 +70,14 @@ export function actorTransferCurrencies(actor: ActorRecord | undefined): Currenc
   return [actor.currency];
 }
 
+export function actorTransferReceiveCurrencies(actor: ActorRecord | undefined): Currency[] {
+  if (!actor) return [];
+  if (actor.role === "Master" || actor.role === "Special Broker" || actor.transferReceiveMultiCurrencyEnabled === true) {
+    return supportedCurrencies;
+  }
+  return [actor.currency];
+}
+
 export function actorCanPayoutCurrency(actor: ActorRecord | undefined, currency: Currency): boolean {
   return Boolean(actor && actorCanReceivePayouts(actor.role) && actorTransferCurrencies(actor).includes(currency));
 }
@@ -483,6 +491,9 @@ export async function createInternalTransfer(session: UserSession, draft: Intern
     const to = activeActors(state).find((actor) => actor.id === draft.toActorId);
     if (!from || !to || from.id === to.id) throw new Error("Choose a receiving actor.");
     if (!transferTargetsFor(session, state).some((actor) => actor.id === to.id)) throw new Error("This transfer destination is not permitted.");
+    if (!actorTransferReceiveCurrencies(to).includes(draft.payoutCurrency)) {
+      throw new Error(`${to.name} can only receive this transfer in ${to.currency}.`);
+    }
     const sourceMajor = parseAmount(draft.sourceAmount);
     const rate = Number(draft.rate || 0);
     const payoutMajor = parseAmount(draft.payoutAmount) || sourceMajor * rate;
@@ -632,12 +643,16 @@ export async function updateUsdAgentIncomeRate(actorId: string, setting: RateSet
 
 export async function updateActorOrderSettings(actorId: string, input: {
   orderMultiCurrencyEnabled?: boolean;
+  transferReceiveMultiCurrencyEnabled?: boolean;
   visibility?: ActorRecord["orderVisibilityPermissions"];
 }): Promise<WorkspaceState> {
   return updateWorkspaceState((state) => {
     const actor = state.actors.find((item) => item.id === actorId);
     if (!actor || actor.role === "Master") throw new Error("Choose an actor.");
     if (typeof input.orderMultiCurrencyEnabled === "boolean") actor.orderMultiCurrencyEnabled = input.orderMultiCurrencyEnabled;
+    if (typeof input.transferReceiveMultiCurrencyEnabled === "boolean" && actor.role !== "Special Broker") {
+      actor.transferReceiveMultiCurrencyEnabled = input.transferReceiveMultiCurrencyEnabled;
+    }
     if (input.visibility) actor.orderVisibilityPermissions = { ...(actor.orderVisibilityPermissions || {}), ...input.visibility };
   });
 }

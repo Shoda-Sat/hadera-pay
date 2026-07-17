@@ -66,6 +66,7 @@ export interface ActorRecord {
   workingCurrencies?: Currency[];
   transferEnabled?: boolean;
   transferMode?: "actor" | "master" | "both" | "none";
+  transferReceiveMultiCurrencyEnabled?: boolean;
   orderMultiCurrencyEnabled?: boolean;
   managedByMaster?: boolean;
   incomeStatementVisible?: boolean;

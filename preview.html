@@ -2892,7 +2892,7 @@
             <div class="panel-body table-wrap" data-settings-body>
               <table>
                 <thead>
-                  <tr><th>Actor</th><th>Role</th><th>Currency</th><th>Transfer Access</th><th>Action</th><th>Order Currency Access</th><th>Payout Divisor / %</th></tr>
+                  <tr><th>Actor</th><th>Role</th><th>Currency</th><th>Transfer Access</th><th>Action</th><th>Receive Currency</th><th>Order Currency Access</th><th>Payout Divisor / %</th></tr>
                 </thead>
                 <tbody id="permissionRows"></tbody>
               </table>
@@ -3320,6 +3320,9 @@
           active: actor.role === "Master" ? true : actor.active !== false,
           transferEnabled: actor.role === "Master" ? true : normalizedTransferMode(actor) !== "none",
           transferMode: normalizedTransferMode(actor),
+          transferReceiveMultiCurrencyEnabled: actor.role === "Master" || actor.role === "Special Broker"
+            ? true
+            : actor.transferReceiveMultiCurrencyEnabled === true,
           orderVisibilityPermissions: ["Agent", "Special Agent"].includes(actor.role)
             ? normalizeOrderVisibilityPermissions(actor.orderVisibilityPermissions)
             : normalizeOrderVisibilityPermissions(),
@@ -4911,6 +4914,14 @@
       return supportedCurrencies.includes(actor.currency) ? [actor.currency] : [];
     }
 
+    function actorTransferReceiveCurrencies(actor) {
+      if (!actor) return [];
+      if (actor.role === "Master" || actor.role === "Special Broker" || actor.transferReceiveMultiCurrencyEnabled === true) {
+        return supportedCurrencies;
+      }
+      return supportedCurrencies.includes(actor.currency) ? [actor.currency] : [];
+    }
+
     function specialPayoutSettingFor(actor, currency) {
       if (!actor || !actorHasSpecialPayout(actor.role)) return { enabled: false, divider: 1, percent: 0 };
       const config = actor.specialPayoutSettings?.[currency] || {};
@@ -4993,7 +5004,7 @@
       const previousSourceCurrency = els.transferSourceCurrency.value;
       const previousPayoutCurrency = els.transferCurrency.value;
       const fromCurrencies = actor?.role === "Master" ? supportedCurrencies : actorTransferCurrencies(fromActor);
-      const toCurrencies = actor?.role === "Master" ? supportedCurrencies : actorTransferCurrencies(toActor);
+      const toCurrencies = actorTransferReceiveCurrencies(toActor);
       const sourceOptions = fromCurrencies.filter((currency) => supportedCurrencies.includes(currency));
       const payoutOptions = toCurrencies.filter((currency) => supportedCurrencies.includes(currency));
       els.transferSourceCurrency.innerHTML = sourceOptions.length
@@ -5860,6 +5871,17 @@
                 ? "Master only"
                 : "None";
           const transferStatusClass = transferMode === "none" ? "danger" : transferMode === "both" ? "good" : "warn";
+          const transferReceiveMultiCurrency = actor.role === "Special Broker" || actor.transferReceiveMultiCurrencyEnabled === true;
+          const transferReceiveCurrencyControl = actor.role === "Special Broker"
+            ? '<span class="state-pill good">Always multi-currency</span>'
+            : `
+              <div class="setting-inline">
+                <span class="state-pill ${transferReceiveMultiCurrency ? "good" : "warn"}">${transferReceiveMultiCurrency ? "Multi-currency" : `Base ${escapeHtml(actor.currency)} only`}</span>
+                <button class="btn ${transferReceiveMultiCurrency ? "danger" : "primary"} toggle-transfer-receive-currency-permission" data-id="${actor.id}" type="button">
+                  ${transferReceiveMultiCurrency ? "Restrict" : "Allow Multi"}
+                </button>
+              </div>
+            `;
           const orderMultiCurrency = actor.orderMultiCurrencyEnabled === true;
           const orderCurrencyControl = actorCanInitiateOrders(actor.role)
             ? `
@@ -5915,12 +5937,13 @@
                   Actors
                 </label>
               </td>
+              <td>${transferReceiveCurrencyControl}</td>
               <td>${orderCurrencyControl}</td>
               <td>${specialDividerControl}</td>
             </tr>
           `;
         });
-      els.permissionRows.innerHTML = rows.length ? rows.join("") : '<tr><td colspan="7">No actors available for permissions.</td></tr>';
+      els.permissionRows.innerHTML = rows.length ? rows.join("") : '<tr><td colspan="8">No actors available for permissions.</td></tr>';
     }
 
     function renderVisibilityPermissions() {
@@ -10245,14 +10268,21 @@
       const amountMinor = parseMoney(els.transferPayoutAmount.value, currency);
       const commissionMinor = Math.round(sourceAmountMinor * commissionPercent / 100);
       const remarks = els.transferRemarks.value.trim();
-      const invalid = !from || !to || !sourceCurrency || !currency || from === to || sourceAmountMinor <= 0 || amountMinor <= 0 || rate <= 0 || commissionPercent < 0;
+      const receivingActor = activeActors().find((item) => item.name === to);
+      const receivingCurrencies = actorTransferReceiveCurrencies(receivingActor);
+      const payoutCurrencyAllowed = receivingCurrencies.includes(currency);
+      const invalid = !from || !to || !sourceCurrency || !currency || !receivingActor || !payoutCurrencyAllowed || from === to || sourceAmountMinor <= 0 || amountMinor <= 0 || rate <= 0 || commissionPercent < 0;
       els.transferError.textContent = from === to
         ? "Sender and receiver must be different."
         : !sourceCurrency || !currency
           ? "Choose both transfer currencies."
-          : commissionPercent < 0
-            ? "Enter a percentage of zero or more."
-          : "Enter transfer amount, rate, payout amount, and choose both actors.";
+          : !receivingActor
+            ? "Choose a receiving actor."
+            : !payoutCurrencyAllowed
+              ? `${receivingActor.name} can only receive this transfer in ${receivingActor.currency}.`
+              : commissionPercent < 0
+                ? "Enter a percentage of zero or more."
+                : "Enter transfer amount, rate, payout amount, and choose both actors.";
       els.transferError.classList.toggle("visible", invalid);
       if (invalid) return;
 
@@ -10461,6 +10491,17 @@
         if (!actor || !["Broker", "Special Broker"].includes(actor.role)) return;
         actor.orderMultiCurrencyEnabled = actor.orderMultiCurrencyEnabled !== true;
         orderConversionTouches = [];
+        renderAll();
+        return;
+      }
+
+      const transferReceiveCurrencyButton = event.target.closest(".toggle-transfer-receive-currency-permission");
+      if (transferReceiveCurrencyButton) {
+        if (selectedActor()?.role !== "Master") return;
+        const actor = state.actors.find((item) => item.id === transferReceiveCurrencyButton.dataset.id);
+        if (!actor || actor.role === "Master" || actor.role === "Special Broker") return;
+        actor.transferReceiveMultiCurrencyEnabled = actor.transferReceiveMultiCurrencyEnabled !== true;
+        transferConversionTouches = [];
         renderAll();
         return;
       }
