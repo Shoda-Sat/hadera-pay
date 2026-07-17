@@ -207,6 +207,7 @@ function masterSubscriptionRows(db) {
         name: user.name || "Unknown",
         email: user.email || "",
         workspace: workspace?.name || "",
+        currency: membership.currency || "USD",
         plan: user?.subscriptionPlan || "one_month",
         active: user?.active !== false,
         expiresAt: user?.subscriptionExpiresAt || "",
@@ -841,6 +842,7 @@ async function handleApi(request, response, url) {
     const name = String(body.name || "").trim();
     const email = String(body.email || "").trim().toLowerCase();
     const password = String(body.password || "");
+    const currency = ["USD", "ETB", "EUR", "ERN"].includes(body.currency) ? body.currency : "USD";
     if (!name || !email || password.length < 6) return sendJson(response, 400, { error: "Enter Master name, email, and a password of at least 6 characters." });
     if (db.users.some((user) => user.email === email)) return sendJson(response, 409, { error: "That email already has an account." });
     const planId = subscriptionPlans.has(body.plan) ? body.plan : "one_month";
@@ -864,7 +866,7 @@ async function handleApi(request, response, url) {
       actorId: "ACT-0",
       actorName: "Master",
       actorRole: "Master",
-      currency: "USD",
+      currency,
       workingCurrencies: [],
       createdAt: new Date().toISOString(),
     };
@@ -872,7 +874,7 @@ async function handleApi(request, response, url) {
     db.workspaces.push(workspace);
     db.memberships.push(membership);
     await saveDb(db);
-    sendJson(response, 200, { ok: true, user: { id: user.id, name: user.name, email: user.email, subscriptionExpiresAt: user.subscriptionExpiresAt } });
+    sendJson(response, 200, { ok: true, user: { id: user.id, name: user.name, email: user.email, currency, subscriptionExpiresAt: user.subscriptionExpiresAt } });
     return;
   }
 

@@ -34,7 +34,7 @@ By default the app talks to `https://haderapay.com`. To point a build at another
 - Master ledger with a collapsible Income Statement, permanent income snapshots, Actors management, invite codes, and transfer permissions.
 - Master ledger with an independent collapsible Bank Account, green Money In, red Money Out, running currency balances, reasoned funding, and shareable monthly statements.
 - Per-USD-Agent payout divisors and percentages, frozen onto future Base USD rows without changing the Agent ledger.
-- Owner Master creation and subscription controls.
+- Owner Master creation with selectable base currency and subscription controls.
 - Master-forwarded orders show the payout actor and payer-specific order number in their state.
 - Settlement balances grouped by Broker, Agent, and Special Agent roles.
 - Currency-safe storage: USD/EUR use cents, while ETB/ERN use whole units.

@@ -397,6 +397,7 @@ export interface OwnerMasterRecord {
   name: string;
   email: string;
   workspace: string;
+  currency: Currency;
   plan: string;
   active: boolean;
   expiresAt: string;

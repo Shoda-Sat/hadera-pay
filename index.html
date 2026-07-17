@@ -2935,7 +2935,16 @@
                       <label for="ownerMasterPassword">Password</label>
                       <input id="ownerMasterPassword" type="password" autocomplete="new-password">
                     </div>
-                    <div class="field full">
+                    <div class="field">
+                      <label for="ownerMasterCurrency">Base currency</label>
+                      <select id="ownerMasterCurrency">
+                        <option>USD</option>
+                        <option>ETB</option>
+                        <option>EUR</option>
+                        <option>ERN</option>
+                      </select>
+                    </div>
+                    <div class="field">
                       <label for="ownerMasterPlan">Subscription</label>
                       <select id="ownerMasterPlan"></select>
                     </div>
@@ -2955,7 +2964,7 @@
               <div class="panel-body table-wrap">
                 <table>
                   <thead>
-                    <tr><th>User</th><th>Workspace</th><th>Active</th><th>Expires</th><th>Status</th><th>Duration</th><th>Action</th></tr>
+                    <tr><th>User</th><th>Workspace</th><th>Base Currency</th><th>Active</th><th>Expires</th><th>Status</th><th>Duration</th><th>Action</th></tr>
                   </thead>
                   <tbody id="subscriptionRows"></tbody>
                 </table>
@@ -4010,6 +4019,7 @@
       ownerMasterName: document.getElementById("ownerMasterName"),
       ownerMasterEmail: document.getElementById("ownerMasterEmail"),
       ownerMasterPassword: document.getElementById("ownerMasterPassword"),
+      ownerMasterCurrency: document.getElementById("ownerMasterCurrency"),
       ownerMasterPlan: document.getElementById("ownerMasterPlan"),
       ownerMasterError: document.getElementById("ownerMasterError"),
       fixedRateRows: document.getElementById("fixedRateRows"),
@@ -6380,7 +6390,7 @@
 
     async function renderSubscriptions() {
       if (!currentAuth || currentAuth.membership?.role !== "Owner") {
-        if (els.subscriptionRows) els.subscriptionRows.innerHTML = '<tr><td colspan="7">Only Owner can manage subscriptions.</td></tr>';
+        if (els.subscriptionRows) els.subscriptionRows.innerHTML = '<tr><td colspan="8">Only Owner can manage subscriptions.</td></tr>';
         return;
       }
       try {
@@ -6400,6 +6410,7 @@
             <tr>
               <td><strong>${escapeHtml(user.name)}</strong><br><span class="muted">${escapeHtml(user.email)}</span></td>
               <td>${escapeHtml(user.workspace || "Workspace")}</td>
+              <td><strong>${escapeHtml(user.currency || "USD")}</strong></td>
               <td>
                 <label class="currency-check">
                   <input class="master-active-toggle" type="checkbox" data-user-id="${escapeHtml(user.userId)}" ${isActive ? "checked" : ""}>
@@ -6421,9 +6432,9 @@
               </td>
             </tr>
           `;
-        }).join("") : '<tr><td colspan="7">No Master users found.</td></tr>';
+        }).join("") : '<tr><td colspan="8">No Master users found.</td></tr>';
       } catch (error) {
-        els.subscriptionRows.innerHTML = `<tr><td colspan="7">${escapeHtml(error.message)}</td></tr>`;
+        els.subscriptionRows.innerHTML = `<tr><td colspan="8">${escapeHtml(error.message)}</td></tr>`;
       }
     }
 
@@ -9866,13 +9877,14 @@
             name: els.ownerMasterName.value,
             email: els.ownerMasterEmail.value,
             password: els.ownerMasterPassword.value,
+            currency: els.ownerMasterCurrency.value || "USD",
             plan: els.ownerMasterPlan.value || "one_month"
           }
         });
         els.ownerMasterName.value = "";
         els.ownerMasterEmail.value = "";
         els.ownerMasterPassword.value = "";
-        notifyEvent("Master created", "The new Master can now log in.");
+        notifyEvent("Master created", `The new Master can now log in with ${els.ownerMasterCurrency.value || "USD"} as the base currency.`);
         await renderSubscriptions();
       } catch (error) {
         els.ownerMasterError.textContent = error.message;

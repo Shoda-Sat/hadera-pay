@@ -291,7 +291,7 @@ export async function loadOwnerMasters(): Promise<{ users: OwnerMasterRecord[]; 
   return { users: Array.isArray(result.users) ? result.users : [], plans: Array.isArray(result.plans) ? result.plans : [] };
 }
 
-export async function createOwnerMaster(input: { name: string; email: string; password: string; plan: string }): Promise<void> {
+export async function createOwnerMaster(input: { name: string; email: string; password: string; currency: Currency; plan: string }): Promise<void> {
   await api<{ ok: boolean }>("/api/owner/masters", { method: "POST", body: input });
 }
 
