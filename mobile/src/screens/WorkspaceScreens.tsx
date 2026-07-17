@@ -733,7 +733,7 @@ export function SettingsScreen({ session, state, offline, onState }: CommonProps
     divider: String(state.masterRateDivisorSettings?.[currency]?.divider || ""),
     percent: String(state.masterRateDivisorSettings?.[currency]?.percent || "")
   }])) as Record<Currency, { enabled: boolean; divider: string; percent: string }>);
-  const usdPayoutActors = activeActors(state).filter((actor) => actor.role === "Agent");
+  const usdPayoutActors = activeActors(state).filter((actor) => actor.role === "Agent" && actor.currency === "USD");
   const [usdAgentRatesExpanded, setUsdAgentRatesExpanded] = useState(false);
   const [usdAgentRates, setUsdAgentRates] = useState<Record<string, { divider: string; percent: string }>>(() => Object.fromEntries(usdPayoutActors.map((actor) => [actor.id, {
     divider: String(actor.incomeUsdPayoutSetting?.divider || 1),
@@ -748,7 +748,7 @@ export function SettingsScreen({ session, state, offline, onState }: CommonProps
   const addInvite = async () => { if (offline) return Alert.alert("Offline", "Reconnect before creating an invite."); setBusy("invite-create"); try { await createInvite({ actorRole: inviteRole, currency: inviteCurrency, workingCurrencies: [inviteCurrency] }); await refreshInvites(); } catch (error) { Alert.alert("Invite codes", errorMessage(error)); } finally { setBusy(""); } };
   const saveRates = async () => { if (offline) return Alert.alert("Offline", "Reconnect before saving rates."); setBusy("buying"); try { onState(await updateBuyingRates({ eurToUsd: Number(buying.eurToUsd), usdToEtb: Number(buying.usdToEtb), usdToErn: Number(buying.usdToErn) })); } catch (error) { Alert.alert("Buying rates", errorMessage(error)); } finally { setBusy(""); } };
   const saveStatementRate = async (currency: Currency) => { if (offline) return Alert.alert("Offline", "Reconnect before saving rates."); setBusy(`rate-${currency}`); const draft = statementRates[currency]; try { onState(await updateMasterRateSetting(currency, { enabled: draft.enabled, divider: Number(draft.divider), percent: Number(draft.percent) })); } catch (error) { Alert.alert("Income statement rate", errorMessage(error)); } finally { setBusy(""); } };
-  const saveUsdAgentRate = async (actorId: string) => { if (offline) return Alert.alert("Offline", "Reconnect before saving rates."); setBusy(`usd-agent-rate-${actorId}`); const draft = usdAgentRates[actorId] || { divider: "1", percent: "0" }; try { onState(await updateUsdAgentIncomeRate(actorId, { divider: Number(draft.divider), percent: Number(draft.percent) })); } catch (error) { Alert.alert("Agent USD payout rate", errorMessage(error)); } finally { setBusy(""); } };
+  const saveUsdAgentRate = async (actorId: string) => { if (offline) return Alert.alert("Offline", "Reconnect before saving rates."); setBusy(`usd-agent-rate-${actorId}`); const draft = usdAgentRates[actorId] || { divider: "1", percent: "0" }; try { onState(await updateUsdAgentIncomeRate(actorId, { divider: Number(draft.divider), percent: Number(draft.percent) })); } catch (error) { Alert.alert("USD Agent payout rate", errorMessage(error)); } finally { setBusy(""); } };
   const updateActor = async (actorId: string, input: Parameters<typeof updateActorOrderSettings>[1]) => { if (offline) return Alert.alert("Offline", "Reconnect before changing permissions."); setBusy(actorId); try { onState(await updateActorOrderSettings(actorId, input)); } catch (error) { Alert.alert("Permissions", errorMessage(error)); } finally { setBusy(""); } };
   const reset = () => {
     if (resetPermit !== "MASTER-RESET") return Alert.alert("Master reset", "Enter MASTER-RESET to continue.");
@@ -771,7 +771,7 @@ export function SettingsScreen({ session, state, offline, onState }: CommonProps
             return <View key={currency} style={styles.permissionRow}><ToggleChoice label={`${currency} rate enabled`} checked={draft.enabled} disabled={offline} onPress={() => setStatementRates({ ...statementRates, [currency]: { ...draft, enabled: !draft.enabled } })} /><Field label={`${currency} divisor`} value={draft.divider} onChangeText={(value) => setStatementRates({ ...statementRates, [currency]: { ...draft, divider: value } })} keyboardType="decimal-pad" /><Field label="Percent" value={draft.percent} onChangeText={(value) => setStatementRates({ ...statementRates, [currency]: { ...draft, percent: value } })} keyboardType="decimal-pad" /><Button label={`Save ${currency}`} variant="secondary" loading={busy === `rate-${currency}`} disabled={offline} onPress={() => saveStatementRate(currency)} /></View>;
           })}
           <Pressable style={styles.showMore} onPress={() => setUsdAgentRatesExpanded((current) => !current)}>
-            <Text style={styles.linkText}>Agent USD payout rates</Text>
+            <Text style={styles.linkText}>USD Agent payout divisors</Text>
             {usdAgentRatesExpanded ? <ChevronUp size={17} color={colors.accent} /> : <ChevronDown size={17} color={colors.accent} />}
           </Pressable>
           {usdAgentRatesExpanded ? (
@@ -784,11 +784,11 @@ export function SettingsScreen({ session, state, offline, onState }: CommonProps
                 <View key={actor.id} style={styles.permissionRow}>
                   <Text style={styles.primaryLine}>{actor.name} - {actor.role}</Text>
                   <Field label="USD payout divisor" value={draft.divider} onChangeText={(value) => setUsdAgentRates((current) => ({ ...current, [actor.id]: { ...draft, divider: value } }))} keyboardType="decimal-pad" />
-                  <Field label="Percent" value={draft.percent} onChangeText={(value) => setUsdAgentRates((current) => ({ ...current, [actor.id]: { ...draft, percent: value } }))} keyboardType="decimal-pad" />
+                  <Field label="Percent (%)" value={draft.percent} onChangeText={(value) => setUsdAgentRates((current) => ({ ...current, [actor.id]: { ...draft, percent: value } }))} keyboardType="decimal-pad" />
                   <Button label={`Save ${actor.name}`} variant="secondary" loading={busy === `usd-agent-rate-${actor.id}`} disabled={offline} onPress={() => saveUsdAgentRate(actor.id)} />
                 </View>
               );
-            }) : <Text style={styles.muted}>No active Agents.</Text>
+            }) : <Text style={styles.muted}>No active USD Agents.</Text>
           ) : null}
         </Panel>
         <Panel title="Actor permissions" badge="Orders and transfers">{activeActors(state).filter((actor) => actor.role !== "Master").map((actor) => { const visibility = actor.orderVisibilityPermissions || {}; return <View key={actor.id} style={styles.permissionRow}><Text style={styles.primaryLine}>{actor.name} - {actor.role}</Text><SelectRow label="Transfer access" options={["actor", "master", "both", "none"]} value={actor.transferMode || "master"} onChange={(mode) => setMode(actor.id, mode)} />{["Broker", "Special Broker"].includes(actor.role) ? <ToggleChoice label="Multi-currency orders" checked={actor.orderMultiCurrencyEnabled === true} disabled={offline || busy === actor.id} onPress={() => updateActor(actor.id, { orderMultiCurrencyEnabled: actor.orderMultiCurrencyEnabled !== true })} /> : null}{["Agent", "Special Agent", "Special Broker"].includes(actor.role) ? <View style={styles.choiceWrap}>{([['sourceCurrency', 'Source currency'], ['rate', 'Rate'], ['commission', 'Commission'], ['baseAmount', 'Base currency and amount']] as const).map(([key, label]) => <ToggleChoice key={key} label={label} checked={visibility[key] !== false} disabled={offline || busy === actor.id} onPress={() => updateActor(actor.id, { visibility: { [key]: visibility[key] === false } })} />)}</View> : null}</View>; })}</Panel>

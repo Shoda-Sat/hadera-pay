@@ -236,7 +236,9 @@ export function applyUsdAgentIncomeRate(amountMinor: number, setting: RateSettin
   if (amountMinor <= 0) return 0;
   const divider = Number(setting?.divider) > 0 ? Number(setting?.divider) : 1;
   const percent = Number(setting?.percent) > 0 ? Number(setting?.percent) : 0;
-  return minorFromMajor(majorFromMinor(amountMinor, "USD") / divider * (1 + percent / 100), "USD");
+  const dividedPayoutMajor = majorFromMinor(amountMinor, "USD") / divider;
+  const percentageAddition = dividedPayoutMajor * percent / 100;
+  return minorFromMajor(dividedPayoutMajor + percentageAddition, "USD");
 }
 
 function freezeIncome(state: WorkspaceState, order: OrderRecord, lines: LedgerLine[]): void {
@@ -247,7 +249,7 @@ function freezeIncome(state: WorkspaceState, order: OrderRecord, lines: LedgerLi
   const payerLine = lines.find((line) => line.account === `${order.agent} ACTOR_CLEARING` && line.direction === "Credit");
   const payingActor = activeActors(state).find((actor) => actor.name === order.agent);
   const usdPayerLine = lines.find((line) => line.account === `${order.agent} ACTOR_CLEARING` && line.direction === "Credit" && line.currency === "USD");
-  const usdPayoutActorBaseMinor = payoutCurrency === "USD" && payingActor?.role === "Agent"
+  const usdPayoutActorBaseMinor = payoutCurrency === "USD" && payingActor?.role === "Agent" && payingActor.currency === "USD"
     ? applyUsdAgentIncomeRate(usdPayerLine?.amountMinor || Number(order.payoutAmountMinor || 0), payingActor.incomeUsdPayoutSetting)
     : 0;
   let baseAmountMinor = 0;
@@ -293,7 +295,7 @@ function freezeIncome(state: WorkspaceState, order: OrderRecord, lines: LedgerLi
   order.incomeProfitMinor = profitMinor;
   order.incomeSnapshotAt = order.paidAt || new Date().toISOString();
   order.incomeMasterRateSnapshot = { ...rateSetting(state.masterRateDivisorSettings?.[payoutCurrency]), payoutCurrency };
-  if (payoutCurrency === "USD" && payingActor?.role === "Agent") {
+  if (payoutCurrency === "USD" && payingActor?.role === "Agent" && payingActor.currency === "USD") {
     const setting = rateSetting(payingActor.incomeUsdPayoutSetting);
     order.incomeUsdAgentRateSnapshot = { actorId: payingActor.id, actorName: payingActor.name, divider: setting.divider, percent: setting.percent };
   }
@@ -579,7 +581,7 @@ export async function createManagedActor(input: { name: string; role: ActorRecor
       transferEnabled: true,
       transferMode: "master",
       incomeStatementVisible: true,
-      incomeUsdPayoutSetting: input.role === "Agent" ? { divider: 1, percent: 0 } : undefined
+      incomeUsdPayoutSetting: input.role === "Agent" && input.currency === "USD" ? { divider: 1, percent: 0 } : undefined
     });
   });
 }
@@ -615,9 +617,15 @@ export async function updateUsdAgentIncomeRate(actorId: string, setting: RateSet
     const actor = activeActors(state).find((item) => item.id === actorId);
     const divider = Number(setting.divider || 0);
     const percent = Number(setting.percent || 0);
-    if (!actor || actor.role !== "Agent") throw new Error("Choose an Agent.");
+    if (!actor || actor.role !== "Agent" || actor.currency !== "USD") throw new Error("Choose a USD Agent.");
     if (divider <= 0) throw new Error("Enter a divisor greater than zero.");
     if (percent < 0) throw new Error("Enter zero or a positive percentage.");
+    state.orders
+      .filter((order) => order.state === "Paid" && order.journal && !order.voidJournal && !Number.isFinite(Number(order.incomeBaseAmountMinor)))
+      .forEach((order) => {
+        const lines = state.ledger.filter((line) => line.journal === order.journal && line.source === "ORDER_PAYMENT");
+        if (lines.length) freezeIncome(state, order, lines);
+      });
     actor.incomeUsdPayoutSetting = { divider, percent };
   });
 }
