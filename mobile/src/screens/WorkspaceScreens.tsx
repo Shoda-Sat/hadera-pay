@@ -1,6 +1,6 @@
 import * as ImagePicker from "expo-image-picker";
 import React, { useEffect, useRef, useState } from "react";
-import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import {
   Check,
   ChevronDown,
@@ -65,6 +65,7 @@ import {
   updateActorTransferMode,
   updateBuyingRates,
   updateMasterRateSetting,
+  updateUsdAgentIncomeRate,
   visibleChatsFor
 } from "../domain/workspace";
 import { colors, radius, spacing } from "../theme";
@@ -82,7 +83,8 @@ import type {
   UserSession,
   WorkspaceState
 } from "../types";
-import { compactAmount, inputAmount, majorFromMinor, parseAmount } from "../utils/money";
+import { compactAmount, inputAmount, majorFromMinor, parseAmount, reconcileOrderConversion } from "../utils/money";
+import type { OrderConversionField } from "../utils/money";
 
 type CommonProps = {
   session: UserSession;
@@ -91,6 +93,7 @@ type CommonProps = {
   onState: (state: WorkspaceState) => void;
   onNavigate: (screen: AppScreen) => void;
   onRefresh: () => void;
+  onScrollToEnd?: () => void;
 };
 
 function ScreenTitle({ title, subtitle }: { title: string; subtitle: string }) {
@@ -352,6 +355,7 @@ export function TransfersScreen(props: CommonProps) {
   const actor = actorForSession(session, state);
   const currencies = actorTransferCurrencies(actor);
   const [draft, setDraft] = useState<InternalTransferDraft>({ ...emptyTransfer, sourceCurrency: currencies[0] || session.currency, payoutCurrency: currencies[0] || session.currency });
+  const conversionTouches = useRef<OrderConversionField[]>([]);
   const [busy, setBusy] = useState(false);
   const [journal, setJournal] = useState({ actorId: "", sourceCurrency: "USD" as Currency, sourceAmount: "", currency: "USD" as Currency, amount: "", rate: "1", remarks: "" });
   const targets = transferTargetsFor(session, state);
@@ -364,7 +368,11 @@ export function TransfersScreen(props: CommonProps) {
     try { onState(await task()); } catch (error) { Alert.alert("Could not continue", errorMessage(error)); } finally { setBusy(false); }
   };
 
-  const estimated = parseAmount(draft.sourceAmount) * Number(draft.rate || 0);
+  const setConversionField = (key: OrderConversionField, value: string) => {
+    conversionTouches.current = [...conversionTouches.current.filter((field) => field !== key), key].slice(-2);
+    setDraft((current) => reconcileOrderConversion({ ...current, [key]: value }, conversionTouches.current));
+  };
+
   return (
     <View style={styles.screen}>
       <ScreenTitle title="Transfers" subtitle="Transfers, journals, and withdrawals" />
@@ -375,10 +383,10 @@ export function TransfersScreen(props: CommonProps) {
           <Text style={styles.fieldLabel}>Receiving actor</Text>
           <View style={styles.choiceWrap}>{targets.map((target) => <Pressable key={target.id} onPress={() => setDraft({ ...draft, toActorId: target.id })} style={[styles.choice, draft.toActorId === target.id && styles.choiceActive]}><Text style={[styles.choiceText, draft.toActorId === target.id && styles.choiceTextActive]}>{target.name}</Text></Pressable>)}</View>
           <SelectRow label="Source currency" options={currencies.length ? currencies : [session.currency]} value={draft.sourceCurrency} onChange={(value) => setDraft({ ...draft, sourceCurrency: value })} />
-          <Field label="Source amount" value={draft.sourceAmount} onChangeText={(value) => setDraft({ ...draft, sourceAmount: value })} keyboardType="decimal-pad" />
+          <Field label="Source amount" value={draft.sourceAmount} onChangeText={(value) => setConversionField("sourceAmount", value)} keyboardType="decimal-pad" />
           <SelectRow label="Payout currency" options={supportedCurrencies} value={draft.payoutCurrency} onChange={(value) => setDraft({ ...draft, payoutCurrency: value })} />
-          <Field label="Rate" value={draft.rate} onChangeText={(value) => setDraft({ ...draft, rate: value, payoutAmount: inputAmount(draft.payoutCurrency, parseAmount(draft.sourceAmount) * Number(value || 0)) })} keyboardType="decimal-pad" />
-          <Field label="Payout amount" value={draft.payoutAmount || inputAmount(draft.payoutCurrency, estimated)} onChangeText={(value) => setDraft({ ...draft, payoutAmount: value })} keyboardType="decimal-pad" />
+          <Field label="Rate" value={draft.rate} onChangeText={(value) => setConversionField("rate", value)} keyboardType="decimal-pad" />
+          <Field label="Payout amount" value={draft.payoutAmount} onChangeText={(value) => setConversionField("payoutAmount", value)} keyboardType="decimal-pad" />
           <Field label="Percent" value={draft.commissionPercent} onChangeText={(value) => setDraft({ ...draft, commissionPercent: value })} keyboardType="decimal-pad" />
           <Field label="Remarks" value={draft.remarks} onChangeText={(value) => setDraft({ ...draft, remarks: value })} multiline />
           <Button label="Send transfer" loading={busy} disabled={offline} onPress={() => run(() => createInternalTransfer(session, draft))} />
@@ -419,7 +427,7 @@ export function SearchScreen({ session, state, onNavigate }: CommonProps) {
 export function ReceivablesScreen({ session, state, offline, onState }: CommonProps) {
   const [amounts, setAmounts] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState("");
-  const records = state.receivables.filter((item) => isMasterView(session) || item.borrower === session.actorName);
+  const records = state.receivables.filter((item) => !item.archivedAt && (isMasterView(session) || item.borrower === session.actorName));
   const totals = supportedCurrencies.map((currency) => ({ currency, minor: records.filter((item) => item.currency === currency && !item.voided).reduce((sum, item) => sum + receivableBalance(item), 0) })).filter((item) => item.minor);
   const collect = async (id: string) => {
     if (offline) return Alert.alert("Offline", "Reconnect before recording a collection.");
@@ -440,7 +448,7 @@ function chatMessageSummary(message: ChatMessageRecord | undefined): string {
   return message.fileName || "Attachment";
 }
 
-export function ChatScreen({ session, state, offline, onState, onRefresh }: CommonProps) {
+export function ChatScreen({ session, state, offline, onState, onRefresh, onScrollToEnd }: CommonProps) {
   const chats = visibleChatsFor(session, state);
   const [chatId, setChatId] = useState(chats[0]?.id || "");
   const [message, setMessage] = useState("");
@@ -450,6 +458,7 @@ export function ChatScreen({ session, state, offline, onState, onRefresh }: Comm
   const [members, setMembers] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
+  const composerRef = useRef<TextInput>(null);
   const refreshRef = useRef(onRefresh);
   refreshRef.current = onRefresh;
   const selected = chats.find((chat) => chat.id === chatId) || chats[0];
@@ -458,6 +467,18 @@ export function ChatScreen({ session, state, offline, onState, onRefresh }: Comm
   const chatTitle = (chat: typeof chats[number]) => chat.type === "group"
     ? chat.name
     : chat.members.find((name) => name !== session.actorName) || chat.name;
+
+  const focusComposer = () => {
+    setTimeout(() => {
+      onScrollToEnd?.();
+      composerRef.current?.focus();
+      setTimeout(() => onScrollToEnd?.(), 150);
+    }, 80);
+  };
+
+  useEffect(() => {
+    focusComposer();
+  }, []);
 
   useEffect(() => {
     if (offline) return;
@@ -569,7 +590,7 @@ export function ChatScreen({ session, state, offline, onState, onRefresh }: Comm
                       <Heart size={14} color={myReaction === loveReaction ? colors.danger : colors.muted} />
                       <Text style={[styles.messageActionText, myReaction === loveReaction && styles.messageActionTextActive]}>Love</Text>
                     </Pressable>
-                    <Pressable accessibilityRole="button" accessibilityLabel="Reply to message" disabled={offline || busy} onPress={() => setReplyToId(item.id)} style={styles.messageAction}>
+                    <Pressable accessibilityRole="button" accessibilityLabel="Reply to message" disabled={offline || busy} onPress={() => { setReplyToId(item.id); focusComposer(); }} style={styles.messageAction}>
                       <Reply size={14} color={colors.muted} />
                       <Text style={styles.messageActionText}>Reply</Text>
                     </Pressable>
@@ -617,7 +638,7 @@ export function ChatScreen({ session, state, offline, onState, onRefresh }: Comm
               {chats.length < 2 ? <Text style={styles.muted}>No other chat is available.</Text> : null}
             </View>
           ) : null}
-          <Field label="Message" value={message} onChangeText={setMessage} multiline />
+          <Field inputRef={composerRef} label="Message" value={message} onChangeText={setMessage} onFocus={onScrollToEnd} multiline />
           <Button label="Send" icon={<Send size={17} color="#fff" />} loading={busy} disabled={offline || !message.trim()} onPress={sendMessage} />
           {isMasterView(session) && selected.type === "group" ? (
             <Button label="Delete group" icon={<Trash2 size={17} color={colors.danger} />} variant="danger" disabled={offline || busy} onPress={() => run(() => deleteChatGroup(selected.id))} />
@@ -644,6 +665,7 @@ export function ChatScreen({ session, state, offline, onState, onRefresh }: Comm
 export function LedgerScreen({ session, state }: CommonProps) {
   const actorChoices = activeActors(state).filter((actor) => actor.role !== "Master");
   const [actorId, setActorId] = useState(isMasterView(session) ? actorChoices[0]?.id || "" : session.actorId);
+  const [incomeExpanded, setIncomeExpanded] = useState(false);
   const selected = isMasterView(session) ? actorChoices.find((actor) => actor.id === actorId) : actorForSession(session, state);
   const actorName = selected?.name || session.actorName;
   const lines = state.ledger.filter((line) => isMasterView(session) ? (!selected || String(line.account).includes(actorName)) : String(line.account).includes(session.actorName));
@@ -669,8 +691,14 @@ export function LedgerScreen({ session, state }: CommonProps) {
       </ScrollView>
       {isMasterView(session) ? (
         <Panel title="Income statement" badge="USD total">
-          {incomeOrders.map((order) => <View key={`income-${order.id}`} style={styles.recordRow}><Text style={styles.primaryLine}>{order.brokerOrderNumber || order.id}</Text><Text style={styles.muted}>Base USD {majorFromMinor(Number(order.incomeBaseAmountMinor || 0), "USD").toFixed(2)} | Collected EUR {majorFromMinor(Number(order.incomeCollectedEurMinor || 0), "EUR").toFixed(2)} | Collected USD {majorFromMinor(Number(order.incomeCollectedUsdMinor || 0), "USD").toFixed(2)}</Text><Text style={styles.amountLine}>Profit {compactAmount("USD", majorFromMinor(Number(order.incomeProfitMinor || 0), "USD"))}</Text></View>)}
-          <SummaryRow label="Total profit" value={compactAmount("USD", majorFromMinor(totalIncomeUsdMinor, "USD"))} strong />
+          <Pressable accessibilityRole="button" accessibilityLabel={incomeExpanded ? "Collapse income statement" : "Expand income statement"} onPress={() => setIncomeExpanded((current) => !current)} style={styles.showMore}>
+            <Text style={styles.linkText}>{incomeExpanded ? "Hide income statement" : "Show income statement"}</Text>
+            {incomeExpanded ? <ChevronUp size={17} color={colors.accent} /> : <ChevronDown size={17} color={colors.accent} />}
+          </Pressable>
+          {incomeExpanded ? <>
+            {incomeOrders.map((order) => <View key={`income-${order.id}`} style={styles.recordRow}><Text style={styles.primaryLine}>{order.brokerOrderNumber || order.id}</Text><Text style={styles.muted}>Base USD {majorFromMinor(Number(order.incomeBaseAmountMinor || 0), "USD").toFixed(2)} | Collected EUR {majorFromMinor(Number(order.incomeCollectedEurMinor || 0), "EUR").toFixed(2)} | Collected USD {majorFromMinor(Number(order.incomeCollectedUsdMinor || 0), "USD").toFixed(2)}</Text><Text style={styles.amountLine}>Profit {compactAmount("USD", majorFromMinor(Number(order.incomeProfitMinor || 0), "USD"))}</Text></View>)}
+            <SummaryRow label="Total profit" value={compactAmount("USD", majorFromMinor(totalIncomeUsdMinor, "USD"))} strong />
+          </> : null}
         </Panel>
       ) : null}
     </View>
@@ -705,6 +733,12 @@ export function SettingsScreen({ session, state, offline, onState }: CommonProps
     divider: String(state.masterRateDivisorSettings?.[currency]?.divider || ""),
     percent: String(state.masterRateDivisorSettings?.[currency]?.percent || "")
   }])) as Record<Currency, { enabled: boolean; divider: string; percent: string }>);
+  const usdPayoutActors = activeActors(state).filter((actor) => actor.currency === "USD" && actor.role === "Agent");
+  const [usdAgentRatesExpanded, setUsdAgentRatesExpanded] = useState(false);
+  const [usdAgentRates, setUsdAgentRates] = useState<Record<string, { divider: string; percent: string }>>(() => Object.fromEntries(usdPayoutActors.map((actor) => [actor.id, {
+    divider: String(actor.incomeUsdPayoutSetting?.divider || 1),
+    percent: String(actor.incomeUsdPayoutSetting?.percent || 0)
+  }])));
   const [resetPermit, setResetPermit] = useState("");
   const [resetScope, setResetScope] = useState<"data" | "wipe">("data");
   const master = isMasterView(session);
@@ -714,6 +748,7 @@ export function SettingsScreen({ session, state, offline, onState }: CommonProps
   const addInvite = async () => { if (offline) return Alert.alert("Offline", "Reconnect before creating an invite."); setBusy("invite-create"); try { await createInvite({ actorRole: inviteRole, currency: inviteCurrency, workingCurrencies: [inviteCurrency] }); await refreshInvites(); } catch (error) { Alert.alert("Invite codes", errorMessage(error)); } finally { setBusy(""); } };
   const saveRates = async () => { if (offline) return Alert.alert("Offline", "Reconnect before saving rates."); setBusy("buying"); try { onState(await updateBuyingRates({ eurToUsd: Number(buying.eurToUsd), usdToEtb: Number(buying.usdToEtb), usdToErn: Number(buying.usdToErn) })); } catch (error) { Alert.alert("Buying rates", errorMessage(error)); } finally { setBusy(""); } };
   const saveStatementRate = async (currency: Currency) => { if (offline) return Alert.alert("Offline", "Reconnect before saving rates."); setBusy(`rate-${currency}`); const draft = statementRates[currency]; try { onState(await updateMasterRateSetting(currency, { enabled: draft.enabled, divider: Number(draft.divider), percent: Number(draft.percent) })); } catch (error) { Alert.alert("Income statement rate", errorMessage(error)); } finally { setBusy(""); } };
+  const saveUsdAgentRate = async (actorId: string) => { if (offline) return Alert.alert("Offline", "Reconnect before saving rates."); setBusy(`usd-agent-rate-${actorId}`); const draft = usdAgentRates[actorId] || { divider: "1", percent: "0" }; try { onState(await updateUsdAgentIncomeRate(actorId, { divider: Number(draft.divider), percent: Number(draft.percent) })); } catch (error) { Alert.alert("USD Agent rate", errorMessage(error)); } finally { setBusy(""); } };
   const updateActor = async (actorId: string, input: Parameters<typeof updateActorOrderSettings>[1]) => { if (offline) return Alert.alert("Offline", "Reconnect before changing permissions."); setBusy(actorId); try { onState(await updateActorOrderSettings(actorId, input)); } catch (error) { Alert.alert("Permissions", errorMessage(error)); } finally { setBusy(""); } };
   const reset = () => {
     if (resetPermit !== "MASTER-RESET") return Alert.alert("Master reset", "Enter MASTER-RESET to continue.");
@@ -730,7 +765,32 @@ export function SettingsScreen({ session, state, offline, onState }: CommonProps
       <Panel title="Reset password"><Field label="Current password" value={currentPassword} onChangeText={setCurrentPassword} secureTextEntry /><Field label="New password" value={newPassword} onChangeText={setNewPassword} secureTextEntry /><Button label="Update password" loading={busy === "password"} disabled={offline} onPress={change} /></Panel>
       {master ? <>
         <Panel title="Buying rates" badge="Income statement"><Field label="EUR to USD" value={buying.eurToUsd} onChangeText={(value) => setBuying({ ...buying, eurToUsd: value })} keyboardType="decimal-pad" /><Field label="USD to ETB" value={buying.usdToEtb} onChangeText={(value) => setBuying({ ...buying, usdToEtb: value })} keyboardType="decimal-pad" /><Field label="USD to ERN" value={buying.usdToErn} onChangeText={(value) => setBuying({ ...buying, usdToErn: value })} keyboardType="decimal-pad" /><Button label="Save buying rates" loading={busy === "buying"} disabled={offline} onPress={saveRates} /></Panel>
-        <Panel title="Income statement rates" badge="Future orders only">{supportedCurrencies.map((currency) => { const draft = statementRates[currency]; return <View key={currency} style={styles.permissionRow}><ToggleChoice label={`${currency} rate enabled`} checked={draft.enabled} disabled={offline} onPress={() => setStatementRates({ ...statementRates, [currency]: { ...draft, enabled: !draft.enabled } })} /><Field label={`${currency} divisor`} value={draft.divider} onChangeText={(value) => setStatementRates({ ...statementRates, [currency]: { ...draft, divider: value } })} keyboardType="decimal-pad" /><Field label="Percent" value={draft.percent} onChangeText={(value) => setStatementRates({ ...statementRates, [currency]: { ...draft, percent: value } })} keyboardType="decimal-pad" /><Button label={`Save ${currency}`} variant="secondary" loading={busy === `rate-${currency}`} disabled={offline} onPress={() => saveStatementRate(currency)} /></View>; })}</Panel>
+        <Panel title="Income statement rates" badge="Future orders only">
+          {supportedCurrencies.map((currency) => {
+            const draft = statementRates[currency];
+            return <View key={currency} style={styles.permissionRow}><ToggleChoice label={`${currency} rate enabled`} checked={draft.enabled} disabled={offline} onPress={() => setStatementRates({ ...statementRates, [currency]: { ...draft, enabled: !draft.enabled } })} /><Field label={`${currency} divisor`} value={draft.divider} onChangeText={(value) => setStatementRates({ ...statementRates, [currency]: { ...draft, divider: value } })} keyboardType="decimal-pad" /><Field label="Percent" value={draft.percent} onChangeText={(value) => setStatementRates({ ...statementRates, [currency]: { ...draft, percent: value } })} keyboardType="decimal-pad" /><Button label={`Save ${currency}`} variant="secondary" loading={busy === `rate-${currency}`} disabled={offline} onPress={() => saveStatementRate(currency)} /></View>;
+          })}
+          <Pressable style={styles.showMore} onPress={() => setUsdAgentRatesExpanded((current) => !current)}>
+            <Text style={styles.linkText}>USD Agent payout rates</Text>
+            {usdAgentRatesExpanded ? <ChevronUp size={17} color={colors.accent} /> : <ChevronDown size={17} color={colors.accent} />}
+          </Pressable>
+          {usdAgentRatesExpanded ? (
+            usdPayoutActors.length ? usdPayoutActors.map((actor) => {
+              const draft = usdAgentRates[actor.id] || {
+                divider: String(actor.incomeUsdPayoutSetting?.divider || 1),
+                percent: String(actor.incomeUsdPayoutSetting?.percent || 0)
+              };
+              return (
+                <View key={actor.id} style={styles.permissionRow}>
+                  <Text style={styles.primaryLine}>{actor.name} - {actor.role}</Text>
+                  <Field label="USD payout divisor" value={draft.divider} onChangeText={(value) => setUsdAgentRates((current) => ({ ...current, [actor.id]: { ...draft, divider: value } }))} keyboardType="decimal-pad" />
+                  <Field label="Percent" value={draft.percent} onChangeText={(value) => setUsdAgentRates((current) => ({ ...current, [actor.id]: { ...draft, percent: value } }))} keyboardType="decimal-pad" />
+                  <Button label={`Save ${actor.name}`} variant="secondary" loading={busy === `usd-agent-rate-${actor.id}`} disabled={offline} onPress={() => saveUsdAgentRate(actor.id)} />
+                </View>
+              );
+            }) : <Text style={styles.muted}>No active USD-based Agents.</Text>
+          ) : null}
+        </Panel>
         <Panel title="Actor permissions" badge="Orders and transfers">{activeActors(state).filter((actor) => actor.role !== "Master").map((actor) => { const visibility = actor.orderVisibilityPermissions || {}; return <View key={actor.id} style={styles.permissionRow}><Text style={styles.primaryLine}>{actor.name} - {actor.role}</Text><SelectRow label="Transfer access" options={["actor", "master", "both", "none"]} value={actor.transferMode || "master"} onChange={(mode) => setMode(actor.id, mode)} />{["Broker", "Special Broker"].includes(actor.role) ? <ToggleChoice label="Multi-currency orders" checked={actor.orderMultiCurrencyEnabled === true} disabled={offline || busy === actor.id} onPress={() => updateActor(actor.id, { orderMultiCurrencyEnabled: actor.orderMultiCurrencyEnabled !== true })} /> : null}{["Agent", "Special Agent", "Special Broker"].includes(actor.role) ? <View style={styles.choiceWrap}>{([['sourceCurrency', 'Source currency'], ['rate', 'Rate'], ['commission', 'Commission'], ['baseAmount', 'Base currency and amount']] as const).map(([key, label]) => <ToggleChoice key={key} label={label} checked={visibility[key] !== false} disabled={offline || busy === actor.id} onPress={() => updateActor(actor.id, { visibility: { [key]: visibility[key] === false } })} />)}</View> : null}</View>; })}</Panel>
         <Panel title="Invite codes"><View style={styles.rowButtons}><Button label="Load codes" variant="secondary" icon={<RefreshCw size={17} color={colors.ink} />} loading={busy === "invites"} onPress={refreshInvites} style={styles.flexButton} /><Button label="New code" icon={<Plus size={17} color="#fff" />} loading={busy === "invite-create"} onPress={addInvite} style={styles.flexButton} /></View><SelectRow label="Role" options={roles} value={inviteRole} onChange={setInviteRole} /><SelectRow label="Base currency" options={supportedCurrencies} value={inviteCurrency} onChange={setInviteCurrency} />{invites.map((invite) => <SummaryRow key={invite.id || invite.code} label={`${invite.actorRole} - ${invite.currency}`} value={invite.code || "Used"} strong />)}</Panel>
         <Panel title="Master reset" badge="Permanent"><Field label="Permit phrase" value={resetPermit} onChangeText={setResetPermit} autoCapitalize="characters" placeholder="MASTER-RESET" /><SelectRow label="Reset scope" options={["data", "wipe"]} value={resetScope} onChange={setResetScope} /><Text style={styles.muted}>{resetScope === "wipe" ? "Wipe data and all linked actors." : "Erase financial data and keep actors."}</Text><Button label={resetScope === "wipe" ? "Wipe data and actors" : "Erase data"} variant="danger" loading={busy === "reset"} disabled={offline} onPress={reset} /></Panel>

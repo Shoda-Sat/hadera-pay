@@ -43,6 +43,7 @@ import {
   submitTransferOrder
 } from "./src/api/client";
 import { BrandHeader, Button, Field, Panel, Pill, SelectRow, SummaryRow } from "./src/components/ui";
+import type { PillTone } from "./src/components/ui";
 import { colors, radius, shadow, spacing } from "./src/theme";
 import { actingSessionFor, activeActors, isMasterView, transferTargetsFor } from "./src/domain/workspace";
 import {
@@ -66,6 +67,7 @@ import type {
   Currency,
   FundingType,
   OrderRecord,
+  ReceivableRecord,
   SavedCustomerRecord,
   SubmittedOrder,
   TransferDraft,
@@ -143,10 +145,13 @@ function visibleOrdersFor(session: UserSession, workspaceState: WorkspaceState |
     .sort(newestOrders);
 }
 
-function stateTone(state: OrderRecord["state"]): "neutral" | "good" | "warn" | "danger" {
+function stateTone(state: OrderRecord["state"]): PillTone {
+  if (state === "Assigned") return "assigned";
+  if (state === "Returned") return "returned";
+  if (state === "Cancelled") return "cancelled";
+  if (state === "Voided") return "voided";
   if (state === "Paid") return "good";
-  if (["Pending Forward", "Assigned", "Returned", "Void Requested"].includes(state)) return "warn";
-  if (["Voided", "Cancelled"].includes(state)) return "danger";
+  if (["Pending Forward", "Void Requested"].includes(state)) return "warn";
   return "neutral";
 }
 
@@ -232,6 +237,7 @@ export default function App() {
   const [stateLoading, setStateLoading] = useState(false);
   const [stateError, setStateError] = useState("");
   const historyRef = useRef<AppScreen[]>(["home"]);
+  const contentScrollRef = useRef<ScrollView>(null);
   const selectedActor = workspaceState?.actors.find((actor) => actor.id === selectedActorId);
   const actingSession = session ? actingSessionFor(session, selectedActor) : null;
   const quote = useMemo(() => calculateQuote(draft), [draft]);
@@ -375,14 +381,15 @@ export default function App() {
     offline,
     onState: setWorkspaceState,
     onNavigate: navigate,
-    onRefresh: refreshWorkspace
+    onRefresh: refreshWorkspace,
+    onScrollToEnd: () => contentScrollRef.current?.scrollToEnd({ animated: true })
   } : null;
 
   return (
     <SafeAreaView style={styles.safe}>
       <StatusBar style="dark" />
       <KeyboardAvoidingView style={styles.app} behavior={Platform.OS === "ios" ? "padding" : undefined}>
-        <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+        <ScrollView ref={contentScrollRef} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
           <AppTopBar
             session={actingSession}
             offline={offline}
@@ -831,6 +838,8 @@ function ArchiveScreen({
   const [selectedMonth, setSelectedMonth] = useState("");
   const [monthMenuOpen, setMonthMenuOpen] = useState(false);
   const [expandedStatements, setExpandedStatements] = useState<string[]>([]);
+  const [receivablesExpanded, setReceivablesExpanded] = useState(false);
+  const [expandedReceivableMonths, setExpandedReceivableMonths] = useState<string[]>([]);
   const archives = visibleArchivesFor(session, workspaceState);
   const months = Array.from(new Set(archives.map((archive) => archiveMonthKey(archive.closedAt)).filter(Boolean))).sort().reverse();
   const activeMonth = months.includes(selectedMonth) ? selectedMonth : "";
@@ -838,6 +847,11 @@ function ArchiveScreen({
     ? archives.filter((archive) => archiveMonthKey(archive.closedAt) === activeMonth)
     : archives;
   const monthOptions = ["", ...months];
+  const archivedReceivables = filteredArchives.flatMap((archive) => (archive.receivables || []).map((receivable) => ({
+    archive,
+    receivable
+  })));
+  const receivableMonths = Array.from(new Set(archivedReceivables.map(({ archive, receivable }) => archiveMonthKey(receivable.archivedAt || archive.closedAt)).filter(Boolean))).sort().reverse();
 
   const toggleStatement = (statementId: string) => {
     setExpandedStatements((current) => current.includes(statementId)
@@ -887,6 +901,53 @@ function ArchiveScreen({
               );
             })}
           </View>
+        ) : null}
+      </Panel>
+
+      <Panel title="Collected receivables" badge={String(archivedReceivables.length)}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={receivablesExpanded ? "Collapse collected receivables" : "Expand collected receivables"}
+          onPress={() => setReceivablesExpanded((current) => !current)}
+          style={styles.archiveToggle}
+        >
+          <Text style={styles.archiveToggleText}>{receivablesExpanded ? "Hide monthly receivables" : "Show monthly receivables"}</Text>
+          {receivablesExpanded ? <ChevronUp size={18} color={colors.accent} /> : <ChevronDown size={18} color={colors.accent} />}
+        </Pressable>
+        {receivablesExpanded ? (
+          receivableMonths.length ? receivableMonths.map((month) => {
+            const monthExpanded = expandedReceivableMonths.includes(month);
+            const monthlyReceivables = archivedReceivables.filter(({ archive, receivable }) => archiveMonthKey(receivable.archivedAt || archive.closedAt) === month);
+            return (
+              <View key={`receivables-${month}`}>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`${monthExpanded ? "Collapse" : "Expand"} ${archiveMonthLabel(month)} collected receivables`}
+                  onPress={() => setExpandedReceivableMonths((current) => monthExpanded ? current.filter((item) => item !== month) : [...current, month])}
+                  style={styles.archiveToggle}
+                >
+                  <Text style={styles.archiveToggleText}>{archiveMonthLabel(month)} ({monthlyReceivables.length})</Text>
+                  {monthExpanded ? <ChevronUp size={18} color={colors.accent} /> : <ChevronDown size={18} color={colors.accent} />}
+                </Pressable>
+                {monthExpanded ? (
+                  <View style={styles.archiveDetails}>
+                    {monthlyReceivables.map(({ archive, receivable }: { archive: ArchiveRecord; receivable: ReceivableRecord }) => {
+                      const paidMinor = (receivable.payments || []).reduce((sum, payment) => sum + Number(payment.amountMinor || 0), 0);
+                      const lastPayment = (receivable.payments || []).slice().sort((a, b) => new Date(b.paidAt || 0).getTime() - new Date(a.paidAt || 0).getTime())[0];
+                      return (
+                        <View key={`${archive.id || archive.closedAt}-${receivable.id}`} style={styles.archiveDetailRow}>
+                          <Text style={styles.archiveDetailTitle}>{receivable.brokerOrderNumber || receivable.orderId}</Text>
+                          <Text style={styles.archiveDetailMeta}>{receivable.borrower}{lastPayment?.paidAt ? ` - Collected ${archiveClosedLabel(lastPayment.paidAt)}` : ""}</Text>
+                          <Text style={styles.archiveDetailAmount}>Principal {compactAmount(receivable.currency, majorFromMinor(receivable.principalMinor, receivable.currency))}</Text>
+                          <Text style={styles.archiveDetailMeta}>Collected {compactAmount(receivable.currency, majorFromMinor(paidMinor, receivable.currency))}</Text>
+                        </View>
+                      );
+                    })}
+                  </View>
+                ) : null}
+              </View>
+            );
+          }) : <Text style={styles.mutedText}>No fully collected receivables have been archived yet.</Text>
         ) : null}
       </Panel>
 

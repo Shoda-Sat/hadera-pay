@@ -73,6 +73,7 @@ export interface ActorRecord {
   specialPayoutDividerEnabled?: boolean;
   specialPayoutPercent?: number;
   specialPayoutSettings?: Partial<Record<Currency, RateSetting>>;
+  incomeUsdPayoutSetting?: RateSetting;
   orderFixedRates?: Partial<Record<Currency, { enabled?: boolean; rate?: number | string }>>;
   orderVisibilityPermissions?: Partial<Record<"sourceCurrency" | "rate" | "commission" | "baseAmount", boolean>>;
 }
@@ -157,6 +158,7 @@ export interface OrderRecord {
   incomeProfitMinor?: number;
   incomeSnapshotAt?: string;
   incomeMasterRateSnapshot?: RateSetting & { payoutCurrency?: Currency };
+  incomeUsdAgentRateSnapshot?: RateSetting & { actorId?: string; actorName?: string };
 }
 
 export interface ReceivableRecord {
@@ -180,6 +182,8 @@ export interface ReceivableRecord {
   voided?: boolean;
   voidedAt?: string;
   voidedBy?: string;
+  archivedAt?: string;
+  archiveId?: string;
 }
 
 export interface SavedCustomerRecord {
@@ -272,6 +276,7 @@ export interface ArchiveRecord {
   closedAt?: string;
   balances?: Partial<Record<Currency, number>>;
   orders?: OrderRecord[];
+  receivables?: ReceivableRecord[];
   transfers?: Array<{
     id?: string;
     from?: string;

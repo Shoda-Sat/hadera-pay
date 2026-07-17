@@ -232,6 +232,13 @@ function currencyToUsd(state: WorkspaceState, currency: Currency, amountMinor: n
   return minorFromMajor(major / rates.usdToErn, "USD");
 }
 
+export function applyUsdAgentIncomeRate(amountMinor: number, setting: RateSetting | undefined): number {
+  if (amountMinor <= 0) return 0;
+  const divider = Number(setting?.divider) > 0 ? Number(setting?.divider) : 1;
+  const percent = Number(setting?.percent) > 0 ? Number(setting?.percent) : 0;
+  return minorFromMajor(majorFromMinor(amountMinor, "USD") / divider * (1 + percent / 100), "USD");
+}
+
 function freezeIncome(state: WorkspaceState, order: OrderRecord, lines: LedgerLine[]): void {
   const sourceCurrency = order.sourceCurrency;
   const payoutCurrency = order.payoutCurrency;
@@ -239,8 +246,13 @@ function freezeIncome(state: WorkspaceState, order: OrderRecord, lines: LedgerLi
   const rates = buyingRates(state);
   const payerLine = lines.find((line) => line.account === `${order.agent} ACTOR_CLEARING` && line.direction === "Credit");
   const payingActor = activeActors(state).find((actor) => actor.name === order.agent);
+  const usdPayoutActorBaseMinor = payingActor?.currency === "USD" && payingActor.role === "Agent" && payerLine
+    ? applyUsdAgentIncomeRate(currencyToUsd(state, payerLine.currency, payerLine.amountMinor), payingActor.incomeUsdPayoutSetting)
+    : 0;
   let baseAmountMinor = 0;
-  if (payingActor && actorHasSpecialPayout(payingActor.role) && payerLine) {
+  if (usdPayoutActorBaseMinor > 0) {
+    baseAmountMinor = usdPayoutActorBaseMinor;
+  } else if (payingActor && actorHasSpecialPayout(payingActor.role) && payerLine) {
     baseAmountMinor = currencyToUsd(state, payerLine.currency, payerLine.amountMinor);
   } else if (payoutCurrency === "USD") {
     baseAmountMinor = payerLine?.currency === "USD" ? payerLine.amountMinor : Number(order.payoutAmountMinor || 0);
@@ -265,10 +277,10 @@ function freezeIncome(state: WorkspaceState, order: OrderRecord, lines: LedgerLi
     if (["ETB", "ERN", "USD"].includes(payoutCurrency) && localRate > 0) {
       const payoutLocal = payoutCurrency === "USD" ? payoutMajor * rates.usdToEtb : payoutMajor;
       profitMinor = minorFromMajor(((collectedEur * rates.eurToUsd * localRate) - payoutLocal) / localRate, "USD");
-      if (!(payingActor && actorHasSpecialPayout(payingActor.role))) baseAmountMinor = collectedUsdMinor - profitMinor;
+      if (!usdPayoutActorBaseMinor && !(payingActor && actorHasSpecialPayout(payingActor.role))) baseAmountMinor = collectedUsdMinor - profitMinor;
     }
   }
-  if (payingActor && actorHasSpecialPayout(payingActor.role) && baseAmountMinor > 0) {
+  if ((usdPayoutActorBaseMinor > 0 || (payingActor && actorHasSpecialPayout(payingActor.role))) && baseAmountMinor > 0) {
     profitMinor = collectedUsdMinor - baseAmountMinor;
   }
   order.incomeBaseCurrency = "USD";
@@ -280,6 +292,10 @@ function freezeIncome(state: WorkspaceState, order: OrderRecord, lines: LedgerLi
   order.incomeProfitMinor = profitMinor;
   order.incomeSnapshotAt = order.paidAt || new Date().toISOString();
   order.incomeMasterRateSnapshot = { ...rateSetting(state.masterRateDivisorSettings?.[payoutCurrency]), payoutCurrency };
+  if (payingActor?.currency === "USD" && payingActor.role === "Agent") {
+    const setting = rateSetting(payingActor.incomeUsdPayoutSetting);
+    order.incomeUsdAgentRateSnapshot = { actorId: payingActor.id, actorName: payingActor.name, divider: setting.divider, percent: setting.percent };
+  }
 }
 
 export async function assignOrder(orderId: string, agentId: string, dividerText = "", percentText = ""): Promise<WorkspaceState> {
@@ -561,7 +577,8 @@ export async function createManagedActor(input: { name: string; role: ActorRecor
       managedByMaster: true,
       transferEnabled: true,
       transferMode: "master",
-      incomeStatementVisible: true
+      incomeStatementVisible: true,
+      incomeUsdPayoutSetting: input.currency === "USD" && input.role === "Agent" ? { divider: 1, percent: 0 } : undefined
     });
   });
 }
@@ -589,6 +606,18 @@ export async function updateMasterRateSetting(currency: Currency, setting: RateS
     if (setting.enabled && divider <= 0) throw new Error("Enter a divisor greater than zero.");
     if (percent < 0) throw new Error("Enter zero or a positive percentage.");
     state.masterRateDivisorSettings = { ...(state.masterRateDivisorSettings || {}), [currency]: { enabled: setting.enabled === true, divider: divider || 1, percent } };
+  });
+}
+
+export async function updateUsdAgentIncomeRate(actorId: string, setting: RateSetting): Promise<WorkspaceState> {
+  return updateWorkspaceState((state) => {
+    const actor = activeActors(state).find((item) => item.id === actorId);
+    const divider = Number(setting.divider || 0);
+    const percent = Number(setting.percent || 0);
+    if (!actor || actor.currency !== "USD" || actor.role !== "Agent") throw new Error("Choose a USD-based Agent.");
+    if (divider <= 0) throw new Error("Enter a divisor greater than zero.");
+    if (percent < 0) throw new Error("Enter zero or a positive percentage.");
+    actor.incomeUsdPayoutSetting = { divider, percent };
   });
 }
 

@@ -96,6 +96,7 @@ export function Field({
   label,
   value,
   onChangeText,
+  inputRef,
   placeholder,
   keyboardType,
   secureTextEntry,
@@ -106,11 +107,13 @@ export function Field({
   label: string;
   value: string;
   onChangeText: (value: string) => void;
+  inputRef?: React.Ref<TextInput>;
 }) {
   return (
     <View style={styles.field}>
       <Text style={styles.label}>{label}</Text>
       <TextInput
+        ref={inputRef}
         value={value}
         onChangeText={onChangeText}
         placeholder={placeholder}

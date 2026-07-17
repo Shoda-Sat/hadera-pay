@@ -56,13 +56,21 @@ export function inputAmount(currency: Currency, amount: number): string {
 
 export type OrderConversionField = "sourceAmount" | "rate" | "payoutAmount";
 
+type ConversionDraft = {
+  sourceCurrency: Currency;
+  payoutCurrency: Currency;
+  sourceAmount: string;
+  payoutAmount: string;
+  rate: string;
+};
+
 export function inputRate(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return "";
   const rounded = Math.round(value * 1_000_000) / 1_000_000;
   return String(rounded);
 }
 
-export function reconcileOrderConversion(draft: TransferDraft, touchedFields: readonly OrderConversionField[]): TransferDraft {
+export function reconcileOrderConversion<T extends ConversionDraft>(draft: T, touchedFields: readonly OrderConversionField[]): T {
   const sourceAmount = parseAmount(draft.sourceAmount);
   const payoutAmount = parseAmount(draft.payoutAmount);
   const rate = parseAmount(draft.rate);

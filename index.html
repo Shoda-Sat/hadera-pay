@@ -1292,6 +1292,8 @@
 
     .setting-inline .special-agent-divider,
     .setting-inline .special-agent-percent,
+    .usd-agent-income-divider,
+    .usd-agent-income-percent,
     .master-rate-divider,
     .master-rate-percent {
       flex: 0 0 190px;
@@ -2988,7 +2990,7 @@
             <div class="panel-header">
               <div class="settings-heading">
                 <h2>Income Statement Rates</h2>
-                <small>Set Buying Rate values and Master rate divisors used for future income calculations.</small>
+                <small>Set Buying Rate values, Master currency rates, and USD payout actor rates for future income calculations.</small>
               </div>
             </div>
             <div class="panel-body table-wrap">
@@ -3145,6 +3147,7 @@
       expandedFixedRateActorId: "",
       expandedSpecialDividerActorId: "",
       expandedMasterRateDivisor: false,
+      expandedUsdAgentIncomeRates: false,
       resetPanelExpanded: true,
       invitePanelExpanded: true,
       settingsPanels: normalizeSettingsPanels(),
@@ -3265,6 +3268,12 @@
             ? Number(actor.specialPayoutPercent)
             : 0,
           specialPayoutSettings,
+          incomeUsdPayoutSetting: actor.role === "Agent" && baseCurrency === "USD"
+            ? {
+                divider: Number(actor.incomeUsdPayoutSetting?.divider) > 0 ? Number(actor.incomeUsdPayoutSetting.divider) : 1,
+                percent: Number(actor.incomeUsdPayoutSetting?.percent) > 0 ? Number(actor.incomeUsdPayoutSetting.percent) : 0
+              }
+            : undefined,
           orderMultiCurrencyEnabled: actorCanInitiateOrders(actor.role)
             ? actor.orderMultiCurrencyEnabled === true
             : false,
@@ -3541,7 +3550,7 @@
 
     function settingsRateInputIsFocused() {
       return Boolean(document.activeElement?.closest?.(
-        ".fixed-order-rate, .special-agent-divider, .special-agent-percent, .master-rate-divider, .master-rate-percent, .buying-rate-input, .forward-agent, .forward-payout-divider, .forward-payout-percent, .receivable-payment, .ledger-tool-input"
+        ".fixed-order-rate, .special-agent-divider, .special-agent-percent, .usd-agent-income-divider, .usd-agent-income-percent, .master-rate-divider, .master-rate-percent, .buying-rate-input, .forward-agent, .forward-payout-divider, .forward-payout-percent, .receivable-payment, .ledger-tool-input"
       ));
     }
 
@@ -4859,6 +4868,15 @@
       };
     }
 
+    function usdAgentIncomeSettingFor(actor) {
+      if (!actor || actor.currency !== "USD" || actor.role !== "Agent") return { divider: 1, percent: 0 };
+      const setting = actor.incomeUsdPayoutSetting || {};
+      return {
+        divider: Number(setting.divider) > 0 ? Number(setting.divider) : 1,
+        percent: Number(setting.percent) > 0 ? Number(setting.percent) : 0
+      };
+    }
+
     function payoutActorsForOrder(order) {
       return actorsByRoles(["Agent", "Special Agent", "Special Broker"])
         .filter((actor) => actor.name !== order.broker && actorCanPayoutCurrency(actor, order.payoutCurrency));
@@ -5929,8 +5947,14 @@
     function renderMasterRateDivisorSettings() {
       const master = masterActor();
       const expanded = state.expandedMasterRateDivisor === true;
+      const usdAgentsExpanded = state.expandedUsdAgentIncomeRates === true;
       const rates = buyingRates();
       const activeCount = supportedCurrencies.filter((currency) => masterRateDivisorSettingFor(currency).enabled).length;
+      const usdPayoutActors = activeActors().filter((actor) => actor.currency === "USD" && actor.role === "Agent");
+      const adjustedUsdPayoutActors = usdPayoutActors.filter((actor) => {
+        const setting = usdAgentIncomeSettingFor(actor);
+        return setting.divider !== 1 || setting.percent > 0;
+      }).length;
       const details = expanded ? supportedCurrencies.map((currency) => {
         const setting = masterRateDivisorSettingFor(currency);
         return `
@@ -5943,6 +5967,18 @@
             <button class="btn ${setting.enabled ? "danger" : "primary"} toggle-master-rate-divisor" data-currency="${currency}" type="button">
               ${setting.enabled ? "Switch Off" : "Switch On"}
             </button>
+          </div>
+        `;
+      }).join("") : "";
+      const usdAgentDetails = usdAgentsExpanded ? usdPayoutActors.map((actor) => {
+        const setting = usdAgentIncomeSettingFor(actor);
+        return `
+          <div class="special-divider-currency">
+            <strong>${escapeHtml(actor.name)}</strong>
+            <span class="muted">${escapeHtml(actor.role)}</span>
+            <input class="usd-agent-income-divider" data-id="${actor.id}" type="text" inputmode="decimal" value="${formatRate(setting.divider)}" placeholder="Divisor" aria-label="${escapeHtml(actor.name)} USD income payout divisor">
+            <input class="usd-agent-income-percent" data-id="${actor.id}" type="text" inputmode="decimal" value="${formatRate(setting.percent)}" placeholder="Percent" aria-label="${escapeHtml(actor.name)} USD income payout percentage">
+            <button class="btn primary save-usd-agent-income-rate" data-id="${actor.id}" type="button">Save</button>
           </div>
         `;
       }).join("") : "";
@@ -5979,6 +6015,17 @@
           </td>
           <td>${activeCount} active / ${supportedCurrencies.length} currencies</td>
           <td><span class="muted">Controls Income Statement Base USD column</span></td>
+        </tr>
+        <tr>
+          <td><strong>USD-based Agents</strong><br><span class="muted">Agent-specific Base USD</span></td>
+          <td>
+            <div class="special-divider-panel">
+              <button class="btn secondary expand-usd-agent-income-rates" type="button">${usdAgentsExpanded ? "Hide" : "Show"} USD Agent payout settings</button>
+              ${usdAgentDetails || (usdAgentsExpanded ? '<span class="muted">No active USD-based Agents.</span>' : "")}
+            </div>
+          </td>
+          <td>${adjustedUsdPayoutActors} adjusted / ${usdPayoutActors.length} Agents</td>
+          <td><span class="muted">Applies to future Base USD snapshots only</span></td>
         </tr>
       `;
     }
@@ -6839,6 +6886,31 @@
       return 0;
     }
 
+    function applyUsdAgentIncomeRate(amountMinor, setting) {
+      const amount = Number(amountMinor || 0);
+      if (amount <= 0) return 0;
+      const divider = Number(setting?.divider) > 0 ? Number(setting.divider) : 1;
+      const percent = Number(setting?.percent) > 0 ? Number(setting.percent) : 0;
+      const adjustedMajor = majorAmount(amount, "USD") / divider * (1 + percent / 100);
+      return minorFromMajor(adjustedMajor, "USD");
+    }
+
+    function usdPayoutActorIncomeBaseMinorForOrder(order, journalLines) {
+      const payingActor = activeActors().find((actor) => actor.name === order.agent);
+      if (!payingActor || payingActor.currency !== "USD" || payingActor.role !== "Agent") return 0;
+      const agentLine = journalLines.find((line) =>
+        line.account === `${order.agent} ACTOR_CLEARING` &&
+        line.direction === "Credit" &&
+        Number(line.amountMinor || 0) > 0
+      );
+      const recordedUsdMinor = agentLine
+        ? currencyAmountToUsdMinor(agentLine.currency, agentLine.amountMinor)
+        : (order.payoutCurrency || order.sourceCurrency || "USD") === "USD"
+          ? Number(order.payoutAmountMinor || order.sourceAmountMinor || 0)
+          : 0;
+      return applyUsdAgentIncomeRate(recordedUsdMinor, usdAgentIncomeSettingFor(payingActor));
+    }
+
     function specialPayoutBaseUsdMinorForOrder(order, journalLines) {
       const payingActor = activeActors().find((actor) => actor.name === order.agent);
       if (!actorHasSpecialPayout(payingActor?.role)) return 0;
@@ -6855,6 +6927,8 @@
       const baseCurrency = "USD";
       const payoutCurrency = order.payoutCurrency || order.sourceCurrency || baseCurrency;
       const payoutAmountMinor = Number(order.payoutAmountMinor || order.sourceAmountMinor || 0);
+      const usdPayoutActorBaseMinor = usdPayoutActorIncomeBaseMinorForOrder(order, journalLines);
+      if (usdPayoutActorBaseMinor > 0) return usdPayoutActorBaseMinor;
       const specialPayoutBaseUsdMinor = specialPayoutBaseUsdMinorForOrder(order, journalLines);
       if (specialPayoutBaseUsdMinor > 0) return specialPayoutBaseUsdMinor;
       if (payoutCurrency === baseCurrency) {
@@ -6935,8 +7009,12 @@
       let profitMinor = Number.isFinite(Number(collected.buyingProfitMinor))
         ? Number(collected.buyingProfitMinor)
         : collected.collectedUsdMinor - baseAmountMinor;
+      const usdPayoutActorBaseMinor = usdPayoutActorIncomeBaseMinorForOrder(order, journalLines);
       const specialPayoutBaseUsdMinor = specialPayoutBaseUsdMinorForOrder(order, journalLines);
-      if (specialPayoutBaseUsdMinor > 0) {
+      if (usdPayoutActorBaseMinor > 0) {
+        baseAmountMinor = usdPayoutActorBaseMinor;
+        profitMinor = collected.collectedUsdMinor - baseAmountMinor;
+      } else if (specialPayoutBaseUsdMinor > 0) {
         baseAmountMinor = specialPayoutBaseUsdMinor;
         profitMinor = collected.collectedUsdMinor - baseAmountMinor;
       } else if (Number.isFinite(Number(collected.buyingProfitMinor))) {
@@ -6974,6 +7052,8 @@
       const income = calculatedIncomeStatementForOrder(order, journalLines);
       const payoutCurrency = order.payoutCurrency || order.sourceCurrency || "USD";
       const masterSetting = masterRateDivisorSettingFor(payoutCurrency);
+      const payingActor = activeActors().find((actor) => actor.name === order.agent);
+      const usdAgentSetting = usdAgentIncomeSettingFor(payingActor);
       order.incomeBaseCurrency = income.baseCurrency;
       order.incomeBaseAmountMinor = income.baseAmountMinor;
       order.incomeCollectedCurrency = income.collectedCurrency;
@@ -6988,6 +7068,14 @@
         divider: Number(masterSetting.divider || 1),
         percent: Number(masterSetting.percent || 0)
       };
+      if (payingActor?.currency === "USD" && payingActor.role === "Agent") {
+        order.incomeUsdAgentRateSnapshot = {
+          actorId: payingActor.id,
+          actorName: payingActor.name,
+          divider: usdAgentSetting.divider,
+          percent: usdAgentSetting.percent
+        };
+      }
       return true;
     }
 
@@ -7422,9 +7510,10 @@
     }
 
     function visibleReceivablesFor(actor) {
+      const activeReceivables = state.receivables.filter((item) => !item.archivedAt);
       return actor?.role === "Master"
-        ? state.receivables
-        : state.receivables.filter((item) => item.borrower === actor?.name || item.borrowerActorId === actor?.id);
+        ? activeReceivables
+        : activeReceivables.filter((item) => item.borrower === actor?.name || item.borrowerActorId === actor?.id);
     }
 
     function renderReceivables() {
@@ -7875,13 +7964,23 @@
           const orderRows = (archive.orders || []).map((order) =>
             orderSearchResult(archivedOrderForSearch(order, archive), actor, "Archived Order", "Locked")
           );
+          const receivableRows = (archive.receivables || []).map((receivable) => {
+            const result = receivableSearchResult({ ...receivable, archivedAt: receivable.archivedAt || archive.closedAt });
+            return {
+              ...result,
+              type: "Archived Receivable",
+              date: receivable.archivedAt || archive.closedAt || result.date,
+              time: new Date(receivable.archivedAt || archive.closedAt || result.date || 0).getTime() || 0,
+              status: "Locked"
+            };
+          });
           const transferRows = (archive.transfers || []).map((transfer) =>
             transferSearchResult(archivedTransferForSearch(transfer, archive), "Archived Transfer", "Locked")
           );
           const ledgerRows = (archive.ledger || []).map((line) =>
             ledgerSearchResult(archivedLedgerLineForSearch(line, archive), actor, "Archived Ledger")
           ).map((result) => ({ ...result, status: "Locked" }));
-          return [...balanceRows, ...orderRows, ...transferRows, ...ledgerRows];
+          return [...balanceRows, ...orderRows, ...receivableRows, ...transferRows, ...ledgerRows];
         });
       return [...orderResults, ...transferResults, ...ledgerResults, ...receivableResults, ...archiveResults]
         .filter((result) => matchesSearch([
@@ -8355,6 +8454,43 @@
                 </tr>
               `);
             });
+            (archive.receivables || []).forEach((receivable) => {
+              const payments = receivable.payments || [];
+              const lastPayment = payments.slice().sort((a, b) => new Date(b.paidAt || 0).getTime() - new Date(a.paidAt || 0).getTime())[0];
+              const date = receivable.archivedAt || lastPayment?.paidAt || archive.closedAt;
+              const amountMinor = Number(receivable.principalMinor || 0);
+              if (!archiveRowVisible(date, amountMinor, filters)) return;
+              const collectedMinor = receivablePaidMinor(receivable);
+              const detail = [
+                receivable.borrower ? `Borrower: ${receivable.borrower}` : "",
+                receivable.receiverName ? `Receiver: ${receivable.receiverName}` : "",
+                `Collected: ${money(receivable.currency || "USD", collectedMinor)}`
+              ].filter(Boolean).join(" - ");
+              if (!archiveSearchVisible([
+                archive.actor,
+                archive.id,
+                receivable.id,
+                receivable.orderId,
+                receivable.brokerOrderNumber,
+                receivable.borrower,
+                receivable.senderName,
+                receivable.receiverName,
+                receivable.accountNumber,
+                receivable.phoneNumber,
+                receivable.remarks,
+                detail
+              ], filters)) return;
+              closureRows.push(`
+                <tr>
+                  <td>${escapeHtml(displayDate(date))}</td>
+                  <td>Receivable</td>
+                  <td><strong>${escapeHtml(receivable.brokerOrderNumber || receivable.orderId || receivable.id)}</strong></td>
+                  <td>${escapeHtml(detail)}</td>
+                  <td>${lockedAmount(receivable.currency || "USD", amountMinor)}</td>
+                  <td><span class="state-pill danger">Locked</span></td>
+                </tr>
+              `);
+            });
             (archive.transfers || []).forEach((transfer) => {
               const date = transfer.sentAt || transfer.createdAt || transfer.postedAt || archive.closedAt;
               const amountMinor = Number(transfer.amountMinor || 0);
@@ -8675,6 +8811,31 @@
       };
     }
 
+    function archiveReceivableSnapshot(receivable, actorName, archiveId, closedAt = new Date().toISOString()) {
+      return {
+        id: receivable.id,
+        orderId: receivable.orderId || "",
+        brokerOrderNumber: receivable.brokerOrderNumber || receivable.orderId || "",
+        agentOrderNumber: receivable.agentOrderNumber || "",
+        actor: actorName,
+        borrower: receivable.borrower || actorName,
+        borrowerActorId: receivable.borrowerActorId || "",
+        currency: receivable.currency || "USD",
+        principalMinor: Number(receivable.principalMinor || 0),
+        senderName: receivable.senderName || "",
+        receiverName: receivable.receiverName || "",
+        accountNumber: receivable.accountNumber || "",
+        phoneNumber: receivable.phoneNumber || "",
+        remarks: receivable.remarks || "",
+        createdAt: receivable.createdAt || "",
+        updatedAt: closedAt,
+        createdBy: receivable.createdBy || "",
+        payments: (receivable.payments || []).map((payment) => ({ ...payment })),
+        archivedAt: closedAt,
+        archiveId
+      };
+    }
+
     function archiveTransferSnapshot(transfer, actorName, closedAt = new Date().toISOString()) {
       return {
         id: transfer.id,
@@ -8781,19 +8942,28 @@
         transfer.state === "Approved" &&
         (transfer.from === actor.name || transfer.to === actor.name)
       );
+      const collectedReceivables = state.receivables.filter((receivable) =>
+        !receivable.archivedAt &&
+        !receivableIsVoided(receivable) &&
+        (receivable.borrower === actor.name || receivable.borrowerActorId === actor.id) &&
+        Number(receivable.principalMinor || 0) > 0 &&
+        receivablePaidMinor(receivable) >= Number(receivable.principalMinor || 0)
+      );
       const incomeRows = incomeStatementRows(actorLines);
       const incomeProfitMinor = incomeRows.reduce((sum, row) => sum + row.profitMinor, 0);
       const closedAt = new Date().toISOString();
+      const archiveId = "ARC-" + Date.now();
       const previousBalances = archivedBalances(actor.name, actorLines);
       const archivedOrderSnapshots = archivedOrders.map((order) => archiveOrderSnapshot(order, actor.name, closedAt));
       const archivedTransferSnapshots = archivedTransfers.map((transfer) => archiveTransferSnapshot(transfer, actor.name, closedAt));
+      const archivedReceivableSnapshots = collectedReceivables.map((receivable) => archiveReceivableSnapshot(receivable, actor.name, archiveId, closedAt));
       const archivedLedgerSnapshots = openTransactionLines
         .filter(archiveLedgerLineIsSmart)
         .map((line) => archiveLedgerSnapshot(line, actor.name, closedAt));
-      if (!openTransactionLines.length && !archivedOrders.length && !archivedTransfers.length) return;
-      if (actorLines.length || archivedOrders.length || archivedTransfers.length) {
+      if (!openTransactionLines.length && !archivedOrders.length && !archivedTransfers.length && !collectedReceivables.length) return;
+      if (actorLines.length || archivedOrders.length || archivedTransfers.length || collectedReceivables.length) {
         state.archives.unshift({
-          id: "ARC-" + Date.now(),
+          id: archiveId,
           actor: actor.name,
           closedAt,
           balances: previousBalances,
@@ -8802,6 +8972,7 @@
           incomeSummary: `Closed Profit/Loss for ${actor.name}`,
           ledger: archivedLedgerSnapshots,
           orders: archivedOrderSnapshots,
+          receivables: archivedReceivableSnapshots,
           transfers: archivedTransferSnapshots
         });
       }
@@ -8817,6 +8988,12 @@
       state.transfers = state.transfers.filter((transfer) =>
         transfer.state !== "Approved" ||
         (transfer.from !== actor.name && transfer.to !== actor.name)
+      );
+      const collectedReceivableIds = new Set(collectedReceivables.map((receivable) => receivable.id));
+      state.receivables = state.receivables.map((receivable) =>
+        collectedReceivableIds.has(receivable.id)
+          ? { ...receivable, archivedAt: closedAt, archiveId, updatedAt: closedAt }
+          : receivable
       );
       const openingLines = supportedCurrencies
         .filter((currency) => (previousBalances[currency] || 0) !== 0)
@@ -9797,6 +9974,9 @@
         specialPayoutPercent: hasSpecialPayout ? 0 : undefined,
         specialPayoutSettings: hasSpecialPayout
           ? Object.fromEntries(workingCurrencies.map((currency) => [currency, { enabled: false, divider: 1, percent: 0 }]))
+          : undefined,
+        incomeUsdPayoutSetting: roleInput.value === "Agent" && currencyInput.value === "USD"
+          ? { divider: 1, percent: 0 }
           : undefined
       });
       state.settlements.push({ actor: name, currency: currencyInput.value, netMinor: 0 });
@@ -10200,6 +10380,14 @@
         return;
       }
 
+      const expandUsdAgentIncomeRatesButton = event.target.closest(".expand-usd-agent-income-rates");
+      if (expandUsdAgentIncomeRatesButton) {
+        if (selectedActor()?.role !== "Master") return;
+        state.expandedUsdAgentIncomeRates = state.expandedUsdAgentIncomeRates !== true;
+        renderAll();
+        return;
+      }
+
       const saveFixedRateButton = event.target.closest(".save-fixed-order-rate");
       if (saveFixedRateButton) {
         if (selectedActor()?.role !== "Master") return;
@@ -10308,6 +10496,34 @@
           percent,
           enabled: current.enabled !== true
         };
+        renderAll();
+        return;
+      }
+
+      const saveUsdAgentIncomeRateButton = event.target.closest(".save-usd-agent-income-rate");
+      if (saveUsdAgentIncomeRateButton) {
+        if (selectedActor()?.role !== "Master") return;
+        const actor = state.actors.find((item) => item.id === saveUsdAgentIncomeRateButton.dataset.id);
+        const wrapper = saveUsdAgentIncomeRateButton.closest(".special-divider-currency");
+        const input = wrapper?.querySelector(".usd-agent-income-divider");
+        const percentInput = wrapper?.querySelector(".usd-agent-income-percent");
+        const divider = Number(input?.value || 0);
+        const percent = Number(percentInput?.value || 0);
+        if (!actor || actor.currency !== "USD" || actor.role !== "Agent") return;
+        if (!Number.isFinite(divider) || divider <= 0) {
+          input?.setCustomValidity("Enter a divisor greater than zero.");
+          input?.reportValidity();
+          return;
+        }
+        if (!Number.isFinite(percent) || percent < 0) {
+          percentInput?.setCustomValidity("Enter zero or a positive percentage.");
+          percentInput?.reportValidity();
+          return;
+        }
+        input?.setCustomValidity("");
+        percentInput?.setCustomValidity("");
+        freezePostedIncomeStatements();
+        actor.incomeUsdPayoutSetting = { divider, percent };
         renderAll();
         return;
       }
