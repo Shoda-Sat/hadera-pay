@@ -3433,6 +3433,7 @@
         new Date(item.voidRejectedAt || 0).getTime(),
         new Date(item.voidedAt || 0).getTime(),
         new Date(item.updatedAt || 0).getTime(),
+        new Date(item.reversedAt || 0).getTime(),
         new Date(item.paidAt || 0).getTime(),
         new Date(item.assignedAt || 0).getTime(),
         new Date(item.approvedAt || 0).getTime(),
@@ -3511,7 +3512,17 @@
         if (item.approvedAt && !next.approvedAt) next.approvedAt = item.approvedAt;
         if (previous.paidOutAt && !next.paidOutAt) next.paidOutAt = previous.paidOutAt;
         if (item.paidOutAt && !next.paidOutAt) next.paidOutAt = item.paidOutAt;
-        if ((previous.state === "Approved" || item.state === "Approved") && next.journal) next.state = "Approved";
+        if (previous.reversalJournal && !next.reversalJournal) next.reversalJournal = previous.reversalJournal;
+        if (item.reversalJournal && !next.reversalJournal) next.reversalJournal = item.reversalJournal;
+        if (previous.reversedAt && !next.reversedAt) next.reversedAt = previous.reversedAt;
+        if (item.reversedAt && !next.reversedAt) next.reversedAt = item.reversedAt;
+        if (previous.reversedBy && !next.reversedBy) next.reversedBy = previous.reversedBy;
+        if (item.reversedBy && !next.reversedBy) next.reversedBy = item.reversedBy;
+        if (previous.state === "Reversed" || item.state === "Reversed" || next.reversalJournal) {
+          next.state = "Reversed";
+        } else if ((previous.state === "Approved" || item.state === "Approved") && next.journal) {
+          next.state = "Approved";
+        }
         merged.set(item.id, next);
       });
       return Array.from(merged.values());
@@ -6764,8 +6775,12 @@
     }
 
     function transferForLedgerLine(line) {
-      if (!line || line.source !== "TRANSFER") return null;
-      return state.transfers.find((transfer) => transfer.journal === line.journal || transfer.id === line.transferId) || null;
+      if (!line || !["TRANSFER", "TRANSFER_REVERSAL"].includes(line.source)) return null;
+      return state.transfers.find((transfer) =>
+        transfer.journal === line.journal ||
+        transfer.reversalJournal === line.journal ||
+        transfer.id === line.transferId
+      ) || null;
     }
 
     function transferLedgerDetails(transfer) {
@@ -7151,7 +7166,10 @@
     function ledgerLineDetails(line, viewer, contextActor = null) {
       if (line.source === "PREVIOUS_CLOSE") return line.details || "Previous Close";
       const transfer = transferForLedgerLine(line);
-      if (transfer) return transferLedgerDetails(transfer) || line.details || "";
+      if (transfer) {
+        if (line.source === "TRANSFER_REVERSAL") return line.details || `Reversal of ${transfer.id}`;
+        return transferLedgerDetails(transfer) || line.details || "";
+      }
       const order = orderForLedgerLine(line);
       if (!order) return line.details || "";
       const bits = [
@@ -7776,12 +7794,14 @@
         commissionPercent > 0 ? `Commission: ${money(sourceCurrency, commissionMinor)} (${formatRate(commissionPercent)}%)` : "",
         transfer.remarks ? `Remarks: ${transfer.remarks}` : "",
         transfer.journal ? `Journal: ${transfer.journal}` : "",
+        transfer.reversalJournal ? `Reversal Journal: ${transfer.reversalJournal}` : "",
         transfer.createdAt ? `Created: ${displayDate(transfer.createdAt)}` : "",
         transfer.sentAt ? `Sent: ${displayDate(transfer.sentAt)}` : "",
         transfer.approvedAt ? `Approved: ${displayDate(transfer.approvedAt)}` : "",
         transfer.paidOutAt ? `Paid out: ${displayDate(transfer.paidOutAt)}` : "",
         transfer.returnedAt ? `Returned: ${displayDate(transfer.returnedAt)}` : "",
-        transfer.rejectedAt ? `Rejected: ${displayDate(transfer.rejectedAt)}` : ""
+        transfer.rejectedAt ? `Rejected: ${displayDate(transfer.rejectedAt)}` : "",
+        transfer.reversedAt ? `Reversed: ${displayDate(transfer.reversedAt)}` : ""
       ].filter(Boolean).join(" - ");
     }
 
@@ -7792,8 +7812,8 @@
       const details = transferDetailsForSearch(transfer);
       return {
         type,
-        date: transfer.paidOutAt || transfer.approvedAt || transfer.sentAt || transfer.createdAt || transfer.archivedAt || "",
-        time: new Date(transfer.paidOutAt || transfer.approvedAt || transfer.sentAt || transfer.createdAt || transfer.archivedAt || 0).getTime() || 0,
+        date: transfer.reversedAt || transfer.paidOutAt || transfer.approvedAt || transfer.sentAt || transfer.createdAt || transfer.archivedAt || "",
+        time: new Date(transfer.reversedAt || transfer.paidOutAt || transfer.approvedAt || transfer.sentAt || transfer.createdAt || transfer.archivedAt || 0).getTime() || 0,
         reference: transfer.id || transfer.journal || "",
         actors: [transfer.from, transfer.to].filter(Boolean).join(" -> "),
         amount,
@@ -7802,6 +7822,7 @@
         searchValues: [
           transfer.id,
           transfer.journal,
+          transfer.reversalJournal,
           transfer.from,
           transfer.to,
           transfer.state,
@@ -8337,6 +8358,11 @@
       }
       els.transferList.innerHTML = visibleTransfers.map((transfer) => {
         const canApprove = actor?.role === "Master" && transfer.state === "Pending Approval";
+        const canReverse = actor?.role === "Master" &&
+          transfer.state === "Approved" &&
+          transfer.journal &&
+          !transfer.reversalJournal &&
+          transferWasSentByMaster(transfer);
         const canUpdate = actor?.name === transfer.from && transfer.state === "Returned";
         const actionHtml = canApprove
           ? `
@@ -8346,16 +8372,19 @@
               <button class="btn secondary return-transfer" data-id="${transfer.id}" type="button">Return Back</button>
             </div>
           `
-          : canUpdate
-            ? `<button class="btn secondary edit-transfer" data-id="${transfer.id}" type="button">Update Details</button>`
-            : `<button class="btn secondary" type="button" disabled>${transfer.state === "Approved" ? icons.check : ""}${transfer.state}</button>`;
+          : canReverse
+            ? `<button class="btn danger reverse-transfer" data-id="${transfer.id}" type="button" ${processingTransferIds.has(transfer.id) ? "disabled" : ""}>Reverse</button>`
+            : canUpdate
+              ? `<button class="btn secondary edit-transfer" data-id="${transfer.id}" type="button">Update Details</button>`
+              : `<button class="btn secondary" type="button" disabled>${transfer.state === "Approved" ? icons.check : ""}${transfer.state}</button>`;
         const dateBits = [
           transfer.createdAt ? `Created: ${displayDate(transfer.createdAt)}` : "",
           transfer.sentAt ? `Sent: ${displayDate(transfer.sentAt)}` : "",
           transfer.approvedAt ? `Approved: ${displayDate(transfer.approvedAt)}` : "",
           transfer.paidOutAt ? `Paid out: ${displayDate(transfer.paidOutAt)}` : "",
           transfer.returnedAt ? `Returned: ${displayDate(transfer.returnedAt)}` : "",
-          transfer.rejectedAt ? `Rejected: ${displayDate(transfer.rejectedAt)}` : ""
+          transfer.rejectedAt ? `Rejected: ${displayDate(transfer.rejectedAt)}` : "",
+          transfer.reversedAt ? `Reversed: ${displayDate(transfer.reversedAt)}` : ""
         ].filter(Boolean);
         const transferPercent = transferCommissionPercent(transfer);
         const transferCommission = transferCommissionMinor(transfer);
@@ -8531,7 +8560,8 @@
               const detail = transfer.details || [
                 `${transfer.from || ""} -> ${transfer.to || ""}`,
                 transfer.remarks ? `Remarks: ${transfer.remarks}` : "",
-                transfer.paidOutAt ? `Paid out ${displayDate(transfer.paidOutAt)}` : ""
+                transfer.paidOutAt ? `Paid out ${displayDate(transfer.paidOutAt)}` : "",
+                transfer.reversedAt ? `Reversed ${displayDate(transfer.reversedAt)}` : ""
               ].filter(Boolean).join(" - ");
               if (!archiveSearchVisible([
                 archive.actor,
@@ -8542,6 +8572,7 @@
                 transfer.remarks,
                 transfer.state,
                 transfer.journal,
+                transfer.reversalJournal,
                 detail
               ], filters)) return;
               closureRows.push(`
@@ -8691,6 +8722,52 @@
       }
       syncTransferLedgerDetails(transfer);
       syncSettlementsFromLedger();
+    }
+
+    function transferWasSentByMaster(transfer) {
+      const master = masterActor();
+      if (!transfer || !master) return false;
+      return transfer.from === master.name || transfer.initiatedBy === master.name;
+    }
+
+    function reverseMasterTransferOnce(transfer, actorName = "Master") {
+      if (!transfer ||
+        transfer.state !== "Approved" ||
+        !transfer.journal ||
+        transfer.reversalJournal ||
+        !transferWasSentByMaster(transfer) ||
+        processingTransferIds.has(transfer.id)) return false;
+      const originalLines = activeLedgerLines(state.ledger).filter((line) =>
+        line.source === "TRANSFER" && line.journal === transfer.journal
+      );
+      if (originalLines.length === 0) return false;
+      processingTransferIds.add(transfer.id);
+      try {
+        const journalId = nextJournalId();
+        const postedAt = new Date().toISOString();
+        const details = `Reversal of ${transfer.id} - ${transferLedgerDetails(transfer)}`;
+        state.ledger.unshift(...originalLines.map((line) => ({
+          journal: journalId,
+          transferId: transfer.id,
+          source: "TRANSFER_REVERSAL",
+          account: line.account,
+          direction: line.direction === "Debit" ? "Credit" : "Debit",
+          currency: line.currency,
+          amountMinor: line.amountMinor,
+          details,
+          postedAt
+        })));
+        transfer.state = "Reversed";
+        transfer.reversalJournal = journalId;
+        transfer.reversedAt = postedAt;
+        transfer.reversedBy = actorName;
+        transfer.updatedAt = postedAt;
+        syncSettlementsFromLedger();
+        notifyEvent("Transfer reversed", `${transfer.id} was reversed by ${actorName}.`);
+        return true;
+      } finally {
+        processingTransferIds.delete(transfer.id);
+      }
     }
 
     function approveTransferOnce(transfer, actorName = "Master") {
@@ -8883,10 +8960,13 @@
         remarks: transfer.remarks || "",
         state: transfer.state,
         journal: transfer.journal || "",
+        reversalJournal: transfer.reversalJournal || "",
         createdAt: transfer.createdAt || "",
         sentAt: transfer.sentAt || "",
         approvedAt: transfer.approvedAt || "",
         paidOutAt: transfer.paidOutAt || "",
+        reversedAt: transfer.reversedAt || "",
+        reversedBy: transfer.reversedBy || "",
         archivedAt: closedAt,
         details: transferLedgerDetails(transfer)
       };
@@ -8913,7 +8993,7 @@
     function archiveLedgerLineIsSmart(line) {
       if (!line || line.source === "PREVIOUS_CLOSE") return false;
       if (String(line.source || "").startsWith("ORDER_")) return false;
-      if (line.source === "TRANSFER") return false;
+      if (String(line.source || "").startsWith("TRANSFER")) return false;
       return true;
     }
 
@@ -8972,7 +9052,7 @@
         (order.broker === actor.name || order.agent === actor.name)
       );
       const archivedTransfers = state.transfers.filter((transfer) =>
-        transfer.state === "Approved" &&
+        ["Approved", "Reversed"].includes(transfer.state) &&
         (transfer.from === actor.name || transfer.to === actor.name)
       );
       const collectedReceivables = state.receivables.filter((receivable) =>
@@ -9019,7 +9099,7 @@
         (order.broker !== actor.name && order.agent !== actor.name)
       );
       state.transfers = state.transfers.filter((transfer) =>
-        transfer.state !== "Approved" ||
+        !["Approved", "Reversed"].includes(transfer.state) ||
         (transfer.from !== actor.name && transfer.to !== actor.name)
       );
       const collectedReceivableIds = new Set(collectedReceivables.map((receivable) => receivable.id));
@@ -10935,6 +11015,19 @@
         fillTransferForm(transfer);
         els.transferError.classList.remove("visible");
         renderAll();
+        return;
+      }
+
+      const reverseTransferButton = event.target.closest(".reverse-transfer");
+      if (reverseTransferButton) {
+        const actor = selectedActor();
+        const transfer = state.transfers.find((item) => item.id === reverseTransferButton.dataset.id);
+        if (!transfer || actor?.role !== "Master" || !transferWasSentByMaster(transfer)) return;
+        confirmAction(`Reverse transfer ${transfer.id}? This will post an opposite ledger journal.`, async () => {
+          if (!reverseMasterTransferOnce(transfer, actor.name)) return;
+          renderAll();
+          await saveStateNow();
+        });
         return;
       }
 

@@ -357,6 +357,7 @@ function recordTimestamp(item = {}) {
     new Date(item.voidRejectedAt || 0).getTime(),
     new Date(item.voidedAt || 0).getTime(),
     new Date(item.updatedAt || 0).getTime(),
+    new Date(item.reversedAt || 0).getTime(),
     new Date(item.paidAt || 0).getTime(),
     new Date(item.assignedAt || 0).getTime(),
     new Date(item.approvedAt || 0).getTime(),
@@ -435,7 +436,17 @@ function mergeTransfers(existingItems = [], incomingItems = []) {
     if (item.approvedAt && !next.approvedAt) next.approvedAt = item.approvedAt;
     if (previous.paidOutAt && !next.paidOutAt) next.paidOutAt = previous.paidOutAt;
     if (item.paidOutAt && !next.paidOutAt) next.paidOutAt = item.paidOutAt;
-    if ((previous.state === "Approved" || item.state === "Approved") && next.journal) next.state = "Approved";
+    if (previous.reversalJournal && !next.reversalJournal) next.reversalJournal = previous.reversalJournal;
+    if (item.reversalJournal && !next.reversalJournal) next.reversalJournal = item.reversalJournal;
+    if (previous.reversedAt && !next.reversedAt) next.reversedAt = previous.reversedAt;
+    if (item.reversedAt && !next.reversedAt) next.reversedAt = item.reversedAt;
+    if (previous.reversedBy && !next.reversedBy) next.reversedBy = previous.reversedBy;
+    if (item.reversedBy && !next.reversedBy) next.reversedBy = item.reversedBy;
+    if (previous.state === "Reversed" || item.state === "Reversed" || next.reversalJournal) {
+      next.state = "Reversed";
+    } else if ((previous.state === "Approved" || item.state === "Approved") && next.journal) {
+      next.state = "Approved";
+    }
     merged.set(item.id, next);
   });
   return Array.from(merged.values());
