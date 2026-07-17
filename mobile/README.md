@@ -32,6 +32,7 @@ By default the app talks to `https://haderapay.com`. To point a build at another
 - Fully collected receivables move into a separate monthly collapsible Archive section when their balance is closed.
 - Chat opens at the message composer and Reply returns focus to the composer.
 - Master ledger with a collapsible Income Statement, permanent income snapshots, Actors management, invite codes, and transfer permissions.
+- Master ledger with an independent collapsible Bank Account, green Money In, red Money Out, running currency balances, reasoned funding, and shareable monthly statements.
 - Per-USD-Agent payout divisors and percentages, frozen onto future Base USD rows without changing the Agent ledger.
 - Owner Master creation and subscription controls.
 - Master-forwarded orders show the payout actor and payer-specific order number in their state.

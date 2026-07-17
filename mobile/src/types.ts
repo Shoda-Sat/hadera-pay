@@ -213,7 +213,7 @@ export interface LedgerLine {
   [key: string]: unknown;
 }
 
-export type TransferState = "Pending Approval" | "Approved" | "Returned" | "Rejected";
+export type TransferState = "Pending Approval" | "Approved" | "Returned" | "Rejected" | "Reversed";
 
 export interface InternalTransferRecord {
   id: string;
@@ -229,6 +229,7 @@ export interface InternalTransferRecord {
   commissionPercent?: number;
   commissionMinor?: number;
   remarks: string;
+  details?: string;
   state: TransferState;
   journal?: string;
   initiatedBy?: string;
@@ -240,6 +241,24 @@ export interface InternalTransferRecord {
   returnedBy?: string;
   returnedReason?: string;
   rejectedAt?: string;
+  reversalJournal?: string;
+  reversedAt?: string;
+  reversedBy?: string;
+  archivedAt?: string;
+  archivedActorIds?: string[];
+  archivedActorNames?: string[];
+}
+
+export interface MasterBankEntryRecord {
+  id: string;
+  type: string;
+  reference: string;
+  direction: "Credit" | "Debit";
+  currency: Currency;
+  amountMinor: number;
+  details: string;
+  postedAt: string;
+  postedBy?: string;
 }
 
 export interface ChatMessageRecord {
@@ -274,7 +293,11 @@ export interface SettlementRecord {
 export interface ArchiveRecord {
   id?: string;
   actor?: string;
+  actorId?: string;
+  actorRole?: ActorRole;
   closedAt?: string;
+  incomeProfitMinor?: number;
+  incomeProfitCurrency?: Currency;
   balances?: Partial<Record<Currency, number>>;
   orders?: OrderRecord[];
   receivables?: ReceivableRecord[];
@@ -293,6 +316,14 @@ export interface ArchiveRecord {
     sentAt?: string;
     approvedAt?: string;
     paidOutAt?: string;
+    journal?: string;
+    initiatedBy?: string;
+    commissionPercent?: number;
+    commissionMinor?: number;
+    reversalJournal?: string;
+    reversedAt?: string;
+    reversedBy?: string;
+    details?: string;
   }>;
   ledger?: Array<LedgerLine & {
     journal?: string;
@@ -313,6 +344,7 @@ export interface WorkspaceState {
   savedCustomers: SavedCustomerRecord[];
   transfers: InternalTransferRecord[];
   ledger: LedgerLine[];
+  masterBankEntries?: MasterBankEntryRecord[];
   archives: ArchiveRecord[];
   settlements: SettlementRecord[];
   chatConversations: ChatConversationRecord[];

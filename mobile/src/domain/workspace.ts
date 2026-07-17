@@ -6,6 +6,7 @@ import type {
   InternalTransferDraft,
   InternalTransferRecord,
   LedgerLine,
+  MasterBankEntryRecord,
   OrderRecord,
   RateSetting,
   ReceivableRecord,
@@ -462,6 +463,107 @@ function transferDetails(transfer: InternalTransferRecord): string {
   ].filter(Boolean).join(" - ");
 }
 
+function transferCommissionMinor(transfer: Partial<InternalTransferRecord>): number {
+  const stored = Number(transfer.commissionMinor || 0);
+  if (stored > 0) return stored;
+  return Math.round(Number(transfer.sourceAmountMinor || 0) * Math.max(0, Number(transfer.commissionPercent || 0)) / 100);
+}
+
+function normalizeMasterBankEntries(entries: MasterBankEntryRecord[] | undefined): MasterBankEntryRecord[] {
+  return (Array.isArray(entries) ? entries : [])
+    .filter((entry) => entry && entry.id && ["Credit", "Debit"].includes(entry.direction) && supportedCurrencies.includes(entry.currency) && Number(entry.amountMinor) > 0)
+    .map((entry) => ({ ...entry, amountMinor: Number(entry.amountMinor) }));
+}
+
+export type MasterBankStatementEntry = MasterBankEntryRecord & { runningMinor: number };
+
+export function masterBankEntriesWithRunningBalances(state: WorkspaceState): MasterBankStatementEntry[] {
+  const entries = new Map(normalizeMasterBankEntries(state.masterBankEntries).map((entry) => [entry.id, entry]));
+  const record = (entry: MasterBankEntryRecord) => {
+    if (!entries.has(entry.id) && entry.amountMinor > 0) entries.set(entry.id, entry);
+  };
+  const master = activeActors(state).find((actor) => actor.role === "Master");
+  const masterNames = new Set(["Master", master?.name].filter(Boolean));
+  const isMasterName = (name: string | undefined) => Boolean(name && masterNames.has(name));
+  const transfers = new Map<string, Partial<InternalTransferRecord>>();
+  state.transfers.forEach((transfer) => transfers.set(transfer.id, transfer));
+  state.archives.forEach((archive) => (archive.transfers || []).forEach((transfer) => {
+    if (!transfer.id) return;
+    transfers.set(transfer.id, { ...(transfers.get(transfer.id) || {}), ...transfer } as Partial<InternalTransferRecord>);
+  }));
+
+  transfers.forEach((transfer) => {
+    if (!transfer.id || !transfer.journal || !["Approved", "Reversed"].includes(String(transfer.state))) return;
+    const sourceCurrency = transfer.sourceCurrency || transfer.currency || "USD";
+    const payoutCurrency = transfer.currency || sourceCurrency;
+    const sourceAmountMinor = Number(transfer.sourceAmountMinor || transfer.amountMinor || 0);
+    const payoutAmountMinor = Number(transfer.amountMinor || 0);
+    const details = transfer.details || transferDetails(transfer as InternalTransferRecord);
+    const postedAt = transfer.paidOutAt || transfer.approvedAt || transfer.sentAt || transfer.createdAt || new Date(0).toISOString();
+    if (isMasterName(transfer.to) && !isMasterName(transfer.from)) {
+      record({ id: `BANK-TRANSFER-${transfer.id}-IN`, type: "Transfer In", reference: transfer.id, direction: "Credit", currency: payoutCurrency, amountMinor: payoutAmountMinor, details, postedAt });
+    } else if (isMasterName(transfer.from) && !isMasterName(transfer.to)) {
+      record({ id: `BANK-TRANSFER-${transfer.id}-OUT`, type: "Transfer Out", reference: transfer.id, direction: "Debit", currency: sourceCurrency, amountMinor: sourceAmountMinor, details, postedAt });
+      if (transfer.reversalJournal) {
+        record({ id: `BANK-TRANSFER-${transfer.id}-REVERSAL`, type: "Transfer Reversal", reference: transfer.reversalJournal, direction: "Credit", currency: sourceCurrency, amountMinor: sourceAmountMinor, details: `Reversal of ${transfer.id}${details ? ` - ${details}` : ""}`, postedAt: transfer.reversedAt || postedAt });
+      }
+    } else if (!isMasterName(transfer.from) && !isMasterName(transfer.to)) {
+      const commissionMinor = transferCommissionMinor(transfer);
+      if (commissionMinor > 0) {
+        record({ id: `BANK-TRANSFER-${transfer.id}-FEE`, type: "Transfer Fee Expense", reference: transfer.id, direction: "Debit", currency: sourceCurrency, amountMinor: commissionMinor, details: `Fee expense for ${transfer.from} to ${transfer.to}${transfer.remarks ? ` - ${transfer.remarks}` : ""}`, postedAt });
+      }
+    }
+  });
+
+  state.ledger.filter((line) => line.source === "JOURNAL").forEach((line) => {
+    record({
+      id: `BANK-JOURNAL-${line.entryId || line.journal}`,
+      type: "Journal",
+      reference: String(line.entryId || line.journal || ""),
+      direction: "Debit",
+      currency: (line.sourceCurrency as Currency) || line.currency,
+      amountMinor: Number(line.sourceAmountMinor || line.amountMinor || 0),
+      details: String(line.details || "Master journal to Actor"),
+      postedAt: String(line.postedAt || new Date(0).toISOString())
+    });
+  });
+
+  state.ledger.filter((line) => line.source === "WITHDRAWAL" && line.direction === "Credit" && String(line.account).endsWith(" ACTOR_CLEARING")).forEach((line) => {
+    record({ id: `BANK-WITHDRAWAL-${line.entryId || line.journal}`, type: "Withdrawal", reference: String(line.entryId || line.journal || ""), direction: "Credit", currency: line.currency, amountMinor: Number(line.amountMinor || 0), details: String(line.details || "Withdrawal from Actor"), postedAt: String(line.postedAt || new Date(0).toISOString()) });
+  });
+
+  state.archives.forEach((archive) => {
+    const archivedActor = state.actors.find((actor) => actor.id === archive.actorId || actor.name === archive.actor);
+    const role = archive.actorRole || archivedActor?.role;
+    const incomeProfitMinor = Number(archive.incomeProfitMinor || 0);
+    if (!archive.id || !["Agent", "Special Agent"].includes(String(role)) || incomeProfitMinor === 0) return;
+    record({ id: `BANK-INCOME-${archive.id}`, type: "Income Statement Close", reference: archive.id, direction: incomeProfitMinor > 0 ? "Credit" : "Debit", currency: archive.incomeProfitCurrency || "USD", amountMinor: Math.abs(incomeProfitMinor), details: `${archive.actor || "Actor"} closed Income Statement`, postedAt: archive.closedAt || new Date(0).toISOString() });
+  });
+
+  const runningByCurrency: Partial<Record<Currency, number>> = {};
+  return Array.from(entries.values())
+    .sort((a, b) => new Date(a.postedAt || 0).getTime() - new Date(b.postedAt || 0).getTime() || a.id.localeCompare(b.id))
+    .map((entry) => {
+      runningByCurrency[entry.currency] = Number(runningByCurrency[entry.currency] || 0) + (entry.direction === "Credit" ? entry.amountMinor : -entry.amountMinor);
+      return { ...entry, runningMinor: Number(runningByCurrency[entry.currency]) };
+    });
+}
+
+function syncMasterBankAccount(state: WorkspaceState): void {
+  state.masterBankEntries = masterBankEntriesWithRunningBalances(state).map(({ runningMinor: _runningMinor, ...entry }) => entry);
+}
+
+export async function fundMasterBankAccount(input: { currency: Currency; amount: string; reason: string; postedBy: string }): Promise<WorkspaceState> {
+  return updateWorkspaceState((state) => {
+    const amountMinor = minorFromMajor(parseAmount(input.amount), input.currency);
+    const reason = input.reason.trim();
+    if (amountMinor <= 0 || !reason) throw new Error("Enter a funding amount and state the reason.");
+    syncMasterBankAccount(state);
+    const reference = `FUND-${Date.now()}`;
+    state.masterBankEntries = [{ id: `BANK-${reference}`, type: "Funding", reference, direction: "Credit", currency: input.currency, amountMinor, details: `Reason: ${reason}`, postedAt: new Date().toISOString(), postedBy: input.postedBy }, ...(state.masterBankEntries || [])];
+  });
+}
+
 function postTransferLedger(state: WorkspaceState, transfer: InternalTransferRecord): void {
   if (transfer.journal) return;
   const journal = nextJournalId(state);
@@ -521,6 +623,7 @@ export async function createInternalTransfer(session: UserSession, draft: Intern
     };
     if (isMasterView(session)) postTransferLedger(state, transfer);
     state.transfers.unshift(transfer);
+    syncMasterBankAccount(state);
   });
 }
 
@@ -545,6 +648,7 @@ export async function setTransferState(transferId: string, action: "approve" | "
       transfer.state = "Rejected";
       transfer.rejectedAt = now;
     }
+    syncMasterBankAccount(state);
     });
   } finally {
     processingTransferIds.delete(transferId);
@@ -682,6 +786,7 @@ export async function postActorJournal(input: { actorId: string; sourceCurrency:
       details: [`Journal add ${compactAmount(input.sourceCurrency, sourceMajor)} to ${compactAmount(input.currency, amountMajor)}`, `Rate ${rate}`, input.remarks ? `Remarks: ${input.remarks}` : ""].filter(Boolean).join(" - "),
       postedAt
     });
+    syncMasterBankAccount(state);
   });
 }
 
@@ -699,6 +804,7 @@ export async function postActorWithdrawal(input: { actorId: string; currency: Cu
       { journal, entryId, source: "WITHDRAWAL", account: `${actor.name} ACTOR_CLEARING`, direction: "Credit", currency: input.currency, amountMinor, details, postedAt },
       { journal, entryId, source: "WITHDRAWAL", account: "MASTER_FX_CLEARING", direction: "Debit", currency: input.currency, amountMinor, details, postedAt }
     );
+    syncMasterBankAccount(state);
   });
 }
 

@@ -1,6 +1,6 @@
 import * as ImagePicker from "expo-image-picker";
 import React, { useEffect, useRef, useState } from "react";
-import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { Alert, Pressable, ScrollView, Share, StyleSheet, Text, TextInput, View } from "react-native";
 import {
   Check,
   ChevronDown,
@@ -14,6 +14,7 @@ import {
   RefreshCw,
   Reply,
   Send,
+  Share2,
   ThumbsUp,
   Trash2,
   UserPlus,
@@ -47,8 +48,10 @@ import {
   createManagedActor,
   deleteChatGroup,
   forwardChatMessage,
+  fundMasterBankAccount,
   isMasterView,
   markOrderPaid,
+  masterBankEntriesWithRunningBalances,
   postActorJournal,
   postActorWithdrawal,
   pendingCancelledOrderStates,
@@ -675,16 +678,70 @@ export function ChatScreen({ session, state, offline, onState, onRefresh, onScro
   );
 }
 
-export function LedgerScreen({ session, state }: CommonProps) {
+export function LedgerScreen({ session, state, onState }: CommonProps) {
   const actorChoices = activeActors(state).filter((actor) => actor.role !== "Master");
   const [actorId, setActorId] = useState(isMasterView(session) ? actorChoices[0]?.id || "" : session.actorId);
   const [incomeExpanded, setIncomeExpanded] = useState(false);
+  const [bankExpanded, setBankExpanded] = useState(false);
+  const [bankCurrency, setBankCurrency] = useState<Currency>("USD");
+  const [bankAmount, setBankAmount] = useState("");
+  const [bankReason, setBankReason] = useState("");
+  const [bankBusy, setBankBusy] = useState(false);
   const selected = isMasterView(session) ? actorChoices.find((actor) => actor.id === actorId) : actorForSession(session, state);
   const actorName = selected?.name || session.actorName;
   const lines = state.ledger.filter((line) => isMasterView(session) ? (!selected || String(line.account).includes(actorName)) : String(line.account).includes(session.actorName));
   const balances = supportedCurrencies.map((currency) => ({ currency, minor: lines.filter((line) => line.currency === currency).reduce((sum, line) => sum + (line.direction === "Debit" ? 1 : -1) * Number(line.amountMinor || 0), 0) }));
   const incomeOrders = state.orders.filter((order) => order.state === "Paid" && order.journal && !order.voidJournal && Number.isFinite(Number(order.incomeProfitMinor)));
   const totalIncomeUsdMinor = incomeOrders.reduce((sum, order) => sum + Number(order.incomeProfitMinor || 0), 0);
+  const bankEntries = masterBankEntriesWithRunningBalances(state);
+  const bankMonths = Array.from(new Set(bankEntries.map((entry) => entry.postedAt.slice(0, 7)).filter(Boolean))).sort().reverse();
+  const [bankMonth, setBankMonth] = useState(bankMonths[0] || new Date().toISOString().slice(0, 7));
+  const selectedBankMonth = bankMonths.includes(bankMonth) ? bankMonth : bankMonths[0] || bankMonth;
+  const bankRows = bankEntries.filter((entry) => entry.postedAt.slice(0, 7) === selectedBankMonth);
+  const bankBalances = supportedCurrencies.map((currency) => ({
+    currency,
+    minor: bankEntries.filter((entry) => entry.currency === currency).at(-1)?.runningMinor || 0
+  }));
+  const bankPeriodTotals = supportedCurrencies.map((currency) => {
+    const currencyRows = bankRows.filter((entry) => entry.currency === currency);
+    const moneyIn = currencyRows.filter((entry) => entry.direction === "Credit").reduce((sum, entry) => sum + entry.amountMinor, 0);
+    const moneyOut = currencyRows.filter((entry) => entry.direction === "Debit").reduce((sum, entry) => sum + entry.amountMinor, 0);
+    return { currency, moneyIn, moneyOut, net: moneyIn - moneyOut };
+  }).filter((item) => item.moneyIn || item.moneyOut);
+  const signedBankAmount = (currency: Currency, minor: number) => `${minor >= 0 ? "+" : "-"}${compactAmount(currency, majorFromMinor(Math.abs(minor), currency))}`;
+  const fundBank = async () => {
+    if (state.offlineSnapshot) return Alert.alert("Offline", "Reconnect before funding the Master Bank Account.");
+    setBankBusy(true);
+    try {
+      const next = await fundMasterBankAccount({ currency: bankCurrency, amount: bankAmount, reason: bankReason, postedBy: session.actorName });
+      setBankAmount("");
+      setBankReason("");
+      onState(next);
+    } catch (error) {
+      Alert.alert("Master Bank Account", errorMessage(error));
+    } finally {
+      setBankBusy(false);
+    }
+  };
+  const shareBankStatement = async () => {
+    if (!bankRows.length) return;
+    const line = (values: unknown[]) => values.map((value) => String(value ?? "").replace(/[\t\r\n]+/g, " ")).join("\t");
+    const statement = [
+      `Master Bank Account - ${selectedBankMonth}`,
+      line(["Date", "Type", "Reference", "Details", "Currency", "Money In", "Money Out", "Running Balance"]),
+      ...bankRows.map((entry) => line([
+        new Date(entry.postedAt).toLocaleString(),
+        entry.type,
+        entry.reference || entry.id,
+        entry.details,
+        entry.currency,
+        entry.direction === "Credit" ? majorFromMinor(entry.amountMinor, entry.currency).toFixed(2) : "",
+        entry.direction === "Debit" ? majorFromMinor(entry.amountMinor, entry.currency).toFixed(2) : "",
+        majorFromMinor(entry.runningMinor, entry.currency).toFixed(2)
+      ]))
+    ].join("\n");
+    await Share.share({ title: `Master Bank Account ${selectedBankMonth}`, message: statement });
+  };
   return (
     <View style={styles.screen}>
       <ScreenTitle title="Ledger" subtitle="Balances and posted journals" />
@@ -711,6 +768,46 @@ export function LedgerScreen({ session, state }: CommonProps) {
           {incomeExpanded ? <>
             {incomeOrders.map((order) => <View key={`income-${order.id}`} style={styles.recordRow}><Text style={styles.primaryLine}>{order.brokerOrderNumber || order.id}</Text><Text style={styles.muted}>Base USD {majorFromMinor(Number(order.incomeBaseAmountMinor || 0), "USD").toFixed(2)} | Collected EUR {majorFromMinor(Number(order.incomeCollectedEurMinor || 0), "EUR").toFixed(2)} | Collected USD {majorFromMinor(Number(order.incomeCollectedUsdMinor || 0), "USD").toFixed(2)}</Text><Text style={styles.amountLine}>Profit {compactAmount("USD", majorFromMinor(Number(order.incomeProfitMinor || 0), "USD"))}</Text></View>)}
             <SummaryRow label="Total profit" value={compactAmount("USD", majorFromMinor(totalIncomeUsdMinor, "USD"))} strong />
+          </> : null}
+        </Panel>
+      ) : null}
+      {isMasterView(session) ? (
+        <Panel title="Master Bank Account" badge="Independent">
+          <Pressable accessibilityRole="button" accessibilityLabel={bankExpanded ? "Collapse Master Bank Account" : "Expand Master Bank Account"} onPress={() => setBankExpanded((current) => !current)} style={styles.showMore}>
+            <Text style={styles.linkText}>{bankExpanded ? "Hide bank account" : "Show bank account"}</Text>
+            {bankExpanded ? <ChevronUp size={17} color={colors.accent} /> : <ChevronDown size={17} color={colors.accent} />}
+          </Pressable>
+          {bankExpanded ? <>
+            <Text style={styles.sectionLabel}>Account balances</Text>
+            <View style={styles.bankBalanceList}>
+              {bankBalances.map((item) => <View key={`bank-balance-${item.currency}`} style={styles.bankBalanceRow}><Text style={styles.bankBalanceCurrency}>{item.currency}</Text><Text style={[styles.bankBalanceAmount, item.minor >= 0 ? styles.bankMoneyIn : styles.bankMoneyOut]}>{signedBankAmount(item.currency, item.minor)}</Text></View>)}
+            </View>
+            <View style={styles.bankSection}>
+              <Text style={styles.sectionLabel}>Fund account</Text>
+              <SelectRow label="Currency" options={supportedCurrencies} value={bankCurrency} onChange={setBankCurrency} />
+              <Field label="Amount" value={bankAmount} onChangeText={setBankAmount} keyboardType="decimal-pad" placeholder="0.00" />
+              <Field label="Reason" value={bankReason} onChangeText={setBankReason} multiline placeholder="State the funding reason" />
+              <Button label="Fund account" loading={bankBusy} disabled={state.offlineSnapshot === true} onPress={fundBank} />
+            </View>
+            <View style={styles.bankSection}>
+              <Text style={styles.sectionLabel}>Monthly statement</Text>
+              <SelectRow label="Statement month" options={bankMonths.length ? bankMonths : [selectedBankMonth]} value={selectedBankMonth} onChange={setBankMonth} />
+              <Button label="Share monthly statement" icon={<Share2 size={17} color={colors.ink} />} variant="secondary" disabled={!bankRows.length} onPress={shareBankStatement} />
+              {bankRows.length ? bankRows.slice().reverse().map((entry) => {
+                const moneyIn = entry.direction === "Credit";
+                return <View key={entry.id} style={styles.bankStatementRow}>
+                  <View style={styles.bankStatementHead}><Text style={styles.primaryLine}>{entry.type}</Text><Text style={styles.muted}>{new Date(entry.postedAt).toLocaleString()}</Text></View>
+                  <Text style={styles.bankReference}>{entry.reference || entry.id}</Text>
+                  {entry.details ? <Text style={styles.muted}>{entry.details}</Text> : null}
+                  <View style={styles.bankAmountGrid}>
+                    <View style={styles.bankAmountCell}><Text style={styles.bankAmountLabel}>Money In</Text><Text style={[styles.bankAmountValue, styles.bankMoneyIn]}>{moneyIn ? compactAmount(entry.currency, majorFromMinor(entry.amountMinor, entry.currency)) : "-"}</Text></View>
+                    <View style={styles.bankAmountCell}><Text style={styles.bankAmountLabel}>Money Out</Text><Text style={[styles.bankAmountValue, styles.bankMoneyOut]}>{!moneyIn ? compactAmount(entry.currency, majorFromMinor(entry.amountMinor, entry.currency)) : "-"}</Text></View>
+                    <View style={styles.bankAmountCell}><Text style={styles.bankAmountLabel}>Running</Text><Text style={[styles.bankAmountValue, entry.runningMinor >= 0 ? styles.bankMoneyIn : styles.bankMoneyOut]}>{signedBankAmount(entry.currency, entry.runningMinor)}</Text></View>
+                  </View>
+                </View>;
+              }) : <Text style={styles.muted}>No Master Bank Account transactions for this month.</Text>}
+              {bankPeriodTotals.length ? <View style={styles.bankPeriodTotals}>{bankPeriodTotals.map((item) => <View key={`bank-total-${item.currency}`} style={styles.bankPeriodRow}><Text style={styles.bankBalanceCurrency}>{item.currency}</Text><Text style={styles.bankMoneyIn}>In {compactAmount(item.currency, majorFromMinor(item.moneyIn, item.currency))}</Text><Text style={styles.bankMoneyOut}>Out {compactAmount(item.currency, majorFromMinor(item.moneyOut, item.currency))}</Text><Text style={item.net >= 0 ? styles.bankMoneyIn : styles.bankMoneyOut}>Net {signedBankAmount(item.currency, item.net)}</Text></View>)}</View> : null}
+            </View>
           </> : null}
         </Panel>
       ) : null}
@@ -877,6 +974,7 @@ const styles = StyleSheet.create({
   muted: { color: colors.muted, fontSize: 12, lineHeight: 18 },
   primaryLine: { color: colors.ink, fontWeight: "900", flexShrink: 1 },
   amountLine: { color: colors.accent, fontSize: 17, fontWeight: "900" },
+  sectionLabel: { color: colors.ink, fontSize: 14, fontWeight: "900" },
   showMore: { minHeight: 38, borderTopWidth: 1, borderTopColor: colors.line, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   linkText: { color: colors.accent, fontWeight: "900" },
   detailBlock: { gap: 0 },
@@ -921,6 +1019,22 @@ const styles = StyleSheet.create({
   colDirection: { width: 90, padding: spacing.sm, color: colors.ink },
   colAmount: { width: 135, padding: spacing.sm, color: colors.ink, fontWeight: "900" },
   colDetails: { width: 470, padding: spacing.sm, color: colors.muted },
+  bankBalanceList: { borderWidth: 1, borderColor: colors.line, borderRadius: radius.md, overflow: "hidden" },
+  bankBalanceRow: { minHeight: 42, paddingHorizontal: spacing.md, flexDirection: "row", alignItems: "center", justifyContent: "space-between", borderBottomWidth: 1, borderBottomColor: colors.line, backgroundColor: colors.panel2 },
+  bankBalanceCurrency: { color: colors.ink, fontWeight: "900" },
+  bankBalanceAmount: { fontWeight: "900" },
+  bankSection: { gap: spacing.md, paddingTop: spacing.md, borderTopWidth: 1, borderTopColor: colors.line },
+  bankStatementRow: { gap: spacing.sm, paddingVertical: spacing.md, borderBottomWidth: 1, borderBottomColor: colors.line },
+  bankStatementHead: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: spacing.md },
+  bankReference: { color: colors.accent, fontSize: 12, fontWeight: "900" },
+  bankAmountGrid: { flexDirection: "row", gap: spacing.sm },
+  bankAmountCell: { flex: 1, minWidth: 0, gap: spacing.xs },
+  bankAmountLabel: { color: colors.muted, fontSize: 10, fontWeight: "800" },
+  bankAmountValue: { fontSize: 12, fontWeight: "900" },
+  bankMoneyIn: { color: colors.good, fontWeight: "900" },
+  bankMoneyOut: { color: colors.danger, fontWeight: "900" },
+  bankPeriodTotals: { gap: spacing.sm, paddingTop: spacing.sm },
+  bankPeriodRow: { minHeight: 42, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: spacing.sm, borderTopWidth: 1, borderTopColor: colors.line },
   permissionRow: { gap: spacing.sm, paddingVertical: spacing.sm, borderBottomWidth: 1, borderBottomColor: colors.line },
   toggleRow: { minHeight: 38, flexDirection: "row", alignItems: "center", gap: spacing.sm, paddingVertical: 3 },
   disabled: { opacity: 0.5 },

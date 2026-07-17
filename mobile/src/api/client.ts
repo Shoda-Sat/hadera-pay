@@ -132,6 +132,7 @@ function normalizeState(state: Partial<WorkspaceState> | null | undefined): Work
     savedCustomers: Array.isArray(state?.savedCustomers) ? state.savedCustomers : [],
     transfers: Array.isArray(state?.transfers) ? state.transfers : [],
     ledger: Array.isArray(state?.ledger) ? state.ledger : [],
+    masterBankEntries: Array.isArray(state?.masterBankEntries) ? state.masterBankEntries : [],
     archives: Array.isArray(state?.archives) ? state.archives : [],
     settlements: Array.isArray(state?.settlements) ? state.settlements : [],
     chatConversations: Array.isArray(state?.chatConversations) ? state.chatConversations : []

@@ -8696,9 +8696,9 @@
                 <td>${escapeHtml(entry.type)}</td>
                 <td><strong>${escapeHtml(entry.reference || entry.id)}</strong></td>
                 <td>${escapeHtml(entry.details || "")}</td>
-                <td class="master-bank-amount ${isCredit ? toneClass("credit") : ""}">${isCredit ? money(entry.currency, entry.amountMinor) : ""}</td>
-                <td class="master-bank-amount ${!isCredit ? toneClass("debit") : ""}">${!isCredit ? money(entry.currency, entry.amountMinor) : ""}</td>
-                <td class="master-bank-amount ${entry.runningMinor >= 0 ? toneClass("credit") : toneClass("debit")}">${escapeHtml(signedMoney(entry.currency, entry.runningMinor))}</td>
+                <td class="master-bank-amount ${isCredit ? toneClass("debit") : ""}">${isCredit ? money(entry.currency, entry.amountMinor) : ""}</td>
+                <td class="master-bank-amount ${!isCredit ? toneClass("credit") : ""}">${!isCredit ? money(entry.currency, entry.amountMinor) : ""}</td>
+                <td class="master-bank-amount ${entry.runningMinor >= 0 ? toneClass("debit") : toneClass("credit")}">${escapeHtml(signedMoney(entry.currency, entry.runningMinor))}</td>
               </tr>
             `;
           }).join("")
