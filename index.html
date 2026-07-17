@@ -3268,7 +3268,7 @@
             ? Number(actor.specialPayoutPercent)
             : 0,
           specialPayoutSettings,
-          incomeUsdPayoutSetting: actor.role === "Agent" && baseCurrency === "USD"
+          incomeUsdPayoutSetting: actor.role === "Agent"
             ? {
                 divider: Number(actor.incomeUsdPayoutSetting?.divider) > 0 ? Number(actor.incomeUsdPayoutSetting.divider) : 1,
                 percent: Number(actor.incomeUsdPayoutSetting?.percent) > 0 ? Number(actor.incomeUsdPayoutSetting.percent) : 0
@@ -4869,7 +4869,7 @@
     }
 
     function usdAgentIncomeSettingFor(actor) {
-      if (!actor || actor.currency !== "USD" || actor.role !== "Agent") return { divider: 1, percent: 0 };
+      if (!actor || actor.role !== "Agent") return { divider: 1, percent: 0 };
       const setting = actor.incomeUsdPayoutSetting || {};
       return {
         divider: Number(setting.divider) > 0 ? Number(setting.divider) : 1,
@@ -5950,7 +5950,7 @@
       const usdAgentsExpanded = state.expandedUsdAgentIncomeRates === true;
       const rates = buyingRates();
       const activeCount = supportedCurrencies.filter((currency) => masterRateDivisorSettingFor(currency).enabled).length;
-      const usdPayoutActors = activeActors().filter((actor) => actor.currency === "USD" && actor.role === "Agent");
+      const usdPayoutActors = activeActors().filter((actor) => actor.role === "Agent");
       const adjustedUsdPayoutActors = usdPayoutActors.filter((actor) => {
         const setting = usdAgentIncomeSettingFor(actor);
         return setting.divider !== 1 || setting.percent > 0;
@@ -5976,7 +5976,7 @@
           <div class="special-divider-currency">
             <strong>${escapeHtml(actor.name)}</strong>
             <span class="muted">${escapeHtml(actor.role)}</span>
-            <input class="usd-agent-income-divider" data-id="${actor.id}" type="text" inputmode="decimal" value="${formatRate(setting.divider)}" placeholder="Divisor" aria-label="${escapeHtml(actor.name)} USD income payout divisor">
+            <input class="usd-agent-income-divider" data-id="${actor.id}" type="text" inputmode="decimal" value="${formatRate(setting.divider)}" placeholder="Payout divisor" aria-label="${escapeHtml(actor.name)} USD income payout divisor">
             <input class="usd-agent-income-percent" data-id="${actor.id}" type="text" inputmode="decimal" value="${formatRate(setting.percent)}" placeholder="Percent" aria-label="${escapeHtml(actor.name)} USD income payout percentage">
             <button class="btn primary save-usd-agent-income-rate" data-id="${actor.id}" type="button">Save</button>
           </div>
@@ -6017,11 +6017,11 @@
           <td><span class="muted">Controls Income Statement Base USD column</span></td>
         </tr>
         <tr>
-          <td><strong>USD-based Agents</strong><br><span class="muted">Agent-specific Base USD</span></td>
+          <td><strong>Agent USD Payouts</strong><br><span class="muted">Agent-specific Base USD</span></td>
           <td>
             <div class="special-divider-panel">
-              <button class="btn secondary expand-usd-agent-income-rates" type="button">${usdAgentsExpanded ? "Hide" : "Show"} USD Agent payout settings</button>
-              ${usdAgentDetails || (usdAgentsExpanded ? '<span class="muted">No active USD-based Agents.</span>' : "")}
+              <button class="btn secondary expand-usd-agent-income-rates" type="button">${usdAgentsExpanded ? "Hide" : "Show"} Agent USD payout settings</button>
+              ${usdAgentDetails || (usdAgentsExpanded ? '<span class="muted">No active Agents.</span>' : "")}
             </div>
           </td>
           <td>${adjustedUsdPayoutActors} adjusted / ${usdPayoutActors.length} Agents</td>
@@ -6897,17 +6897,10 @@
 
     function usdPayoutActorIncomeBaseMinorForOrder(order, journalLines) {
       const payingActor = activeActors().find((actor) => actor.name === order.agent);
-      if (!payingActor || payingActor.currency !== "USD" || payingActor.role !== "Agent") return 0;
-      const agentLine = journalLines.find((line) =>
-        line.account === `${order.agent} ACTOR_CLEARING` &&
-        line.direction === "Credit" &&
-        Number(line.amountMinor || 0) > 0
-      );
-      const recordedUsdMinor = agentLine
-        ? currencyAmountToUsdMinor(agentLine.currency, agentLine.amountMinor)
-        : (order.payoutCurrency || order.sourceCurrency || "USD") === "USD"
-          ? Number(order.payoutAmountMinor || order.sourceAmountMinor || 0)
-          : 0;
+      const payoutCurrency = order.payoutCurrency || order.sourceCurrency || "USD";
+      if (!payingActor || payingActor.role !== "Agent" || payoutCurrency !== "USD") return 0;
+      const recordedUsdMinor = payerAgentPayoutMinorForOrder(order, journalLines, "USD") ||
+        Number(order.payoutAmountMinor || order.sourceAmountMinor || 0);
       return applyUsdAgentIncomeRate(recordedUsdMinor, usdAgentIncomeSettingFor(payingActor));
     }
 
@@ -7068,7 +7061,7 @@
         divider: Number(masterSetting.divider || 1),
         percent: Number(masterSetting.percent || 0)
       };
-      if (payingActor?.currency === "USD" && payingActor.role === "Agent") {
+      if (payoutCurrency === "USD" && payingActor?.role === "Agent") {
         order.incomeUsdAgentRateSnapshot = {
           actorId: payingActor.id,
           actorName: payingActor.name,
@@ -9975,7 +9968,7 @@
         specialPayoutSettings: hasSpecialPayout
           ? Object.fromEntries(workingCurrencies.map((currency) => [currency, { enabled: false, divider: 1, percent: 0 }]))
           : undefined,
-        incomeUsdPayoutSetting: roleInput.value === "Agent" && currencyInput.value === "USD"
+        incomeUsdPayoutSetting: roleInput.value === "Agent"
           ? { divider: 1, percent: 0 }
           : undefined
       });
@@ -10509,7 +10502,7 @@
         const percentInput = wrapper?.querySelector(".usd-agent-income-percent");
         const divider = Number(input?.value || 0);
         const percent = Number(percentInput?.value || 0);
-        if (!actor || actor.currency !== "USD" || actor.role !== "Agent") return;
+        if (!actor || actor.role !== "Agent") return;
         if (!Number.isFinite(divider) || divider <= 0) {
           input?.setCustomValidity("Enter a divisor greater than zero.");
           input?.reportValidity();

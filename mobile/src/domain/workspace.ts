@@ -246,8 +246,9 @@ function freezeIncome(state: WorkspaceState, order: OrderRecord, lines: LedgerLi
   const rates = buyingRates(state);
   const payerLine = lines.find((line) => line.account === `${order.agent} ACTOR_CLEARING` && line.direction === "Credit");
   const payingActor = activeActors(state).find((actor) => actor.name === order.agent);
-  const usdPayoutActorBaseMinor = payingActor?.currency === "USD" && payingActor.role === "Agent" && payerLine
-    ? applyUsdAgentIncomeRate(currencyToUsd(state, payerLine.currency, payerLine.amountMinor), payingActor.incomeUsdPayoutSetting)
+  const usdPayerLine = lines.find((line) => line.account === `${order.agent} ACTOR_CLEARING` && line.direction === "Credit" && line.currency === "USD");
+  const usdPayoutActorBaseMinor = payoutCurrency === "USD" && payingActor?.role === "Agent"
+    ? applyUsdAgentIncomeRate(usdPayerLine?.amountMinor || Number(order.payoutAmountMinor || 0), payingActor.incomeUsdPayoutSetting)
     : 0;
   let baseAmountMinor = 0;
   if (usdPayoutActorBaseMinor > 0) {
@@ -292,7 +293,7 @@ function freezeIncome(state: WorkspaceState, order: OrderRecord, lines: LedgerLi
   order.incomeProfitMinor = profitMinor;
   order.incomeSnapshotAt = order.paidAt || new Date().toISOString();
   order.incomeMasterRateSnapshot = { ...rateSetting(state.masterRateDivisorSettings?.[payoutCurrency]), payoutCurrency };
-  if (payingActor?.currency === "USD" && payingActor.role === "Agent") {
+  if (payoutCurrency === "USD" && payingActor?.role === "Agent") {
     const setting = rateSetting(payingActor.incomeUsdPayoutSetting);
     order.incomeUsdAgentRateSnapshot = { actorId: payingActor.id, actorName: payingActor.name, divider: setting.divider, percent: setting.percent };
   }
@@ -578,7 +579,7 @@ export async function createManagedActor(input: { name: string; role: ActorRecor
       transferEnabled: true,
       transferMode: "master",
       incomeStatementVisible: true,
-      incomeUsdPayoutSetting: input.currency === "USD" && input.role === "Agent" ? { divider: 1, percent: 0 } : undefined
+      incomeUsdPayoutSetting: input.role === "Agent" ? { divider: 1, percent: 0 } : undefined
     });
   });
 }
@@ -614,7 +615,7 @@ export async function updateUsdAgentIncomeRate(actorId: string, setting: RateSet
     const actor = activeActors(state).find((item) => item.id === actorId);
     const divider = Number(setting.divider || 0);
     const percent = Number(setting.percent || 0);
-    if (!actor || actor.currency !== "USD" || actor.role !== "Agent") throw new Error("Choose a USD-based Agent.");
+    if (!actor || actor.role !== "Agent") throw new Error("Choose an Agent.");
     if (divider <= 0) throw new Error("Enter a divisor greater than zero.");
     if (percent < 0) throw new Error("Enter zero or a positive percentage.");
     actor.incomeUsdPayoutSetting = { divider, percent };
