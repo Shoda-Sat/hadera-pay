@@ -2799,7 +2799,11 @@
           <div class="panel">
             <div class="panel-header">
               <h2>Archive</h2>
-              <span class="state-pill">Closed</span>
+              <div class="panel-actions">
+                <button class="btn secondary" id="exportArchiveExcelButton" type="button">Export Excel</button>
+                <button class="btn secondary" id="exportArchivePdfButton" type="button">Export PDF</button>
+                <span class="state-pill">Closed</span>
+              </div>
             </div>
             <div class="panel-body">
               <div class="form-grid">
@@ -3982,6 +3986,8 @@
       ledgerExportOrderedAmount: document.getElementById("ledgerExportOrderedAmount"),
       ledgerExportRate: document.getElementById("ledgerExportRate"),
       ledgerExportPercent: document.getElementById("ledgerExportPercent"),
+      exportArchiveExcelButton: document.getElementById("exportArchiveExcelButton"),
+      exportArchivePdfButton: document.getElementById("exportArchivePdfButton"),
       transferList: document.getElementById("transferList"),
       archiveRows: document.getElementById("archiveRows"),
       journalPreview: document.getElementById("journalPreview"),
@@ -6720,8 +6726,6 @@
       const canRequestVoid = actorCanRequestVoidOrder(order, actor);
       const canApproveVoid = actor?.role === "Master" && order.state === "Void Requested";
       const canModify = ["Broker", "Special Broker"].includes(actor?.role) && order.state === "Returned" && order.broker === actor.name;
-      const masterRateSetting = masterRateDivisorSettingFor(order.payoutCurrency || order.sourceCurrency || masterBaseCurrency());
-      const canSetMasterRate = actor?.role === "Master" && order.state === "Paid" && !order.locked && masterRateSetting.enabled !== true;
       const matchedAgents = payoutActorsForOrder(order);
       if (canForward) {
         if (matchedAgents.length === 0) {
@@ -6767,21 +6771,6 @@
             </span>
             <button class="btn primary pay-order" data-id="${order.id}" type="button">${icons.check}Mark Paid</button>
             <button class="btn secondary return-order" data-id="${order.id}" type="button">Return</button>
-          </div>
-        `;
-      }
-      if (canSetMasterRate) {
-        return `
-          <div class="order-actions">
-            <div class="manual-divider-field">
-              <label for="masterRateDivider-${order.id}">Master divisor</label>
-              <input id="masterRateDivider-${order.id}" class="manual-master-rate-divider" data-id="${order.id}" type="text" inputmode="decimal" value="${order.manualMasterRateDivider ? formatRate(order.manualMasterRateDivider) : ""}" placeholder="Optional">
-            </div>
-            <div class="manual-divider-field">
-              <label for="masterRatePercent-${order.id}">Percentage</label>
-              <input id="masterRatePercent-${order.id}" class="manual-master-rate-percent" data-id="${order.id}" type="text" inputmode="decimal" value="${order.manualMasterRatePercent ? formatRate(order.manualMasterRatePercent) : ""}" placeholder="Optional">
-            </div>
-            <button class="btn primary save-master-order-rate" data-id="${order.id}" type="button">Save Rate</button>
           </div>
         `;
       }
@@ -6937,6 +6926,11 @@
     function displayDate(value) {
       const date = value ? new Date(value) : new Date();
       return Number.isNaN(date.getTime()) ? "" : date.toLocaleString();
+    }
+
+    function displayDateOnly(value) {
+      const date = value ? new Date(value) : new Date();
+      return Number.isNaN(date.getTime()) ? "" : date.toLocaleDateString();
     }
 
     function archiveClosedWindow(actorName) {
@@ -7507,12 +7501,12 @@
       return row;
     }
 
-    function ledgerExportRows(lines, actor) {
+    function ledgerExportRows(lines, actor, { dateOnly = false } = {}) {
       const viewer = selectedActor();
       const options = ledgerExportOptions(actor);
       const rows = lines.map((line) => {
         const row = {
-          Date: displayDate(line.postedAt),
+          Date: dateOnly ? displayDateOnly(line.postedAt) : displayDate(line.postedAt),
           Journal: line.journal,
           "Order / Transfer No.": ledgerReferenceNumber(line, viewer, actor),
           Source: line.source,
@@ -7633,7 +7627,7 @@
         .replace(/\)/g, "\\)");
     }
 
-    function buildLedgerPdf(title, rows) {
+    function buildLandscapeTablePdf(title, rows, customWidths = {}) {
       const headers = Object.keys(rows[0]);
       const widthByHeader = {
         Date: 18,
@@ -7649,12 +7643,19 @@
         USD: 11,
         ETB: 11,
         EUR: 11,
-        ERN: 11
+        ERN: 11,
+        Actor: 16,
+        "Closed Statement": 22,
+        Type: 14,
+        Reference: 18,
+        Status: 10,
+        Amount: 16,
+        ...customWidths
       };
       const widths = headers.map((header) => widthByHeader[header] || 12);
       const textRows = [
         title,
-        `Exported ${displayDate(new Date().toISOString())}`,
+        `Exported ${displayDateOnly(new Date().toISOString())}`,
         "",
         headers.map((header, index) => fixedCell(header, widths[index])).join(" "),
         widths.map((width) => "-".repeat(width)).join(" ")
@@ -7665,8 +7666,10 @@
 
       const pageWidth = 842;
       const pageHeight = 595;
-      const margin = 28;
-      const lineHeight = 10;
+      const margin = 24;
+      const longestLine = textRows.reduce((max, line) => Math.max(max, line.length), 1);
+      const fontSize = Math.max(4.5, Math.min(7, (pageWidth - margin * 2) / (longestLine * 0.6)));
+      const lineHeight = fontSize + 3;
       const linesPerPage = Math.floor((pageHeight - margin * 2) / lineHeight);
       const pages = [];
       for (let index = 0; index < textRows.length; index += linesPerPage) {
@@ -7683,7 +7686,7 @@
       pages.forEach((pageLines) => {
         const body = [
           "BT",
-          `/F1 7 Tf`,
+          `/F1 ${fontSize.toFixed(2)} Tf`,
           `${margin} ${pageHeight - margin} Td`
         ];
         pageLines.forEach((line, index) => {
@@ -7693,7 +7696,7 @@
         body.push("ET");
         const stream = body.join("\n");
         const contentObject = addObject(`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`);
-        const pageObject = addObject(`<< /Type /Page /Parent PAGES_REF /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /Font << /F1 ${fontObject} 0 R >> >> /Contents ${contentObject} 0 R >>`);
+        const pageObject = addObject(`<< /Type /Page /Parent PAGES_REF /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Rotate 0 /Resources << /Font << /F1 ${fontObject} 0 R >> >> /Contents ${contentObject} 0 R >>`);
         pageObjectIds.push(pageObject);
       });
       const pagesObject = addObject(`<< /Type /Pages /Kids [${pageObjectIds.map((id) => `${id} 0 R`).join(" ")}] /Count ${pageObjectIds.length} >>`);
@@ -7716,9 +7719,98 @@
 
     function exportLedgerPdf() {
       const context = currentLedgerContext();
-      const rows = ledgerExportRows(context.lines, context.ledgerActor);
+      const rows = ledgerExportRows(context.lines, context.ledgerActor, { dateOnly: true });
       if (rows.length === 0) return;
-      downloadBlob(buildLedgerPdf(context.title, rows), `${safeFilename(context.title)}.pdf`);
+      downloadBlob(buildLandscapeTablePdf(context.title, rows), `${safeFilename(context.title)}.pdf`);
+    }
+
+    function archiveExportTitle() {
+      const actorLabel = els.archiveActorFilter.value || selectedActor()?.name || "All actors";
+      const monthLabel = els.archiveMonthFilter.value
+        ? archiveMonthLabel(els.archiveMonthFilter.value)
+        : "All closed months";
+      return `Archive - ${actorLabel} - ${monthLabel}`;
+    }
+
+    function archiveExportRows(records) {
+      const presentCurrencies = Array.from(new Set(records.map((record) => record.currency).filter(Boolean)));
+      const currencies = [
+        ...supportedCurrencies.filter((currency) => presentCurrencies.includes(currency)),
+        ...presentCurrencies.filter((currency) => !supportedCurrencies.includes(currency)).sort()
+      ];
+      const showCurrencyColumns = currencies.length > 1;
+      return records.map((record) => {
+        const row = {
+          Date: displayDate(record.date),
+          Actor: record.actor,
+          "Closed Statement": `${archiveMonthLabel(archiveMonthKey(record.closedAt))} / ${record.archiveId}`,
+          Type: record.type,
+          Reference: record.reference,
+          Direction: record.direction,
+          Details: record.details,
+          Amount: `${formatMinor(record.amountMinor, record.currency)} ${record.currency}`
+        };
+        if (showCurrencyColumns) {
+          currencies.forEach((currency) => {
+            row[currency] = record.currency === currency ? formatMinor(record.amountMinor, currency) : "";
+          });
+        }
+        row.Status = record.status;
+        return row;
+      });
+    }
+
+    function buildLandscapeExcelHtml(title, rows) {
+      const headers = Object.keys(rows[0]);
+      const tableRows = rows.map((row) => `
+        <tr>${headers.map((header) => `<td>${escapeHtml(row[header])}</td>`).join("")}</tr>
+      `).join("");
+      return `
+        <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel">
+          <head>
+            <meta charset="utf-8">
+            <style>
+              @page { size: A4 landscape; margin: 0.35in; }
+              table { border-collapse: collapse; }
+              th, td { border: 1px solid #777; padding: 4px; vertical-align: top; }
+            </style>
+            <!--[if gte mso 9]><xml>
+              <x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet>
+                <x:Name>Archive</x:Name>
+                <x:WorksheetOptions><x:PageSetup><x:Layout x:Orientation="Landscape"/></x:PageSetup></x:WorksheetOptions>
+              </x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook>
+            </xml><![endif]-->
+          </head>
+          <body>
+            <h2>${escapeHtml(title)}</h2>
+            <p>Exported ${escapeHtml(displayDate(new Date().toISOString()))}</p>
+            <table>
+              <thead><tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("")}</tr></thead>
+              <tbody>${tableRows}</tbody>
+            </table>
+          </body>
+        </html>
+      `;
+    }
+
+    function exportArchiveExcel() {
+      const records = archiveRecordsForExport();
+      if (!records.length) return;
+      const title = archiveExportTitle();
+      const rows = archiveExportRows(records);
+      const html = buildLandscapeExcelHtml(title, rows);
+      downloadBlob(new Blob([html], { type: "application/vnd.ms-excel;charset=utf-8" }), `${safeFilename(title)}.xls`);
+    }
+
+    function exportArchivePdf() {
+      const records = archiveRecordsForExport();
+      if (!records.length) return;
+      const title = archiveExportTitle();
+      const rows = archiveExportRows(records);
+      downloadBlob(
+        buildLandscapeTablePdf(title, rows, { Details: 32, Direction: 18 }),
+        `${safeFilename(title)}.pdf`
+      );
     }
 
     function payingAgentLabel(order) {
@@ -8823,6 +8915,204 @@
       els.metricApprovals.textContent = String(state.transfers.filter((item) => item.state === "Pending Approval").length);
     }
 
+    function archivedOrderAmount(archive, order) {
+      const source = {
+        currency: order.sourceCurrency || "USD",
+        amountMinor: Number(order.sourceAmountMinor || 0)
+      };
+      if (archive.actor !== order.agent) return source;
+      const archivedActor = state.actors.find((item) => item.id === archive.actorId || item.name === archive.actor);
+      const actorRole = archive.actorRole || archivedActor?.role || "";
+      const actorCurrency = archive.actorCurrency || archivedActor?.currency || order.payerCurrency || "";
+      const payerAmountMinor = Number(order.payerAmountMinor || 0);
+      if (actorRole === "Agent" && actorCurrency === "USD") {
+        if (order.payerCurrency === "USD" && payerAmountMinor > 0) return { currency: "USD", amountMinor: payerAmountMinor };
+        if ((order.payoutCurrency || source.currency) === "USD") {
+          return { currency: "USD", amountMinor: Number(order.payoutAmountMinor || order.sourceAmountMinor || 0) };
+        }
+      }
+      if (actorRole === "Special Agent") {
+        const baseAmountMinor = Number(order.incomeBaseAmountMinor || 0);
+        if ((order.incomeBaseCurrency || "USD") === "USD" && baseAmountMinor > 0) {
+          return { currency: "USD", amountMinor: baseAmountMinor };
+        }
+        if (order.payerCurrency === "USD" && payerAmountMinor > 0) return { currency: "USD", amountMinor: payerAmountMinor };
+        if ((order.payoutCurrency || source.currency) === "USD") {
+          return { currency: "USD", amountMinor: Number(order.payoutAmountMinor || order.sourceAmountMinor || 0) };
+        }
+      }
+      return source;
+    }
+
+    function archiveRecordRows(archive, viewer, filters) {
+      const rows = [];
+      const addRow = (row, searchValues) => {
+        if (!archiveRowVisible(row.date, row.amountMinor, filters)) return;
+        if (!archiveSearchVisible([archive.actor, archive.id, ...searchValues], filters)) return;
+        rows.push({
+          archiveId: archive.id || "",
+          actor: archive.actor,
+          closedAt: archive.closedAt,
+          status: "Locked",
+          ...row
+        });
+      };
+      const balances = archive.balances && typeof archive.balances === "object"
+        ? archive.balances
+        : archivedBalances(archive.actor, archive.ledger || []);
+      supportedCurrencies.forEach((currency) => {
+        const netMinor = Number(balances[currency] || 0);
+        const direction = netMinor > 0 ? "Owes Master" : "Master owes";
+        if (netMinor === 0) return;
+        addRow({
+          date: archive.closedAt,
+          type: "Closed Balance",
+          reference: archive.id,
+          direction,
+          details: "",
+          currency,
+          amountMinor: Math.abs(netMinor)
+        }, ["Closed Balance", currency, direction]);
+      });
+      (archive.orders || []).forEach((order) => {
+        const date = order.sentAt || order.createdAt || order.postedAt || archive.closedAt;
+        const amount = archivedOrderAmount(archive, order);
+        const archiveOrderViewer = viewer?.role === "Master" && archive.actor === order.agent
+          ? { name: archive.actor, role: archive.actorRole || "Agent" }
+          : viewer;
+        const reference = orderDisplayNumber(order, archiveOrderViewer);
+        const direction = `${order.broker || ""} -> ${order.agent || ""}`;
+        const details = [
+          order.senderName ? `Sender: ${order.senderName}` : "",
+          order.receiverName ? `Receiver: ${order.receiverName}` : "",
+          order.phoneNumber ? `Phone: ${order.phoneNumber}` : "",
+          order.accountNumber ? `Account: ${order.accountNumber}` : "",
+          order.remarks ? `Remarks: ${order.remarks}` : "",
+          order.paidAt ? `Paid ${displayDate(order.paidAt)}` : "",
+          order.voidedAt ? `Voided ${displayDate(order.voidedAt)}` : ""
+        ].filter(Boolean).join(" - ");
+        addRow({ date, type: "Order", reference, direction, details, ...amount }, [
+          order.id,
+          order.internalOrderId,
+          order.brokerOrderNumber,
+          order.agentOrderNumber,
+          order.broker,
+          order.agent,
+          order.senderName,
+          order.receiverName,
+          order.phoneNumber,
+          order.accountNumber,
+          order.remarks,
+          order.state,
+          order.journal,
+          order.voidJournal,
+          direction,
+          details,
+          amount.currency
+        ]);
+      });
+      (archive.receivables || []).forEach((receivable) => {
+        const payments = receivable.payments || [];
+        const lastPayment = payments.slice().sort((a, b) => new Date(b.paidAt || 0).getTime() - new Date(a.paidAt || 0).getTime())[0];
+        const date = receivable.archivedAt || lastPayment?.paidAt || archive.closedAt;
+        const currency = receivable.currency || "USD";
+        const amountMinor = Number(receivable.principalMinor || 0);
+        const direction = receivable.borrower ? `Borrower: ${receivable.borrower}` : "";
+        const details = [
+          receivable.receiverName ? `Receiver: ${receivable.receiverName}` : "",
+          `Collected: ${money(currency, receivablePaidMinor(receivable))}`
+        ].filter(Boolean).join(" - ");
+        addRow({
+          date,
+          type: "Receivable",
+          reference: receivable.brokerOrderNumber || receivable.orderId || receivable.id,
+          direction,
+          details,
+          currency,
+          amountMinor
+        }, [
+          receivable.id,
+          receivable.orderId,
+          receivable.brokerOrderNumber,
+          receivable.borrower,
+          receivable.senderName,
+          receivable.receiverName,
+          receivable.accountNumber,
+          receivable.phoneNumber,
+          receivable.remarks,
+          direction,
+          details
+        ]);
+      });
+      (archive.transfers || []).forEach((transfer) => {
+        const date = transfer.sentAt || transfer.createdAt || transfer.postedAt || archive.closedAt;
+        const direction = `${transfer.from || ""} -> ${transfer.to || ""}`;
+        const completeDetails = transfer.details || [
+          transfer.remarks ? `Remarks: ${transfer.remarks}` : "",
+          transfer.paidOutAt ? `Paid out ${displayDate(transfer.paidOutAt)}` : "",
+          transfer.reversedAt ? `Reversed ${displayDate(transfer.reversedAt)}` : ""
+        ].filter(Boolean).join(" - ");
+        const details = completeDetails.startsWith(`${direction} - `)
+          ? completeDetails.slice(direction.length + 3)
+          : completeDetails === direction
+            ? ""
+            : completeDetails;
+        addRow({
+          date,
+          type: "Transfer",
+          reference: transfer.id,
+          direction,
+          details,
+          currency: transfer.currency || transfer.sourceCurrency || "USD",
+          amountMinor: Number(transfer.amountMinor || 0)
+        }, [
+          transfer.id,
+          transfer.from,
+          transfer.to,
+          transfer.remarks,
+          transfer.state,
+          transfer.journal,
+          transfer.reversalJournal,
+          direction,
+          details
+        ]);
+      });
+      (archive.ledger || []).forEach((line) => {
+        const date = line.postedAt || archive.closedAt;
+        const reference = line.entryId || line.transferId || line.orderId || line.journal;
+        const details = line.details || `${line.account} ${line.direction}`;
+        addRow({
+          date,
+          type: "Ledger",
+          reference,
+          direction: line.direction || "",
+          details,
+          currency: line.currency || "USD",
+          amountMinor: Number(line.amountMinor || 0)
+        }, [reference, line.journal, line.source, line.account, line.direction, line.details, details]);
+      });
+      return rows;
+    }
+
+    function filteredArchiveStatements(actor, filters) {
+      const visible = actor?.role === "Master"
+        ? state.archives
+        : state.archives.filter((archive) => archive.actor === actor?.name);
+      return visible.filter((archive) =>
+        (filters.actor === "All actors" || archive.actor === filters.actor) &&
+        (!filters.month || archiveMonthKey(archive.closedAt) === filters.month)
+      );
+    }
+
+    function archiveRecordsForExport() {
+      const actor = selectedActor();
+      const filters = archiveFilterValues();
+      return filteredArchiveStatements(actor, filters)
+        .slice()
+        .sort((a, b) => new Date(b.closedAt).getTime() - new Date(a.closedAt).getTime())
+        .flatMap((archive) => archiveRecordRows(archive, actor, filters));
+    }
+
     function renderArchive() {
       const actor = selectedActor();
       const archiveActors = Array.from(new Set(state.archives.map((archive) => archive.actor))).sort();
@@ -8836,12 +9126,12 @@
           ? "All actors"
           : actor?.name || "";
       els.archiveActorFilter.disabled = actor?.role !== "Master";
-      const visibleArchives = actor?.role === "Master"
+      const actorVisibleArchives = actor?.role === "Master"
         ? state.archives
         : state.archives.filter((archive) => archive.actor === actor?.name);
       const actorFilteredArchives = els.archiveActorFilter.value === "All actors"
-        ? visibleArchives
-        : visibleArchives.filter((archive) => archive.actor === els.archiveActorFilter.value);
+        ? actorVisibleArchives
+        : actorVisibleArchives.filter((archive) => archive.actor === els.archiveActorFilter.value);
       const currentMonthFilter = els.archiveMonthFilter.value || "";
       const archiveMonths = Array.from(new Set(actorFilteredArchives.map((archive) => archiveMonthKey(archive.closedAt)).filter(Boolean))).sort().reverse();
       els.archiveMonthFilter.innerHTML = `<option value="">All months</option>${archiveMonths.map((month) => `<option value="${escapeHtml(month)}">${escapeHtml(archiveMonthLabel(month))}</option>`).join("")}`;
@@ -8852,199 +9142,49 @@
       els.archiveDateFrom.disabled = usingMonth || usingClosedWindow;
       els.archiveDateTo.disabled = usingMonth || usingClosedWindow;
       const filters = archiveFilterValues();
-      const filteredArchives = filters.month
-        ? actorFilteredArchives.filter((archive) => archiveMonthKey(archive.closedAt) === filters.month)
-        : actorFilteredArchives;
-      const byActor = filteredArchives.reduce((acc, archive) => {
+      const byActor = filteredArchiveStatements(actor, filters).reduce((acc, archive) => {
         acc[archive.actor] ||= [];
         acc[archive.actor].push(archive);
         return acc;
       }, {});
+      let recordCount = 0;
       const rows = Object.entries(byActor).flatMap(([actorName, archives]) => {
         const actorRows = [`<tr><td colspan="6"><strong>${escapeHtml(actorName)}</strong></td></tr>`];
         archives
           .slice()
           .sort((a, b) => new Date(b.closedAt).getTime() - new Date(a.closedAt).getTime())
           .forEach((archive) => {
-            const closureRows = [];
-            const balances = archive.balances && typeof archive.balances === "object"
-              ? archive.balances
-              : archivedBalances(archive.actor, archive.ledger || []);
-            supportedCurrencies.forEach((currency) => {
-              const netMinor = balances[currency] || 0;
-              const amountMinor = Math.abs(netMinor);
-              if (amountMinor === 0 || !archiveRowVisible(archive.closedAt, amountMinor, filters)) return;
-              if (!archiveSearchVisible([archive.actor, archive.id, "Closed Balance", currency, netMinor > 0 ? "Owes Master" : "Master owes"], filters)) return;
-              closureRows.push(`
-                <tr>
-                  <td>${escapeHtml(displayDate(archive.closedAt))}</td>
-                  <td>Closed Balance</td>
-                  <td><strong>${escapeHtml(archive.id)}</strong></td>
-                  <td>${netMinor > 0 ? "Owes Master" : "Master owes"}</td>
-                  <td>${lockedAmount(currency, amountMinor)}</td>
-                  <td><span class="state-pill danger">Locked</span></td>
-                </tr>
-              `);
-            });
-            (archive.orders || []).forEach((order) => {
-              const date = order.sentAt || order.createdAt || order.postedAt || archive.closedAt;
-              const amountMinor = Number(order.sourceAmountMinor || 0);
-              if (!archiveRowVisible(date, amountMinor, filters)) return;
-              const archiveOrderViewer = actor?.role === "Master"
-                ? (archive.actor === order.agent ? { name: archive.actor, role: "Agent" } : actor)
-                : actor;
-              const archiveOrderNumber = orderDisplayNumber(order, archiveOrderViewer);
-              const detail = [
-                `${order.broker || ""} -> ${order.agent || ""}`,
-                order.senderName ? `Sender: ${order.senderName}` : "",
-                order.receiverName ? `Receiver: ${order.receiverName}` : "",
-                order.phoneNumber ? `Phone: ${order.phoneNumber}` : "",
-                order.accountNumber ? `Account: ${order.accountNumber}` : "",
-                order.remarks ? `Remarks: ${order.remarks}` : "",
-                order.paidAt ? `Paid ${displayDate(order.paidAt)}` : "",
-                order.voidedAt ? `Voided ${displayDate(order.voidedAt)}` : ""
-              ].filter(Boolean).join(" - ");
-              if (!archiveSearchVisible([
-                archive.actor,
-                archive.id,
-                order.id,
-                order.internalOrderId,
-                order.brokerOrderNumber,
-                order.agentOrderNumber,
-                order.broker,
-                order.agent,
-                order.senderName,
-                order.receiverName,
-                order.phoneNumber,
-                order.accountNumber,
-                order.remarks,
-                order.state,
-                order.journal,
-                order.voidJournal,
-                detail
-              ], filters)) return;
-              closureRows.push(`
-                <tr>
-                  <td>${escapeHtml(displayDate(date))}</td>
-                  <td>Order</td>
-                  <td><strong>${escapeHtml(archiveOrderNumber)}</strong></td>
-                  <td>${escapeHtml(detail || `${order.broker || ""} -> ${order.agent || ""}`)}</td>
-                  <td>${lockedAmount(order.sourceCurrency || "USD", amountMinor)}</td>
-                  <td><span class="state-pill danger">Locked</span></td>
-                </tr>
-              `);
-            });
-            (archive.receivables || []).forEach((receivable) => {
-              const payments = receivable.payments || [];
-              const lastPayment = payments.slice().sort((a, b) => new Date(b.paidAt || 0).getTime() - new Date(a.paidAt || 0).getTime())[0];
-              const date = receivable.archivedAt || lastPayment?.paidAt || archive.closedAt;
-              const amountMinor = Number(receivable.principalMinor || 0);
-              if (!archiveRowVisible(date, amountMinor, filters)) return;
-              const collectedMinor = receivablePaidMinor(receivable);
-              const detail = [
-                receivable.borrower ? `Borrower: ${receivable.borrower}` : "",
-                receivable.receiverName ? `Receiver: ${receivable.receiverName}` : "",
-                `Collected: ${money(receivable.currency || "USD", collectedMinor)}`
-              ].filter(Boolean).join(" - ");
-              if (!archiveSearchVisible([
-                archive.actor,
-                archive.id,
-                receivable.id,
-                receivable.orderId,
-                receivable.brokerOrderNumber,
-                receivable.borrower,
-                receivable.senderName,
-                receivable.receiverName,
-                receivable.accountNumber,
-                receivable.phoneNumber,
-                receivable.remarks,
-                detail
-              ], filters)) return;
-              closureRows.push(`
-                <tr>
-                  <td>${escapeHtml(displayDate(date))}</td>
-                  <td>Receivable</td>
-                  <td><strong>${escapeHtml(receivable.brokerOrderNumber || receivable.orderId || receivable.id)}</strong></td>
-                  <td>${escapeHtml(detail)}</td>
-                  <td>${lockedAmount(receivable.currency || "USD", amountMinor)}</td>
-                  <td><span class="state-pill danger">Locked</span></td>
-                </tr>
-              `);
-            });
-            (archive.transfers || []).forEach((transfer) => {
-              const date = transfer.sentAt || transfer.createdAt || transfer.postedAt || archive.closedAt;
-              const amountMinor = Number(transfer.amountMinor || 0);
-              if (!archiveRowVisible(date, amountMinor, filters)) return;
-              const detail = transfer.details || [
-                `${transfer.from || ""} -> ${transfer.to || ""}`,
-                transfer.remarks ? `Remarks: ${transfer.remarks}` : "",
-                transfer.paidOutAt ? `Paid out ${displayDate(transfer.paidOutAt)}` : "",
-                transfer.reversedAt ? `Reversed ${displayDate(transfer.reversedAt)}` : ""
-              ].filter(Boolean).join(" - ");
-              if (!archiveSearchVisible([
-                archive.actor,
-                archive.id,
-                transfer.id,
-                transfer.from,
-                transfer.to,
-                transfer.remarks,
-                transfer.state,
-                transfer.journal,
-                transfer.reversalJournal,
-                detail
-              ], filters)) return;
-              closureRows.push(`
-                <tr>
-                  <td>${escapeHtml(displayDate(date))}</td>
-                  <td>Transfer</td>
-                  <td><strong>${escapeHtml(transfer.id)}</strong></td>
-                  <td>${escapeHtml(detail || `${transfer.from || ""} -> ${transfer.to || ""}`)}</td>
-                  <td>${lockedAmount(transfer.currency, amountMinor)}</td>
-                  <td><span class="state-pill danger">Locked</span></td>
-                </tr>
-              `);
-            });
-            (archive.ledger || []).forEach((line) => {
-              const date = line.postedAt || archive.closedAt;
-              const amountMinor = Number(line.amountMinor || 0);
-              if (!archiveRowVisible(date, amountMinor, filters)) return;
-              const reference = line.entryId || line.transferId || line.orderId || line.journal;
-              const detail = line.details || `${line.account} ${line.direction}`;
-              if (!archiveSearchVisible([
-                archive.actor,
-                archive.id,
-                reference,
-                line.journal,
-                line.source,
-                line.account,
-                line.direction,
-                line.details,
-                detail
-              ], filters)) return;
-              closureRows.push(`
-                <tr>
-                  <td>${escapeHtml(displayDate(date))}</td>
-                  <td>Ledger</td>
-                  <td><strong>${escapeHtml(reference)}</strong></td>
-                  <td>${escapeHtml(detail)}</td>
-                  <td>${lockedAmount(line.currency, amountMinor)}</td>
-                  <td><span class="state-pill danger">Locked</span></td>
-                </tr>
-              `);
-            });
-            if (closureRows.length) {
+            const records = archiveRecordRows(archive, actor, filters);
+            if (!records.length) return;
+            recordCount += records.length;
+            actorRows.push(`
+              <tr>
+                <td colspan="6"><strong>${escapeHtml(archiveMonthLabel(archiveMonthKey(archive.closedAt)))} closed statement</strong> - ${escapeHtml(displayDate(archive.closedAt))} - ${escapeHtml(archive.id || "")}</td>
+              </tr>
+            `);
+            records.forEach((record) => {
+              const description = record.type === "Ledger"
+                ? record.details
+                : [record.direction, record.details].filter(Boolean).join(" - ");
               actorRows.push(`
                 <tr>
-                  <td colspan="6"><strong>${escapeHtml(archiveMonthLabel(archiveMonthKey(archive.closedAt)))} closed statement</strong> - ${escapeHtml(displayDate(archive.closedAt))} - ${escapeHtml(archive.id || "")}</td>
+                  <td>${escapeHtml(displayDate(record.date))}</td>
+                  <td>${escapeHtml(record.type)}</td>
+                  <td><strong>${escapeHtml(record.reference)}</strong></td>
+                  <td>${escapeHtml(description)}</td>
+                  <td>${lockedAmount(record.currency, record.amountMinor)}</td>
+                  <td><span class="state-pill danger">Locked</span></td>
                 </tr>
-              `, ...closureRows);
-            }
+              `);
+            });
           });
         return actorRows.length > 1 ? actorRows : [];
       });
       els.archiveRows.innerHTML = rows.length
         ? rows.join("")
         : '<tr><td colspan="6">No closed transactions archived yet.</td></tr>';
+      els.exportArchiveExcelButton.disabled = recordCount === 0;
+      els.exportArchivePdfButton.disabled = recordCount === 0;
     }
 
     function renderSettlements() {
@@ -9335,6 +9475,20 @@
     }
 
     function archiveOrderSnapshot(order, actorName, closedAt = new Date().toISOString()) {
+      const payerLine = order.agent === actorName
+        ? state.ledger.find((line) =>
+            line.source === "ORDER_PAYMENT" &&
+            line.journal === order.journal &&
+            line.account === `${actorName} ACTOR_CLEARING` &&
+            line.direction === "Credit" &&
+            Number(line.amountMinor || 0) > 0
+          )
+        : null;
+      const payerStatement = payerLine
+        ? { currency: payerLine.currency, amountMinor: Number(payerLine.amountMinor || 0) }
+        : order.agent === actorName
+          ? payingActorStatement(order)
+          : null;
       return {
         id: order.id,
         internalOrderId: order.id,
@@ -9355,6 +9509,10 @@
         sourceAmountMinor: Number(order.sourceAmountMinor || 0),
         payoutCurrency: order.payoutCurrency || order.sourceCurrency || "USD",
         payoutAmountMinor: Number(order.payoutAmountMinor || order.sourceAmountMinor || 0),
+        payerCurrency: payerStatement?.currency || "",
+        payerAmountMinor: Number(payerStatement?.amountMinor || 0),
+        incomeBaseCurrency: order.incomeBaseCurrency || "USD",
+        incomeBaseAmountMinor: Number(order.incomeBaseAmountMinor || 0),
         state: order.state,
         fundingType: order.fundingType || "cash",
         journal: order.journal || "",
@@ -9530,6 +9688,7 @@
           actor: actor.name,
           actorId: actor.id,
           actorRole: actor.role,
+          actorCurrency: actor.currency || "USD",
           closedAt,
           balances: previousBalances,
           incomeProfitMinor,
@@ -11375,47 +11534,6 @@
         return;
       }
 
-      const saveMasterOrderRateButton = event.target.closest(".save-master-order-rate");
-      if (saveMasterOrderRateButton) {
-        const actor = selectedActor();
-        const order = state.orders.find((item) => item.id === saveMasterOrderRateButton.dataset.id);
-        if (!order || actor?.role !== "Master" || order.state !== "Paid") return;
-        const actionBox = saveMasterOrderRateButton.closest(".order-actions");
-        const dividerInput = actionBox?.querySelector(".manual-master-rate-divider");
-        const percentInput = actionBox?.querySelector(".manual-master-rate-percent");
-        const dividerText = dividerInput?.value.trim() || "";
-        const percentText = percentInput?.value.trim() || "";
-        const divider = Number(dividerText || 0);
-        const percent = Number(percentText || 0);
-        if (dividerText && (!Number.isFinite(divider) || divider <= 0)) {
-          dividerInput?.setCustomValidity("Enter a divisor greater than zero.");
-          dividerInput?.reportValidity();
-          return;
-        }
-        if (percentText && (!Number.isFinite(percent) || percent < 0)) {
-          percentInput?.setCustomValidity("Enter zero or a positive percentage.");
-          percentInput?.reportValidity();
-          return;
-        }
-        dividerInput?.setCustomValidity("");
-        percentInput?.setCustomValidity("");
-        if (dividerText) {
-          order.manualMasterRateDivider = divider;
-        } else {
-          delete order.manualMasterRateDivider;
-        }
-        if (percentText) {
-          order.manualMasterRatePercent = percent;
-        } else {
-          delete order.manualMasterRatePercent;
-        }
-        const journalLines = state.ledger.filter((line) => line.journal === order.journal && line.source === "ORDER_PAYMENT");
-        if (journalLines.length) freezeOrderIncomeStatement(order, journalLines, true);
-        order.updatedAt = new Date().toISOString();
-        renderAll();
-        return;
-      }
-
       const collectReceivableButton = event.target.closest(".collect-receivable");
       if (collectReceivableButton) {
         const actor = selectedActor();
@@ -11599,6 +11717,8 @@
 
     els.exportLedgerExcelButton.addEventListener("click", exportLedgerExcel);
     els.exportLedgerPdfButton.addEventListener("click", exportLedgerPdf);
+    els.exportArchiveExcelButton.addEventListener("click", exportArchiveExcel);
+    els.exportArchivePdfButton.addEventListener("click", exportArchivePdf);
 
     document.getElementById("closeBalanceButton").addEventListener("click", () => {
       if (selectedActor()?.role !== "Master") return;
