@@ -1308,6 +1308,34 @@
       min-width: 320px;
     }
 
+    .usd-agent-income-panel {
+      display: grid;
+      gap: 10px;
+      border-top: 1px solid var(--line);
+    }
+
+    .usd-agent-income-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .usd-agent-income-header > div {
+      display: grid;
+      gap: 3px;
+    }
+
+    .usd-agent-income-header small {
+      color: var(--muted);
+    }
+
+    .usd-agent-income-list {
+      display: grid;
+      gap: 8px;
+    }
+
     .special-divider-currency {
       display: flex;
       align-items: center;
@@ -3001,6 +3029,17 @@
                 <tbody id="masterRateDivisorRows"></tbody>
               </table>
             </div>
+            <div class="panel-body usd-agent-income-panel">
+              <div class="usd-agent-income-header">
+                <div>
+                  <strong>USD Agent Payout Divisors</strong>
+                  <small>Agent-specific rates for future Base USD snapshots only.</small>
+                </div>
+                <span id="usdAgentIncomeRateStatus" class="state-pill">0 adjusted / 0 Agents</span>
+                <button id="usdAgentIncomeRateToggle" class="btn secondary expand-usd-agent-income-rates" type="button" aria-expanded="false">Show USD Agent payout divisors</button>
+              </div>
+              <div id="usdAgentIncomeRateRows" class="usd-agent-income-list hidden"></div>
+            </div>
             </div>
           </div>
         </section>
@@ -3835,6 +3874,9 @@
       ownerMasterError: document.getElementById("ownerMasterError"),
       fixedRateRows: document.getElementById("fixedRateRows"),
       masterRateDivisorRows: document.getElementById("masterRateDivisorRows"),
+      usdAgentIncomeRateToggle: document.getElementById("usdAgentIncomeRateToggle"),
+      usdAgentIncomeRateStatus: document.getElementById("usdAgentIncomeRateStatus"),
+      usdAgentIncomeRateRows: document.getElementById("usdAgentIncomeRateRows"),
       actorCount: document.getElementById("actorCount"),
       actorError: document.getElementById("actorError"),
       archiveActorFilter: document.getElementById("archiveActorFilter"),
@@ -5982,6 +6024,14 @@
           </div>
         `;
       }).join("") : "";
+      els.usdAgentIncomeRateToggle.textContent = `${usdAgentsExpanded ? "Hide" : "Show"} USD Agent payout divisors`;
+      els.usdAgentIncomeRateToggle.setAttribute("aria-expanded", usdAgentsExpanded ? "true" : "false");
+      els.usdAgentIncomeRateStatus.textContent = `${adjustedUsdPayoutActors} adjusted / ${usdPayoutActors.length} Agents`;
+      els.usdAgentIncomeRateStatus.className = `state-pill ${adjustedUsdPayoutActors > 0 ? "good" : "warn"}`;
+      els.usdAgentIncomeRateRows.classList.toggle("hidden", !usdAgentsExpanded);
+      els.usdAgentIncomeRateRows.innerHTML = usdAgentsExpanded
+        ? (usdAgentDetails || '<span class="muted">No active USD Agents.</span>')
+        : "";
       els.masterRateDivisorRows.innerHTML = `
         <tr>
           <td><strong>Buying Rate</strong><br><span class="muted">Income Statement</span></td>
@@ -6015,17 +6065,6 @@
           </td>
           <td>${activeCount} active / ${supportedCurrencies.length} currencies</td>
           <td><span class="muted">Controls Income Statement Base USD column</span></td>
-        </tr>
-        <tr>
-          <td><strong>USD Agent Payout Divisors</strong><br><span class="muted">Agent-specific Base USD</span></td>
-          <td>
-            <div class="special-divider-panel">
-              <button class="btn secondary expand-usd-agent-income-rates" type="button">${usdAgentsExpanded ? "Hide" : "Show"} USD Agent payout divisors</button>
-              ${usdAgentDetails || (usdAgentsExpanded ? '<span class="muted">No active USD Agents.</span>' : "")}
-            </div>
-          </td>
-          <td>${adjustedUsdPayoutActors} adjusted / ${usdPayoutActors.length} Agents</td>
-          <td><span class="muted">Applies to future Base USD snapshots only</span></td>
         </tr>
       `;
     }
