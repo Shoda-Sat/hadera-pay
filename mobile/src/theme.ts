@@ -11,6 +11,13 @@ export const colors = {
   warnSoft: "#fff3df",
   danger: "#a33124",
   dangerSoft: "#fff0ee",
+  assigned: "#98510b",
+  assignedSoft: "#fff0d6",
+  returned: "#6d3da0",
+  returnedSoft: "#f2e7ff",
+  cancelled: "#a33124",
+  cancelledSoft: "#ffe7e3",
+  voided: "#b42318",
   good: "#147a3c",
   goodSoft: "#eaf6ee"
 };

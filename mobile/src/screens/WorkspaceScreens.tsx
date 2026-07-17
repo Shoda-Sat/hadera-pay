@@ -1,18 +1,23 @@
 import * as ImagePicker from "expo-image-picker";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import {
   Check,
   ChevronDown,
   ChevronUp,
+  Forward as ForwardIcon,
+  Heart,
   ImagePlus,
   MessageSquare,
   Pencil,
   Plus,
   RefreshCw,
+  Reply,
   Send,
+  ThumbsUp,
   Trash2,
-  UserPlus
+  UserPlus,
+  X
 } from "lucide-react-native";
 import {
   changePassword,
@@ -25,7 +30,7 @@ import {
   resetWorkspaceData,
   setOwnerMasterActive
 } from "../api/client";
-import { Button, Field, Panel, Pill, SelectRow, SummaryRow } from "../components/ui";
+import { Button, Field, Panel, Pill, SelectRow, SummaryRow, type PillTone } from "../components/ui";
 import {
   activeActors,
   actorCanPayoutCurrency,
@@ -40,12 +45,14 @@ import {
   createInternalTransfer,
   createManagedActor,
   deleteChatGroup,
+  forwardChatMessage,
   isMasterView,
   markOrderPaid,
   postActorJournal,
   postActorWithdrawal,
   pendingCancelledOrderStates,
   receivableBalance,
+  reactToChatMessage,
   remindOrderActor,
   rejectOrderVoid,
   requestOrderVoid,
@@ -65,6 +72,7 @@ import type {
   ActorRecord,
   ActorRole,
   AppScreen,
+  ChatMessageRecord,
   Currency,
   InternalTransferDraft,
   InviteRecord,
@@ -108,6 +116,14 @@ function tone(value: string): "neutral" | "good" | "warn" | "danger" {
   if (["Voided", "Cancelled", "Rejected"].includes(value)) return "danger";
   if (["Assigned", "Pending Forward", "Pending Approval", "Void Requested", "Returned"].includes(value)) return "warn";
   return "neutral";
+}
+
+function orderStatusTone(state: OrderRecord["state"]): PillTone {
+  if (state === "Assigned") return "assigned";
+  if (state === "Returned") return "returned";
+  if (state === "Cancelled") return "cancelled";
+  if (state === "Voided") return "voided";
+  return tone(state);
 }
 
 function orderNumber(order: OrderRecord, session: UserSession): string {
@@ -193,7 +209,7 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
         const payerOptions = activeActors(state).filter((actor) => actor.name !== order.broker && actorCanPayoutCurrency(actor, order.payoutCurrency));
         const stateLabel = isMasterView(session) && order.state === "Assigned" ? `Assigned to ${order.agent}` : order.state;
         return (
-          <Panel key={order.id} title={orderNumber(order, session)} badge={stateLabel}>
+          <Panel key={order.id} title={orderNumber(order, session)} badge={stateLabel} badgeTone={orderStatusTone(order.state)}>
             <Text style={styles.amountLine}>
               {compactAmount(order.sourceCurrency, majorFromMinor(order.sourceAmountMinor, order.sourceCurrency))} to {compactAmount(order.payoutCurrency, majorFromMinor(order.payoutAmountMinor, order.payoutCurrency))}
             </Text>
@@ -305,7 +321,7 @@ export function PendingCancelledScreen({ session, state, offline, onState, onNav
         const payoutActor = payer?.name || (!["Unassigned", "Cancelled", "Forwarded"].includes(order.agent) ? order.agent : "Unassigned");
         const stateLabel = order.state === "Assigned" && payoutActor !== "Unassigned" ? `Assigned to ${payoutActor}` : order.state;
         return (
-          <Panel key={order.id} title={orderNumber(order, session)} badge={stateLabel}>
+          <Panel key={order.id} title={orderNumber(order, session)} badge={stateLabel} badgeTone={orderStatusTone(order.state)}>
             <SummaryRow label="Broker" value={order.broker} />
             <SummaryRow label="Payout actor" value={payoutActor} />
             <SummaryRow label="Amount" value={`${compactAmount(order.sourceCurrency, majorFromMinor(order.sourceAmountMinor, order.sourceCurrency))} to ${compactAmount(order.payoutCurrency, majorFromMinor(order.payoutAmountMinor, order.payoutCurrency))}`} />
@@ -413,16 +429,216 @@ export function ReceivablesScreen({ session, state, offline, onState }: CommonPr
   return <View style={styles.screen}><ScreenTitle title="Receivables" subtitle="Credit orders and loan collections" /><OfflineGuard offline={offline} />{records.map((item) => { const balance = receivableBalance(item); return <Panel key={item.id} title={item.orderId} badge={item.voided ? "Voided" : balance ? "Open" : "Collected"}><SummaryRow label="Borrower" value={item.borrower} /><SummaryRow label="Principal" value={compactAmount(item.currency, majorFromMinor(item.principalMinor, item.currency))} /><SummaryRow label="Collected" value={compactAmount(item.currency, majorFromMinor(item.principalMinor - balance, item.currency))} /><SummaryRow label="Balance" value={compactAmount(item.currency, majorFromMinor(balance, item.currency))} strong />{balance > 0 && !item.voided ? <View style={styles.actionBlock}><Field label="Collection amount" value={amounts[item.id] || ""} onChangeText={(value) => setAmounts((current) => ({ ...current, [item.id]: value }))} keyboardType="decimal-pad" /><Button label="Record collection" loading={busy === item.id} disabled={offline} onPress={() => collect(item.id)} /></View> : null}</Panel>; })}<Panel title="Outstanding totals">{totals.length ? totals.map((item) => <SummaryRow key={item.currency} label={item.currency} value={compactAmount(item.currency, majorFromMinor(item.minor, item.currency))} strong />) : <Text style={styles.muted}>No outstanding receivables.</Text>}</Panel></View>;
 }
 
-export function ChatScreen({ session, state, offline, onState }: CommonProps) {
+const likeReaction = "\uD83D\uDC4D";
+const loveReaction = "\u2764\uFE0F";
+
+function chatMessageSummary(message: ChatMessageRecord | undefined): string {
+  if (!message) return "";
+  if (message.text) return message.text;
+  if (message.kind === "photo") return "Photo";
+  if (message.kind === "voice") return "Voice message";
+  return message.fileName || "Attachment";
+}
+
+export function ChatScreen({ session, state, offline, onState, onRefresh }: CommonProps) {
   const chats = visibleChatsFor(session, state);
   const [chatId, setChatId] = useState(chats[0]?.id || "");
   const [message, setMessage] = useState("");
+  const [replyToId, setReplyToId] = useState("");
+  const [forwardMessageId, setForwardMessageId] = useState("");
   const [groupName, setGroupName] = useState("");
   const [members, setMembers] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  const refreshRef = useRef(onRefresh);
+  refreshRef.current = onRefresh;
   const selected = chats.find((chat) => chat.id === chatId) || chats[0];
-  const run = async (task: () => Promise<WorkspaceState>) => { if (offline) return Alert.alert("Offline", "Reconnect before sending or changing chats."); setBusy(true); try { onState(await task()); } catch (error) { Alert.alert("Chat", errorMessage(error)); } finally { setBusy(false); } };
-  return <View style={styles.screen}><ScreenTitle title="Chat" subtitle="Workspace messages" /><OfflineGuard offline={offline} /><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chatTabs}>{chats.map((chat) => <Pressable key={chat.id} onPress={() => setChatId(chat.id)} style={[styles.choice, selected?.id === chat.id && styles.choiceActive]}><Text style={[styles.choiceText, selected?.id === chat.id && styles.choiceTextActive]}>{chat.name}</Text></Pressable>)}</ScrollView>{selected ? <Panel title={selected.name} badge={selected.type}><View style={styles.messages}>{selected.messages.slice(-50).map((item) => <View key={item.id} style={[styles.message, item.from === session.actorName && styles.myMessage]}><Text style={styles.messageFrom}>{item.from}</Text><Text style={styles.messageText}>{item.text}</Text><Text style={styles.messageTime}>{new Date(item.createdAt).toLocaleString()}</Text></View>)}</View><Field label="Message" value={message} onChangeText={setMessage} multiline /><Button label="Send" icon={<Send size={17} color="#fff" />} loading={busy} disabled={offline || !message.trim()} onPress={() => run(async () => { const next = await sendChatMessage(selected.id, session.actorName, message); setMessage(""); return next; })} />{isMasterView(session) && selected.type === "group" ? <Button label="Delete group" icon={<Trash2 size={17} color={colors.danger} />} variant="danger" disabled={offline} onPress={() => run(() => deleteChatGroup(selected.id))} /> : null}</Panel> : <Panel><Text style={styles.muted}>No conversations yet.</Text></Panel>}{isMasterView(session) ? <Panel title="Create group"><Field label="Group name" value={groupName} onChangeText={setGroupName} /><View style={styles.choiceWrap}>{activeActors(state).filter((actor) => actor.role !== "Master").map((actor) => <Pressable key={actor.id} onPress={() => setMembers((current) => current.includes(actor.name) ? current.filter((name) => name !== actor.name) : [...current, actor.name])} style={[styles.choice, members.includes(actor.name) && styles.choiceActive]}><Text style={[styles.choiceText, members.includes(actor.name) && styles.choiceTextActive]}>{actor.name}</Text></Pressable>)}</View><Button label="Create group" loading={busy} disabled={offline} onPress={() => run(async () => { const next = await createChatGroup(groupName, members); setGroupName(""); setMembers([]); return next; })} /></Panel> : null}</View>;
+  const replyingTo = selected?.messages.find((item) => item.id === replyToId);
+  const forwardingMessage = selected?.messages.find((item) => item.id === forwardMessageId);
+  const chatTitle = (chat: typeof chats[number]) => chat.type === "group"
+    ? chat.name
+    : chat.members.find((name) => name !== session.actorName) || chat.name;
+
+  useEffect(() => {
+    if (offline) return;
+    refreshRef.current();
+    const timer = setInterval(() => {
+      if (!busyRef.current) refreshRef.current();
+    }, 15000);
+    return () => clearInterval(timer);
+  }, [offline]);
+
+  const selectChat = (nextChatId: string) => {
+    setChatId(nextChatId);
+    setReplyToId("");
+    setForwardMessageId("");
+  };
+
+  const run = async (task: () => Promise<WorkspaceState>) => {
+    if (offline) {
+      Alert.alert("Offline", "Reconnect before sending or changing chats.");
+      return;
+    }
+    busyRef.current = true;
+    setBusy(true);
+    try {
+      onState(await task());
+    } catch (error) {
+      Alert.alert("Chat", errorMessage(error));
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  };
+
+  const sendMessage = () => {
+    if (!selected || !message.trim()) return;
+    run(async () => {
+      const next = await sendChatMessage(selected.id, session.actorName, message, replyToId);
+      setMessage("");
+      setReplyToId("");
+      return next;
+    });
+  };
+
+  const forwardTo = (targetChatId: string) => {
+    if (!selected || !forwardMessageId) return;
+    run(async () => {
+      const next = await forwardChatMessage(selected.id, forwardMessageId, targetChatId, session.actorName);
+      setForwardMessageId("");
+      return next;
+    });
+  };
+
+  return (
+    <View style={styles.screen}>
+      <ScreenTitle title="Chat" subtitle="Workspace messages" />
+      <OfflineGuard offline={offline} />
+      <Button label="Refresh messages" icon={<RefreshCw size={17} color={colors.ink} />} variant="secondary" disabled={busy} onPress={onRefresh} />
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chatTabs}>
+        {chats.map((chat) => (
+          <Pressable key={chat.id} onPress={() => selectChat(chat.id)} style={[styles.choice, selected?.id === chat.id && styles.choiceActive]}>
+            <Text style={[styles.choiceText, selected?.id === chat.id && styles.choiceTextActive]}>{chatTitle(chat)}</Text>
+          </Pressable>
+        ))}
+      </ScrollView>
+      {selected ? (
+        <Panel title={chatTitle(selected)} badge={selected.type}>
+          <View style={styles.messages}>
+            {selected.messages.slice(-50).map((item) => {
+              const repliedMessage = selected.messages.find((candidate) => candidate.id === item.replyTo);
+              const myReaction = item.reactions?.[session.actorName];
+              return (
+                <View key={item.id} style={[styles.message, item.from === session.actorName && styles.myMessage]}>
+                  <Text style={styles.messageFrom}>
+                    {item.from}{item.forwardedFrom ? ` - Forwarded from ${item.forwardedFrom}` : ""}
+                  </Text>
+                  {repliedMessage ? (
+                    <View style={styles.messageReply}>
+                      <Text style={styles.messageReplyFrom}>{repliedMessage.from}</Text>
+                      <Text style={styles.messageReplyText} numberOfLines={2}>{chatMessageSummary(repliedMessage)}</Text>
+                    </View>
+                  ) : null}
+                  <Text style={styles.messageText}>{chatMessageSummary(item)}</Text>
+                  {Object.entries(item.reactions || {}).length ? (
+                    <View style={styles.reactionList}>
+                      {Object.entries(item.reactions || {}).map(([name, reaction]) => (
+                        <Text key={name} style={styles.reactionChip}>{reaction} {name}</Text>
+                      ))}
+                    </View>
+                  ) : null}
+                  <Text style={styles.messageTime}>{new Date(item.createdAt).toLocaleString()}</Text>
+                  <View style={styles.messageActions}>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Like message"
+                      disabled={offline || busy}
+                      onPress={() => run(() => reactToChatMessage(selected.id, item.id, session.actorName, likeReaction))}
+                      style={[styles.messageAction, myReaction === likeReaction && styles.messageActionActive]}
+                    >
+                      <ThumbsUp size={14} color={myReaction === likeReaction ? colors.accent : colors.muted} />
+                      <Text style={[styles.messageActionText, myReaction === likeReaction && styles.messageActionTextActive]}>Like</Text>
+                    </Pressable>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Love message"
+                      disabled={offline || busy}
+                      onPress={() => run(() => reactToChatMessage(selected.id, item.id, session.actorName, loveReaction))}
+                      style={[styles.messageAction, myReaction === loveReaction && styles.messageActionActive]}
+                    >
+                      <Heart size={14} color={myReaction === loveReaction ? colors.danger : colors.muted} />
+                      <Text style={[styles.messageActionText, myReaction === loveReaction && styles.messageActionTextActive]}>Love</Text>
+                    </Pressable>
+                    <Pressable accessibilityRole="button" accessibilityLabel="Reply to message" disabled={offline || busy} onPress={() => setReplyToId(item.id)} style={styles.messageAction}>
+                      <Reply size={14} color={colors.muted} />
+                      <Text style={styles.messageActionText}>Reply</Text>
+                    </Pressable>
+                    {isMasterView(session) ? (
+                      <Pressable accessibilityRole="button" accessibilityLabel="Forward message" disabled={offline || busy} onPress={() => setForwardMessageId(item.id)} style={styles.messageAction}>
+                        <ForwardIcon size={14} color={colors.muted} />
+                        <Text style={styles.messageActionText}>Forward</Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
+                </View>
+              );
+            })}
+          </View>
+          {replyingTo ? (
+            <View style={styles.composerPreview}>
+              <View style={styles.composerPreviewText}>
+                <Text style={styles.messageReplyFrom}>Replying to {replyingTo.from}</Text>
+                <Text style={styles.muted} numberOfLines={2}>{chatMessageSummary(replyingTo)}</Text>
+              </View>
+              <Pressable accessibilityRole="button" accessibilityLabel="Cancel reply" onPress={() => setReplyToId("")} style={styles.previewClose}>
+                <X size={17} color={colors.muted} />
+              </Pressable>
+            </View>
+          ) : null}
+          {forwardingMessage && isMasterView(session) ? (
+            <View style={styles.forwardPicker}>
+              <View style={styles.composerPreview}>
+                <View style={styles.composerPreviewText}>
+                  <Text style={styles.messageReplyFrom}>Forward message</Text>
+                  <Text style={styles.muted} numberOfLines={2}>{chatMessageSummary(forwardingMessage)}</Text>
+                </View>
+                <Pressable accessibilityRole="button" accessibilityLabel="Cancel forwarding" onPress={() => setForwardMessageId("")} style={styles.previewClose}>
+                  <X size={17} color={colors.muted} />
+                </Pressable>
+              </View>
+              <Text style={styles.fieldLabel}>Choose destination</Text>
+              <View style={styles.choiceWrap}>
+                {chats.filter((chat) => chat.id !== selected.id).map((chat) => (
+                  <Pressable key={chat.id} disabled={busy} onPress={() => forwardTo(chat.id)} style={styles.choice}>
+                    <Text style={styles.choiceText}>{chatTitle(chat)}</Text>
+                  </Pressable>
+                ))}
+              </View>
+              {chats.length < 2 ? <Text style={styles.muted}>No other chat is available.</Text> : null}
+            </View>
+          ) : null}
+          <Field label="Message" value={message} onChangeText={setMessage} multiline />
+          <Button label="Send" icon={<Send size={17} color="#fff" />} loading={busy} disabled={offline || !message.trim()} onPress={sendMessage} />
+          {isMasterView(session) && selected.type === "group" ? (
+            <Button label="Delete group" icon={<Trash2 size={17} color={colors.danger} />} variant="danger" disabled={offline || busy} onPress={() => run(() => deleteChatGroup(selected.id))} />
+          ) : null}
+        </Panel>
+      ) : <Panel><Text style={styles.muted}>No conversations yet.</Text></Panel>}
+      {isMasterView(session) ? (
+        <Panel title="Create group">
+          <Field label="Group name" value={groupName} onChangeText={setGroupName} />
+          <View style={styles.choiceWrap}>
+            {activeActors(state).filter((actor) => actor.role !== "Master").map((actor) => (
+              <Pressable key={actor.id} onPress={() => setMembers((current) => current.includes(actor.name) ? current.filter((name) => name !== actor.name) : [...current, actor.name])} style={[styles.choice, members.includes(actor.name) && styles.choiceActive]}>
+                <Text style={[styles.choiceText, members.includes(actor.name) && styles.choiceTextActive]}>{actor.name}</Text>
+              </Pressable>
+            ))}
+          </View>
+          <Button label="Create group" loading={busy} disabled={offline} onPress={() => run(async () => { const next = await createChatGroup(groupName, members); setGroupName(""); setMembers([]); return next; })} />
+        </Panel>
+      ) : null}
+    </View>
+  );
 }
 
 export function LedgerScreen({ session, state }: CommonProps) {
@@ -588,6 +804,20 @@ const styles = StyleSheet.create({
   messageFrom: { color: colors.accent, fontSize: 11, fontWeight: "900" },
   messageText: { color: colors.ink, lineHeight: 20 },
   messageTime: { color: colors.muted, fontSize: 10 },
+  messageReply: { borderLeftWidth: 3, borderLeftColor: colors.returned, backgroundColor: colors.panel, borderRadius: radius.sm, padding: spacing.sm, gap: 2 },
+  messageReplyFrom: { color: colors.ink, fontSize: 11, fontWeight: "900" },
+  messageReplyText: { color: colors.muted, fontSize: 12, lineHeight: 17 },
+  reactionList: { flexDirection: "row", flexWrap: "wrap", gap: spacing.xs, paddingTop: spacing.xs },
+  reactionChip: { color: colors.ink, fontSize: 11, backgroundColor: colors.panel, borderWidth: 1, borderColor: colors.line, borderRadius: radius.sm, paddingHorizontal: spacing.sm, paddingVertical: 3 },
+  messageActions: { flexDirection: "row", flexWrap: "wrap", gap: spacing.xs, paddingTop: spacing.xs },
+  messageAction: { minHeight: 32, flexDirection: "row", alignItems: "center", gap: spacing.xs, borderRadius: radius.sm, paddingHorizontal: spacing.sm, backgroundColor: colors.panel, borderWidth: 1, borderColor: colors.line },
+  messageActionActive: { borderColor: colors.accent, backgroundColor: colors.accentSoft },
+  messageActionText: { color: colors.muted, fontSize: 11, fontWeight: "800" },
+  messageActionTextActive: { color: colors.accent },
+  composerPreview: { flexDirection: "row", alignItems: "center", gap: spacing.sm, borderLeftWidth: 3, borderLeftColor: colors.returned, backgroundColor: colors.panel2, borderRadius: radius.sm, padding: spacing.sm },
+  composerPreviewText: { flex: 1, gap: 2 },
+  previewClose: { width: 36, height: 36, alignItems: "center", justifyContent: "center" },
+  forwardPicker: { gap: spacing.sm, borderTopWidth: 1, borderTopColor: colors.line, paddingTop: spacing.md },
   ledgerTable: { minWidth: 940, borderWidth: 1, borderColor: colors.line, borderRadius: radius.md, overflow: "hidden" },
   ledgerRow: { minHeight: 62, flexDirection: "row", alignItems: "center", borderBottomWidth: 1, borderBottomColor: colors.line, backgroundColor: colors.panel },
   ledgerHead: { minHeight: 48, backgroundColor: colors.panel2 },

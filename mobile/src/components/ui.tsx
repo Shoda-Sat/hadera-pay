@@ -13,6 +13,7 @@ import {
 import { colors, radius, shadow, spacing } from "../theme";
 
 type ButtonVariant = "primary" | "secondary" | "danger";
+export type PillTone = "neutral" | "good" | "warn" | "danger" | "assigned" | "returned" | "cancelled" | "voided";
 
 export function BrandHeader({ subtitle }: { subtitle?: string }) {
   return (
@@ -68,11 +69,13 @@ export function Button({
 export function Panel({
   title,
   badge,
+  badgeTone,
   children,
   style
 }: {
   title?: string;
   badge?: string;
+  badgeTone?: PillTone;
   children: React.ReactNode;
   style?: StyleProp<ViewStyle>;
 }) {
@@ -81,7 +84,7 @@ export function Panel({
       {(title || badge) && (
         <View style={styles.panelHead}>
           {title ? <Text style={styles.panelTitle}>{title}</Text> : <View />}
-          {badge ? <Pill label={badge} /> : null}
+          {badge ? <Pill label={badge} tone={badgeTone} /> : null}
         </View>
       )}
       {children}
@@ -155,10 +158,28 @@ export function SelectRow<T extends string>({
   );
 }
 
-export function Pill({ label, tone = "neutral" }: { label: string; tone?: "neutral" | "good" | "warn" | "danger" }) {
+export function Pill({ label, tone = "neutral" }: { label: string; tone?: PillTone }) {
   return (
-    <View style={[styles.pill, tone === "good" && styles.pillGood, tone === "warn" && styles.pillWarn, tone === "danger" && styles.pillDanger]}>
-      <Text style={[styles.pillText, tone === "good" && styles.pillGoodText, tone === "warn" && styles.pillWarnText, tone === "danger" && styles.pillDangerText]}>
+    <View style={[
+      styles.pill,
+      tone === "good" && styles.pillGood,
+      tone === "warn" && styles.pillWarn,
+      tone === "danger" && styles.pillDanger,
+      tone === "assigned" && styles.pillAssigned,
+      tone === "returned" && styles.pillReturned,
+      tone === "cancelled" && styles.pillCancelled,
+      tone === "voided" && styles.pillVoided
+    ]}>
+      <Text style={[
+        styles.pillText,
+        tone === "good" && styles.pillGoodText,
+        tone === "warn" && styles.pillWarnText,
+        tone === "danger" && styles.pillDangerText,
+        tone === "assigned" && styles.pillAssignedText,
+        tone === "returned" && styles.pillReturnedText,
+        tone === "cancelled" && styles.pillCancelledText,
+        tone === "voided" && styles.pillVoidedText
+      ]}>
         {label}
       </Text>
     </View>
@@ -251,7 +272,8 @@ export const styles = StyleSheet.create({
   panelTitle: {
     color: colors.ink,
     fontSize: 16,
-    fontWeight: "900"
+    fontWeight: "900",
+    flexShrink: 1
   },
   field: {
     gap: spacing.sm
@@ -302,6 +324,7 @@ export const styles = StyleSheet.create({
   },
   pill: {
     alignSelf: "flex-start",
+    maxWidth: "62%",
     paddingVertical: 4,
     paddingHorizontal: 9,
     borderRadius: radius.sm,
@@ -316,10 +339,23 @@ export const styles = StyleSheet.create({
   pillDanger: {
     backgroundColor: colors.dangerSoft
   },
+  pillAssigned: {
+    backgroundColor: colors.assignedSoft
+  },
+  pillReturned: {
+    backgroundColor: colors.returnedSoft
+  },
+  pillCancelled: {
+    backgroundColor: colors.cancelledSoft
+  },
+  pillVoided: {
+    backgroundColor: colors.voided
+  },
   pillText: {
     color: colors.accent,
     fontSize: 12,
-    fontWeight: "900"
+    fontWeight: "900",
+    flexShrink: 1
   },
   pillGoodText: {
     color: colors.good
@@ -329,6 +365,18 @@ export const styles = StyleSheet.create({
   },
   pillDangerText: {
     color: colors.danger
+  },
+  pillAssignedText: {
+    color: colors.assigned
+  },
+  pillReturnedText: {
+    color: colors.returned
+  },
+  pillCancelledText: {
+    color: colors.cancelled
+  },
+  pillVoidedText: {
+    color: "#ffffff"
   },
   summaryRow: {
     minHeight: 36,

@@ -244,6 +244,7 @@ export interface ChatMessageRecord {
   kind?: "text" | "photo" | "voice";
   media?: string;
   fileName?: string;
+  forwardedFrom?: string;
   replyTo?: string;
   reactions?: Record<string, string>;
   readBy?: string[];

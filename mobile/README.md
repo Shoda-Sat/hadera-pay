@@ -23,6 +23,8 @@ By default the app talks to `https://haderapay.com`. To point a build at another
 - Saved sender and receiver details for Brokers and Special Brokers.
 - Contact suggestions dismiss when a new name is typed, and returned orders can be corrected and resubmitted with their original number.
 - Master order forwarding, payer payment confirmation, optional proof photos, and void requests.
+- Color-coded Orderbook and Pending & Cancelled statuses for assigned, returned, cancelled, and voided orders.
+- Assignment messages delivered to payout actors, with replies, reactions, and Master message forwarding in chat.
 - Master Pending & Cancelled order view with direct payout-actor reminders.
 - Internal transfers with approval, plus Master journal and withdrawal tools.
 - Workspace search, receivable collections, chats and Master-managed groups.

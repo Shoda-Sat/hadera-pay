@@ -302,6 +302,7 @@ export async function assignOrder(orderId: string, agentId: string, dividerText 
     order.state = "Assigned";
     order.assignedAt = new Date().toISOString();
     order.updatedAt = order.assignedAt;
+    appendOrderAssignmentMessage(state, order, agent);
     const receivable = state.receivables.find((item) => item.orderId === order.id);
     if (receivable) receivable.updatedAt = order.updatedAt;
   });
@@ -655,7 +656,30 @@ function nextChatId(state: WorkspaceState): string {
 
 function nextMessageId(state: WorkspaceState): string {
   state.messageCounter = Number(state.messageCounter || 0) + 1;
-  return `MSG-${state.messageCounter}`;
+  return `MSG-${state.messageCounter}-${Date.now().toString(36)}`;
+}
+
+function appendOrderAssignmentMessage(state: WorkspaceState, order: OrderRecord, payer: ActorRecord): void {
+  ensureDirectChats(state);
+  const master = activeActors(state).find((actor) => actor.role === "Master");
+  const chat = master && state.chatConversations.find((item) =>
+    item.type === "direct" && item.members.includes(master.name) && item.members.includes(payer.name)
+  );
+  if (!master || !chat) throw new Error("The payout actor chat is not available.");
+  const displayNumber = order.agentOrderNumbers?.[payer.name] || order.agentOrderNumber || brokerOrderNumber(order);
+  const payoutCurrency = order.payoutCurrency || order.sourceCurrency;
+  const payoutAmount = majorFromMinor(Number(order.payoutAmountMinor || order.sourceAmountMinor || 0), payoutCurrency);
+  const receiver = order.receiverName || order.accountNumber || order.phoneNumber || "the receiver";
+  chat.messages.push({
+    id: nextMessageId(state),
+    from: master.name,
+    text: `Order ${displayNumber} assigned to you. Pay ${compactAmount(payoutCurrency, payoutAmount)} to ${receiver}.`,
+    kind: "text",
+    replyTo: "",
+    reactions: {},
+    readBy: [master.name],
+    createdAt: order.assignedAt || new Date().toISOString()
+  });
 }
 
 export function ensureDirectChats(state: WorkspaceState): void {
@@ -667,13 +691,52 @@ export function ensureDirectChats(state: WorkspaceState): void {
   });
 }
 
-export async function sendChatMessage(chatId: string, from: string, text: string): Promise<WorkspaceState> {
+export async function sendChatMessage(chatId: string, from: string, text: string, replyTo = ""): Promise<WorkspaceState> {
   return updateWorkspaceState((state) => {
     ensureDirectChats(state);
     const chat = state.chatConversations.find((item) => item.id === chatId);
     const clean = text.trim();
     if (!chat || !clean || !chat.members.includes(from)) throw new Error("Choose a chat and enter a message.");
-    chat.messages.push({ id: nextMessageId(state), from, text: clean, kind: "text", reactions: {}, readBy: [from], createdAt: new Date().toISOString() });
+    const reply = replyTo ? chat.messages.find((item) => item.id === replyTo) : undefined;
+    if (replyTo && !reply) throw new Error("The message being replied to is no longer available.");
+    chat.messages.push({ id: nextMessageId(state), from, text: clean, kind: "text", replyTo: reply?.id || "", reactions: {}, readBy: [from], createdAt: new Date().toISOString() });
+  });
+}
+
+export async function reactToChatMessage(chatId: string, messageId: string, from: string, reaction: string): Promise<WorkspaceState> {
+  return updateWorkspaceState((state) => {
+    const chat = state.chatConversations.find((item) => item.id === chatId);
+    const message = chat?.messages.find((item) => item.id === messageId);
+    if (!chat || !message || !chat.members.includes(from)) throw new Error("This message is no longer available.");
+    message.reactions = { ...(message.reactions || {}) };
+    if (message.reactions[from] === reaction) delete message.reactions[from];
+    else message.reactions[from] = reaction;
+  });
+}
+
+export async function forwardChatMessage(sourceChatId: string, messageId: string, targetChatId: string, from: string): Promise<WorkspaceState> {
+  return updateWorkspaceState((state) => {
+    ensureDirectChats(state);
+    const master = activeActors(state).find((actor) => actor.role === "Master" && actor.name === from);
+    const source = state.chatConversations.find((item) => item.id === sourceChatId);
+    const target = state.chatConversations.find((item) => item.id === targetChatId);
+    const message = source?.messages.find((item) => item.id === messageId);
+    if (!master || !source || !target || !message || source.id === target.id || !source.members.includes(from) || !target.members.includes(from)) {
+      throw new Error("Choose another chat to forward this message.");
+    }
+    target.messages.push({
+      id: nextMessageId(state),
+      from,
+      text: message.text || "",
+      kind: message.kind || (message.media ? "photo" : "text"),
+      media: message.media || "",
+      fileName: message.fileName || "",
+      forwardedFrom: message.from,
+      replyTo: "",
+      reactions: {},
+      readBy: [from],
+      createdAt: new Date().toISOString()
+    });
   });
 }
 
