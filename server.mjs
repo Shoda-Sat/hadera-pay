@@ -356,6 +356,7 @@ function recordTimestamp(item = {}) {
     new Date(item.voidRequestedAt || 0).getTime(),
     new Date(item.voidRejectedAt || 0).getTime(),
     new Date(item.voidedAt || 0).getTime(),
+    new Date(item.archivedAt || 0).getTime(),
     new Date(item.updatedAt || 0).getTime(),
     new Date(item.reversedAt || 0).getTime(),
     new Date(item.paidAt || 0).getTime(),
@@ -442,6 +443,13 @@ function mergeTransfers(existingItems = [], incomingItems = []) {
     if (item.reversedAt && !next.reversedAt) next.reversedAt = item.reversedAt;
     if (previous.reversedBy && !next.reversedBy) next.reversedBy = previous.reversedBy;
     if (item.reversedBy && !next.reversedBy) next.reversedBy = item.reversedBy;
+    const archivedActorIds = Array.from(new Set([...(previous.archivedActorIds || []), ...(item.archivedActorIds || [])]));
+    const archivedActorNames = Array.from(new Set([...(previous.archivedActorNames || []), ...(item.archivedActorNames || [])]));
+    if (archivedActorIds.length) next.archivedActorIds = archivedActorIds;
+    if (archivedActorNames.length) next.archivedActorNames = archivedActorNames;
+    next.archiveIdsByActor = { ...(previous.archiveIdsByActor || {}), ...(item.archiveIdsByActor || {}) };
+    const archivedDates = [previous.archivedAt, item.archivedAt].filter(Boolean).sort();
+    if (archivedDates.length) next.archivedAt = archivedDates[0];
     if (previous.state === "Reversed" || item.state === "Reversed" || next.reversalJournal) {
       next.state = "Reversed";
     } else if ((previous.state === "Approved" || item.state === "Approved") && next.journal) {
@@ -538,6 +546,7 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   nextState.ledger = mergeByKey(currentState.ledger, incomingState.ledger, (line) =>
     [line.journal, line.source, line.account, line.direction, line.currency, line.amountMinor, line.postedAt].join(":")
   );
+  nextState.masterBankEntries = mergeById(currentState.masterBankEntries, incomingState.masterBankEntries);
   nextState.archives = mergeByKey(currentState.archives, incomingState.archives, (archive) =>
     archive.id || [archive.actor, archive.closedAt, archive.closedBy].join(":")
   );
@@ -584,6 +593,7 @@ function resetWorkspaceState(db, workspaceId, scope = "data") {
     receivables: [],
     transfers: [],
     ledger: [],
+    masterBankEntries: [],
     archives: [],
     settlements: scope === "wipe"
       ? []

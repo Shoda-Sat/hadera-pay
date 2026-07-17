@@ -767,6 +767,47 @@
       display: none;
     }
 
+    .master-bank-section {
+      border-top: 1px solid var(--line);
+    }
+
+    .master-bank-section.collapsed .master-bank-body {
+      display: none;
+    }
+
+    .master-bank-body {
+      display: grid;
+      gap: 16px;
+      padding-top: 14px;
+    }
+
+    .master-bank-balances {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .master-bank-toolbar {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .master-bank-toolbar .field {
+      min-width: 190px;
+    }
+
+    .master-bank-table {
+      min-width: 900px;
+    }
+
+    .master-bank-amount {
+      white-space: nowrap;
+      font-weight: 800;
+    }
+
     .trial-balance-section {
       border-top: 1px solid var(--line);
     }
@@ -2689,6 +2730,53 @@
                 </table>
               </div>
             </div>
+            <div class="panel-body master-bank-section collapsed" id="masterBankSection" data-master-action>
+              <button class="income-toggle" id="masterBankToggle" type="button">
+                Master Bank Account
+                <span id="masterBankToggleText">Expand</span>
+              </button>
+              <div class="master-bank-body" id="masterBankBody">
+                <div class="master-bank-balances" id="masterBankBalances"></div>
+                <form id="masterBankFundingForm">
+                  <div class="form-grid">
+                    <div class="field">
+                      <label for="masterBankFundingCurrency">Funding currency</label>
+                      <select id="masterBankFundingCurrency"></select>
+                    </div>
+                    <div class="field">
+                      <label for="masterBankFundingAmount">Funding amount</label>
+                      <input id="masterBankFundingAmount" inputmode="decimal" placeholder="0.00">
+                    </div>
+                    <div class="field full">
+                      <label for="masterBankFundingReason">Reason</label>
+                      <textarea id="masterBankFundingReason" placeholder="State the funding reason"></textarea>
+                    </div>
+                    <div class="field full">
+                      <span class="field-error" id="masterBankFundingError">Enter an amount and reason.</span>
+                    </div>
+                  </div>
+                  <div class="actions">
+                    <button class="btn primary" type="submit">Fund Account</button>
+                  </div>
+                </form>
+                <div class="master-bank-toolbar">
+                  <div class="field">
+                    <label for="masterBankMonth">Statement month</label>
+                    <input id="masterBankMonth" type="month">
+                  </div>
+                  <button class="btn secondary" id="exportMasterBankStatementButton" type="button">Export Monthly Statement</button>
+                </div>
+                <div class="table-wrap">
+                  <table class="master-bank-table">
+                    <thead>
+                      <tr><th>Date</th><th>Type</th><th>Reference</th><th>Details</th><th>Money In</th><th>Money Out</th><th>Running Balance</th></tr>
+                    </thead>
+                    <tbody id="masterBankRows"></tbody>
+                  </table>
+                </div>
+                <div class="master-bank-balances" id="masterBankPeriodTotals"></div>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -3191,6 +3279,7 @@
       invitePanelExpanded: true,
       settingsPanels: normalizeSettingsPanels(),
       incomeStatementExpanded: false,
+      masterBankExpanded: false,
       trialBalanceExpanded: true,
       buyingRates: normalizeBuyingRates(),
       journalCounter: 0,
@@ -3218,6 +3307,7 @@
       receivables: [],
       transfers: [],
       ledger: [],
+      masterBankEntries: [],
       settlements: [],
       masterRateDivisorSettings: {},
       archives: []
@@ -3236,6 +3326,7 @@
           receivables: Array.isArray(saved.receivables) ? saved.receivables : [],
           transfers: normalizeTransfers(Array.isArray(saved.transfers) ? saved.transfers : []),
           ledger: Array.isArray(saved.ledger) ? saved.ledger : [],
+          masterBankEntries: normalizeMasterBankEntries(saved.masterBankEntries),
           settlements: Array.isArray(saved.settlements) ? saved.settlements : [],
           masterRateDivisorSettings: normalizeCurrencyRateSettings(saved.masterRateDivisorSettings || {}),
           buyingRates: normalizeBuyingRates(saved.buyingRates || { eurToUsdDivider: saved.eurToUsdDivider }),
@@ -3342,6 +3433,18 @@
       );
     }
 
+    function normalizeMasterBankEntries(entries) {
+      return (Array.isArray(entries) ? entries : [])
+        .filter((entry) =>
+          entry &&
+          typeof entry.id === "string" &&
+          ["Credit", "Debit"].includes(entry.direction) &&
+          supportedCurrencies.includes(entry.currency) &&
+          Number(entry.amountMinor) > 0
+        )
+        .map((entry) => ({ ...entry, amountMinor: Number(entry.amountMinor) }));
+    }
+
     function normalizeSavedCustomers(customers) {
       const clean = (value) => String(value ?? "").trim();
       return (Array.isArray(customers) ? customers : [])
@@ -3435,6 +3538,7 @@
         new Date(item.voidRequestedAt || 0).getTime(),
         new Date(item.voidRejectedAt || 0).getTime(),
         new Date(item.voidedAt || 0).getTime(),
+        new Date(item.archivedAt || 0).getTime(),
         new Date(item.updatedAt || 0).getTime(),
         new Date(item.reversedAt || 0).getTime(),
         new Date(item.paidAt || 0).getTime(),
@@ -3521,6 +3625,13 @@
         if (item.reversedAt && !next.reversedAt) next.reversedAt = item.reversedAt;
         if (previous.reversedBy && !next.reversedBy) next.reversedBy = previous.reversedBy;
         if (item.reversedBy && !next.reversedBy) next.reversedBy = item.reversedBy;
+        const archivedActorIds = Array.from(new Set([...(previous.archivedActorIds || []), ...(item.archivedActorIds || [])]));
+        const archivedActorNames = Array.from(new Set([...(previous.archivedActorNames || []), ...(item.archivedActorNames || [])]));
+        if (archivedActorIds.length) next.archivedActorIds = archivedActorIds;
+        if (archivedActorNames.length) next.archivedActorNames = archivedActorNames;
+        next.archiveIdsByActor = { ...(previous.archiveIdsByActor || {}), ...(item.archiveIdsByActor || {}) };
+        const archivedDates = [previous.archivedAt, item.archivedAt].filter(Boolean).sort();
+        if (archivedDates.length) next.archivedAt = archivedDates[0];
         if (previous.state === "Reversed" || item.state === "Reversed" || next.reversalJournal) {
           next.state = "Reversed";
         } else if ((previous.state === "Approved" || item.state === "Approved") && next.journal) {
@@ -3585,6 +3696,7 @@
       state.receivables = mergeReceivables(state.receivables, remoteState.receivables || []);
       state.transfers = normalizeTransfers(mergeTransfers(state.transfers, remoteState.transfers || []));
       state.ledger = mergeLedgerLines(state.ledger, remoteState.ledger || []);
+      state.masterBankEntries = normalizeMasterBankEntries(mergeById(state.masterBankEntries, remoteState.masterBankEntries || []));
       state.settlements = Array.isArray(remoteState.settlements) ? remoteState.settlements : state.settlements;
       state.archives = mergeById(state.archives, remoteState.archives || []);
       state.chatConversations = mergeChatConversations(state.chatConversations, remoteState.chatConversations || [])
@@ -3740,6 +3852,7 @@
         actors: normalizeActors(Array.isArray(nextState.actors) ? nextState.actors : structuredClone(defaultState.actors)),
         receivables: Array.isArray(nextState.receivables) ? nextState.receivables : [],
         transfers: normalizeTransfers(Array.isArray(nextState.transfers) ? nextState.transfers : []),
+        masterBankEntries: normalizeMasterBankEntries(nextState.masterBankEntries),
       });
       state.orderCounter = Math.max(Number(state.orderCounter || 0), nextOrderNumberFromOrders() - 1);
       state.receivableCounter = Math.max(Number(state.receivableCounter || 0), nextReceivableNumberFromReceivables() - 1);
@@ -3842,6 +3955,19 @@
       incomeStatementToggleText: document.getElementById("incomeStatementToggleText"),
       incomeBaseCurrencyHead: document.getElementById("incomeBaseCurrencyHead"),
       incomeStatementRows: document.getElementById("incomeStatementRows"),
+      masterBankSection: document.getElementById("masterBankSection"),
+      masterBankToggle: document.getElementById("masterBankToggle"),
+      masterBankToggleText: document.getElementById("masterBankToggleText"),
+      masterBankBalances: document.getElementById("masterBankBalances"),
+      masterBankFundingForm: document.getElementById("masterBankFundingForm"),
+      masterBankFundingCurrency: document.getElementById("masterBankFundingCurrency"),
+      masterBankFundingAmount: document.getElementById("masterBankFundingAmount"),
+      masterBankFundingReason: document.getElementById("masterBankFundingReason"),
+      masterBankFundingError: document.getElementById("masterBankFundingError"),
+      masterBankMonth: document.getElementById("masterBankMonth"),
+      exportMasterBankStatementButton: document.getElementById("exportMasterBankStatementButton"),
+      masterBankRows: document.getElementById("masterBankRows"),
+      masterBankPeriodTotals: document.getElementById("masterBankPeriodTotals"),
       exportLedgerExcelButton: document.getElementById("exportLedgerExcelButton"),
       exportLedgerPdfButton: document.getElementById("exportLedgerPdfButton"),
       ledgerExportOrderedAmount: document.getElementById("ledgerExportOrderedAmount"),
@@ -5209,6 +5335,137 @@
       return entryId;
     }
 
+    function masterBankSignedMinor(entry) {
+      return entry.direction === "Credit" ? Number(entry.amountMinor || 0) : -Number(entry.amountMinor || 0);
+    }
+
+    function recordMasterBankEntry(entry) {
+      state.masterBankEntries = normalizeMasterBankEntries(state.masterBankEntries);
+      if (!entry?.id || state.masterBankEntries.some((item) => item.id === entry.id)) return false;
+      const normalized = normalizeMasterBankEntries([entry])[0];
+      if (!normalized) return false;
+      state.masterBankEntries.unshift(normalized);
+      return true;
+    }
+
+    function syncMasterBankAccount() {
+      state.masterBankEntries = normalizeMasterBankEntries(state.masterBankEntries);
+      const master = masterActor();
+      const masterNames = new Set(["Master", master?.name].filter(Boolean));
+      const isMasterName = (name) => masterNames.has(name);
+      const transfersById = new Map();
+      state.transfers.forEach((transfer) => transfersById.set(transfer.id, transfer));
+      state.archives.forEach((archive) => {
+        (archive.transfers || []).forEach((transfer) => {
+          transfersById.set(transfer.id, { ...(transfersById.get(transfer.id) || {}), ...transfer });
+        });
+      });
+
+      transfersById.forEach((transfer) => {
+        if (!transfer?.id || !transfer.journal || !["Approved", "Reversed"].includes(transfer.state)) return;
+        const details = transfer.details || transferLedgerDetails(transfer);
+        const postedAt = transfer.paidOutAt || transfer.approvedAt || transfer.sentAt || transfer.createdAt || new Date(0).toISOString();
+        const sourceCurrency = transfer.sourceCurrency || transfer.currency || "USD";
+        const payoutCurrency = transfer.currency || sourceCurrency;
+        const sourceAmountMinor = Number(transfer.sourceAmountMinor || transfer.amountMinor || 0);
+        const payoutAmountMinor = Number(transfer.amountMinor || 0);
+        if (isMasterName(transfer.to) && !isMasterName(transfer.from)) {
+          recordMasterBankEntry({
+            id: `BANK-TRANSFER-${transfer.id}-IN`,
+            type: "Transfer In",
+            reference: transfer.id,
+            direction: "Credit",
+            currency: payoutCurrency,
+            amountMinor: payoutAmountMinor,
+            details,
+            postedAt
+          });
+        } else if (isMasterName(transfer.from) && !isMasterName(transfer.to)) {
+          recordMasterBankEntry({
+            id: `BANK-TRANSFER-${transfer.id}-OUT`,
+            type: "Transfer Out",
+            reference: transfer.id,
+            direction: "Debit",
+            currency: sourceCurrency,
+            amountMinor: sourceAmountMinor,
+            details,
+            postedAt
+          });
+          if (transfer.reversalJournal) {
+            recordMasterBankEntry({
+              id: `BANK-TRANSFER-${transfer.id}-REVERSAL`,
+              type: "Transfer Reversal",
+              reference: transfer.reversalJournal,
+              direction: "Credit",
+              currency: sourceCurrency,
+              amountMinor: sourceAmountMinor,
+              details: `Reversal of ${transfer.id}${details ? ` - ${details}` : ""}`,
+              postedAt: transfer.reversedAt || postedAt
+            });
+          }
+        } else if (!isMasterName(transfer.from) && !isMasterName(transfer.to)) {
+          const commissionMinor = transferCommissionMinor(transfer);
+          if (commissionMinor > 0) {
+            recordMasterBankEntry({
+              id: `BANK-TRANSFER-${transfer.id}-FEE`,
+              type: "Transfer Fee Expense",
+              reference: transfer.id,
+              direction: "Debit",
+              currency: sourceCurrency,
+              amountMinor: commissionMinor,
+              details: `Fee expense for ${transfer.from} to ${transfer.to}${transfer.remarks ? ` - ${transfer.remarks}` : ""}`,
+              postedAt
+            });
+          }
+        }
+      });
+
+      state.ledger.filter((line) => line.source === "JOURNAL").forEach((line) => {
+        recordMasterBankEntry({
+          id: `BANK-JOURNAL-${line.entryId || line.journal}`,
+          type: "Journal",
+          reference: line.entryId || line.journal,
+          direction: "Debit",
+          currency: line.sourceCurrency || line.currency,
+          amountMinor: Number(line.sourceAmountMinor || line.amountMinor || 0),
+          details: line.details || "Master journal to Actor",
+          postedAt: line.postedAt || new Date(0).toISOString()
+        });
+      });
+
+      state.ledger
+        .filter((line) => line.source === "WITHDRAWAL" && line.direction === "Credit" && actorNameFromAccount(line.account))
+        .forEach((line) => {
+          recordMasterBankEntry({
+            id: `BANK-WITHDRAWAL-${line.entryId || line.journal}`,
+            type: "Withdrawal",
+            reference: line.entryId || line.journal,
+            direction: "Credit",
+            currency: line.currency,
+            amountMinor: Number(line.amountMinor || 0),
+            details: line.details || "Withdrawal from Actor",
+            postedAt: line.postedAt || new Date(0).toISOString()
+          });
+        });
+
+      state.archives.forEach((archive) => {
+        const archivedActor = state.actors.find((actor) => actor.id === archive.actorId || actor.name === archive.actor);
+        const actorRole = archive.actorRole || archivedActor?.role || "";
+        const incomeProfitMinor = Number(archive.incomeProfitMinor || 0);
+        if (!["Agent", "Special Agent"].includes(actorRole) || incomeProfitMinor === 0) return;
+        recordMasterBankEntry({
+          id: `BANK-INCOME-${archive.id}`,
+          type: "Income Statement Close",
+          reference: archive.id,
+          direction: incomeProfitMinor > 0 ? "Credit" : "Debit",
+          currency: archive.incomeProfitCurrency || "USD",
+          amountMinor: Math.abs(incomeProfitMinor),
+          details: `${archive.actor} closed Income Statement`,
+          postedAt: archive.closedAt || new Date(0).toISOString()
+        });
+      });
+    }
+
     function fillTransferForm(transfer) {
       transferConversionTouches = [];
       els.transferFrom.value = transfer.from;
@@ -6223,7 +6480,8 @@
             ...result.state,
             actors: normalizeActors(Array.isArray(result.state.actors) ? result.state.actors : structuredClone(defaultState.actors)),
             receivables: Array.isArray(result.state.receivables) ? result.state.receivables : [],
-            transfers: normalizeTransfers(Array.isArray(result.state.transfers) ? result.state.transfers : [])
+            transfers: normalizeTransfers(Array.isArray(result.state.transfers) ? result.state.transfers : []),
+            masterBankEntries: normalizeMasterBankEntries(result.state.masterBankEntries)
           });
           renderAll();
         }
@@ -6240,6 +6498,7 @@
       state.receivables = [];
       state.transfers = [];
       state.ledger = [];
+      state.masterBankEntries = [];
       state.archives = [];
       state.journalCounter = 0;
       state.orderCounter = 0;
@@ -8020,8 +8279,11 @@
         : state.orders.filter((order) => order.broker === actor.name || order.agent === actor.name))
         .map((order) => orderSearchResult(order, actor));
       const transferResults = (viewerIsMaster
-        ? state.transfers
-        : state.transfers.filter((transfer) => transfer.from === actor.name || transfer.to === actor.name))
+        ? state.transfers.filter((transfer) => !transferBalanceWasClosed(transfer))
+        : state.transfers.filter((transfer) =>
+            (transfer.from === actor.name || transfer.to === actor.name) &&
+            !transferArchivedForActor(transfer, actor)
+          ))
         .map((transfer) => transferSearchResult(transfer));
       const ledgerResults = (viewerIsMaster
         ? activeLedgerLines(state.ledger)
@@ -8369,11 +8631,132 @@
       `;
     }
 
+    function masterBankEntriesWithRunningBalances() {
+      const runningByCurrency = {};
+      return normalizeMasterBankEntries(state.masterBankEntries)
+        .slice()
+        .sort((a, b) => {
+          const timeDifference = new Date(a.postedAt || 0).getTime() - new Date(b.postedAt || 0).getTime();
+          return timeDifference || String(a.id).localeCompare(String(b.id));
+        })
+        .map((entry) => {
+          runningByCurrency[entry.currency] = (runningByCurrency[entry.currency] || 0) + masterBankSignedMinor(entry);
+          return { ...entry, runningMinor: runningByCurrency[entry.currency] };
+        });
+    }
+
+    function masterBankMonthKey(entry) {
+      return String(entry?.postedAt || "").slice(0, 7);
+    }
+
+    function selectedMasterBankStatementRows() {
+      const month = els.masterBankMonth.value;
+      return masterBankEntriesWithRunningBalances()
+        .filter((entry) => !month || masterBankMonthKey(entry) === month);
+    }
+
+    function bankBalancePill(currency, amountMinor, label = "Balance") {
+      const className = amountMinor > 0 ? "good" : amountMinor < 0 ? "danger" : "";
+      return `<span class="state-pill ${className}">${escapeHtml(label)} ${escapeHtml(currency)}: ${escapeHtml(signedMoney(currency, amountMinor))}</span>`;
+    }
+
+    function renderMasterBankAccount() {
+      const isMaster = selectedActor()?.role === "Master";
+      els.masterBankSection.classList.toggle("hidden", !isMaster);
+      if (!isMaster) return;
+      els.masterBankSection.classList.toggle("collapsed", state.masterBankExpanded !== true);
+      els.masterBankToggleText.textContent = state.masterBankExpanded === true ? "Collapse" : "Expand";
+
+      const currentFundingCurrency = els.masterBankFundingCurrency.value;
+      els.masterBankFundingCurrency.innerHTML = supportedCurrencies.map((currency) => `<option>${currency}</option>`).join("");
+      els.masterBankFundingCurrency.value = supportedCurrencies.includes(currentFundingCurrency) ? currentFundingCurrency : masterBaseCurrency();
+
+      const allRows = masterBankEntriesWithRunningBalances();
+      const balances = allRows.reduce((totals, entry) => {
+        totals[entry.currency] = entry.runningMinor;
+        return totals;
+      }, {});
+      els.masterBankBalances.innerHTML = supportedCurrencies
+        .map((currency) => bankBalancePill(currency, balances[currency] || 0))
+        .join("");
+
+      if (!els.masterBankMonth.value) {
+        const availableMonths = Array.from(new Set(allRows.map(masterBankMonthKey).filter(Boolean))).sort().reverse();
+        const currentMonth = new Date().toISOString().slice(0, 7);
+        els.masterBankMonth.value = availableMonths.includes(currentMonth) ? currentMonth : availableMonths[0] || currentMonth;
+      }
+      const rows = selectedMasterBankStatementRows();
+      els.exportMasterBankStatementButton.disabled = rows.length === 0;
+      els.masterBankRows.innerHTML = rows.length
+        ? rows.slice().reverse().map((entry) => {
+            const isCredit = entry.direction === "Credit";
+            return `
+              <tr>
+                <td>${escapeHtml(displayDate(entry.postedAt))}</td>
+                <td>${escapeHtml(entry.type)}</td>
+                <td><strong>${escapeHtml(entry.reference || entry.id)}</strong></td>
+                <td>${escapeHtml(entry.details || "")}</td>
+                <td class="master-bank-amount ${isCredit ? toneClass("credit") : ""}">${isCredit ? money(entry.currency, entry.amountMinor) : ""}</td>
+                <td class="master-bank-amount ${!isCredit ? toneClass("debit") : ""}">${!isCredit ? money(entry.currency, entry.amountMinor) : ""}</td>
+                <td class="master-bank-amount ${entry.runningMinor >= 0 ? toneClass("credit") : toneClass("debit")}">${escapeHtml(signedMoney(entry.currency, entry.runningMinor))}</td>
+              </tr>
+            `;
+          }).join("")
+        : '<tr><td colspan="7">No Master Bank Account transactions for this month.</td></tr>';
+
+      const periodTotals = rows.reduce((totals, entry) => {
+        totals[entry.currency] ||= { credit: 0, debit: 0 };
+        totals[entry.currency][entry.direction === "Credit" ? "credit" : "debit"] += entry.amountMinor;
+        return totals;
+      }, {});
+      els.masterBankPeriodTotals.innerHTML = supportedCurrencies
+        .filter((currency) => periodTotals[currency])
+        .map((currency) => {
+          const totals = periodTotals[currency];
+          const net = totals.credit - totals.debit;
+          return `<span class="state-pill ${net >= 0 ? "good" : "danger"}">${escapeHtml(currency)} In ${escapeHtml(formatMinor(totals.credit, currency))} / Out ${escapeHtml(formatMinor(totals.debit, currency))} / Net ${escapeHtml(formatMinor(net, currency))}</span>`;
+        }).join("");
+    }
+
+    function exportMasterBankStatement() {
+      const rows = selectedMasterBankStatementRows();
+      if (!rows.length) return;
+      const month = els.masterBankMonth.value || "all";
+      const tableRows = rows.map((entry) => `
+        <tr>
+          <td>${escapeHtml(displayDate(entry.postedAt))}</td>
+          <td>${escapeHtml(entry.type)}</td>
+          <td>${escapeHtml(entry.reference || entry.id)}</td>
+          <td>${escapeHtml(entry.details || "")}</td>
+          <td>${escapeHtml(entry.currency)}</td>
+          <td>${entry.direction === "Credit" ? escapeHtml(formatMinor(entry.amountMinor, entry.currency)) : ""}</td>
+          <td>${entry.direction === "Debit" ? escapeHtml(formatMinor(entry.amountMinor, entry.currency)) : ""}</td>
+          <td>${escapeHtml(formatMinor(entry.runningMinor, entry.currency))}</td>
+        </tr>
+      `).join("");
+      const html = `
+        <html>
+          <head><meta charset="utf-8"></head>
+          <body>
+            <h2>Master Bank Account - ${escapeHtml(month)}</h2>
+            <table border="1">
+              <thead><tr><th>Date</th><th>Type</th><th>Reference</th><th>Details</th><th>Currency</th><th>Money In</th><th>Money Out</th><th>Running Balance</th></tr></thead>
+              <tbody>${tableRows}</tbody>
+            </table>
+          </body>
+        </html>
+      `;
+      downloadBlob(new Blob([html], { type: "application/vnd.ms-excel;charset=utf-8" }), `master-bank-statement-${safeFilename(month)}.xls`);
+    }
+
     function renderTransfers() {
       const actor = selectedActor();
       const visibleTransfers = actor?.role === "Master"
-        ? state.transfers
-        : state.transfers.filter((transfer) => transfer.from === actor?.name || transfer.to === actor?.name);
+        ? state.transfers.filter((transfer) => !transferBalanceWasClosed(transfer))
+        : state.transfers.filter((transfer) =>
+            (transfer.from === actor?.name || transfer.to === actor?.name) &&
+            !transferArchivedForActor(transfer, actor)
+          );
       if (visibleTransfers.length === 0) {
         els.transferList.innerHTML = '<div class="empty">No pending transfer approvals.</div>';
         els.metricApprovals.textContent = "0";
@@ -8385,6 +8768,7 @@
           transfer.state === "Approved" &&
           transfer.journal &&
           !transfer.reversalJournal &&
+          !transferBalanceWasClosed(transfer) &&
           transferWasSentByMaster(transfer);
         const canUpdate = actor?.name === transfer.from && transfer.state === "Returned";
         const actionHtml = canApprove
@@ -8753,11 +9137,39 @@
       return transfer.from === master.name || transfer.initiatedBy === master.name;
     }
 
+    function transferArchivedForActor(transfer, actor) {
+      if (!transfer || !actor) return false;
+      return (transfer.archivedActorIds || []).includes(actor.id) ||
+        (transfer.archivedActorNames || []).includes(actor.name);
+    }
+
+    function transferBalanceWasClosed(transfer) {
+      return Boolean(transfer?.archivedAt || transfer?.archivedActorIds?.length || transfer?.archivedActorNames?.length);
+    }
+
+    function syncClosedTransferArchiveMarkers() {
+      const transfersById = new Map(state.transfers.map((transfer) => [transfer.id, transfer]));
+      state.archives.forEach((archive) => {
+        const archiveActor = state.actors.find((actor) => actor.id === archive.actorId || actor.name === archive.actor);
+        (archive.transfers || []).forEach((snapshot) => {
+          const transfer = transfersById.get(snapshot.id);
+          if (!transfer) return;
+          const actorId = archive.actorId || archiveActor?.id || "";
+          const actorName = archive.actor || archiveActor?.name || snapshot.actor || "";
+          if (actorId) transfer.archivedActorIds = Array.from(new Set([...(transfer.archivedActorIds || []), actorId]));
+          if (actorName) transfer.archivedActorNames = Array.from(new Set([...(transfer.archivedActorNames || []), actorName]));
+          transfer.archivedAt ||= archive.closedAt || snapshot.archivedAt || new Date(0).toISOString();
+          transfer.archiveIdsByActor = { ...(transfer.archiveIdsByActor || {}), ...(actorId ? { [actorId]: archive.id } : {}) };
+        });
+      });
+    }
+
     function reverseMasterTransferOnce(transfer, actorName = "Master") {
       if (!transfer ||
         transfer.state !== "Approved" ||
         !transfer.journal ||
         transfer.reversalJournal ||
+        transferBalanceWasClosed(transfer) ||
         !transferWasSentByMaster(transfer) ||
         processingTransferIds.has(transfer.id)) return false;
       const originalLines = activeLedgerLines(state.ledger).filter((line) =>
@@ -8975,11 +9387,14 @@
         actor: actorName,
         from: transfer.from,
         to: transfer.to,
+        initiatedBy: transfer.initiatedBy || transfer.from || "",
         sourceCurrency: transfer.sourceCurrency || transfer.currency || "USD",
         sourceAmountMinor: Number(transfer.sourceAmountMinor || transfer.amountMinor || 0),
         currency: transfer.currency || transfer.sourceCurrency || "USD",
         amountMinor: Number(transfer.amountMinor || 0),
         rate: transfer.rate || "1",
+        commissionPercent: transferCommissionPercent(transfer),
+        commissionMinor: transferCommissionMinor(transfer),
         remarks: transfer.remarks || "",
         state: transfer.state,
         journal: transfer.journal || "",
@@ -9076,7 +9491,8 @@
       );
       const archivedTransfers = state.transfers.filter((transfer) =>
         ["Approved", "Reversed"].includes(transfer.state) &&
-        (transfer.from === actor.name || transfer.to === actor.name)
+        (transfer.from === actor.name || transfer.to === actor.name) &&
+        !transferArchivedForActor(transfer, actor)
       );
       const collectedReceivables = state.receivables.filter((receivable) =>
         !receivable.archivedAt &&
@@ -9101,6 +9517,8 @@
         state.archives.unshift({
           id: archiveId,
           actor: actor.name,
+          actorId: actor.id,
+          actorRole: actor.role,
           closedAt,
           balances: previousBalances,
           incomeProfitMinor,
@@ -9121,10 +9539,18 @@
         !(order.state === "Paid" || order.state === "Voided") ||
         (order.broker !== actor.name && order.agent !== actor.name)
       );
-      state.transfers = state.transfers.filter((transfer) =>
-        !["Approved", "Reversed"].includes(transfer.state) ||
-        (transfer.from !== actor.name && transfer.to !== actor.name)
-      );
+      const archivedTransferIds = new Set(archivedTransfers.map((transfer) => transfer.id));
+      state.transfers = state.transfers.map((transfer) => {
+        if (!archivedTransferIds.has(transfer.id)) return transfer;
+        return {
+          ...transfer,
+          archivedAt: transfer.archivedAt || closedAt,
+          archivedActorIds: Array.from(new Set([...(transfer.archivedActorIds || []), actor.id])),
+          archivedActorNames: Array.from(new Set([...(transfer.archivedActorNames || []), actor.name])),
+          archiveIdsByActor: { ...(transfer.archiveIdsByActor || {}), [actor.id]: archiveId },
+          updatedAt: closedAt
+        };
+      });
       const collectedReceivableIds = new Set(collectedReceivables.map((receivable) => receivable.id));
       state.receivables = state.receivables.map((receivable) =>
         collectedReceivableIds.has(receivable.id)
@@ -10050,6 +10476,16 @@
       saveState();
     });
 
+    els.masterBankToggle.addEventListener("click", () => {
+      if (selectedActor()?.role !== "Master") return;
+      state.masterBankExpanded = state.masterBankExpanded !== true;
+      renderMasterBankAccount();
+      saveState();
+    });
+
+    els.masterBankMonth.addEventListener("change", renderMasterBankAccount);
+    els.exportMasterBankStatementButton.addEventListener("click", exportMasterBankStatement);
+
     els.trialBalanceToggle?.addEventListener("click", () => {
       state.trialBalanceExpanded = state.trialBalanceExpanded === false;
       renderTrialBalance();
@@ -10362,6 +10798,39 @@
         els.ledgerJournalRemarks.value = "";
         els.ledgerJournalError.classList.remove("visible");
         notifyEvent("Journal posted", `${entryId} added to ${actorName}.`);
+        renderAll();
+      });
+    });
+
+    els.masterBankFundingForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const actor = selectedActor();
+      if (actor?.role !== "Master") return;
+      const currency = els.masterBankFundingCurrency.value;
+      const amountMinor = parseMoney(els.masterBankFundingAmount.value, currency);
+      const reason = els.masterBankFundingReason.value.trim();
+      const invalid = !supportedCurrencies.includes(currency) || amountMinor <= 0 || !reason;
+      els.masterBankFundingError.textContent = !reason ? "State a funding reason." : "Enter a funding amount greater than zero.";
+      els.masterBankFundingError.classList.toggle("visible", invalid);
+      if (invalid) return;
+      confirmAction(`Fund the Master Bank Account with ${money(currency, amountMinor)}?`, () => {
+        const postedAt = new Date().toISOString();
+        const reference = `FUND-${Date.now()}`;
+        recordMasterBankEntry({
+          id: `BANK-${reference}`,
+          type: "Funding",
+          reference,
+          direction: "Credit",
+          currency,
+          amountMinor,
+          details: `Reason: ${reason}`,
+          postedAt,
+          postedBy: actor.name
+        });
+        els.masterBankFundingAmount.value = "";
+        els.masterBankFundingReason.value = "";
+        els.masterBankFundingError.classList.remove("visible");
+        notifyEvent("Bank Account funded", `${money(currency, amountMinor)} added to the Master Bank Account.`);
         renderAll();
       });
     });
@@ -11129,6 +11598,8 @@
       applyPrivileges();
       displayView(state.activeView);
       repairPostedOrderStates();
+      syncClosedTransferArchiveMarkers();
+      syncMasterBankAccount();
       renderCurrencyOptions();
       renderActorSelectors();
       renderTransferControls();
@@ -11148,6 +11619,7 @@
       renderReceivables();
       renderTransfers();
       renderLedger();
+      renderMasterBankAccount();
       renderSettlements();
       renderArchive();
       renderGlobalSearch();
