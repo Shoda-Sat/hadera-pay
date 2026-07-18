@@ -2872,6 +2872,27 @@
                   <label for="archiveSearch">Search</label>
                   <input id="archiveSearch" placeholder="Name, order, transfer, remarks">
                 </div>
+                <div class="field full">
+                  <label>PDF columns</label>
+                  <div class="ledger-export-checks" role="group" aria-label="Archive PDF columns">
+                    <label class="currency-check">
+                      <input id="archivePdfDirection" type="checkbox" checked>
+                      Direction
+                    </label>
+                    <label class="currency-check">
+                      <input id="archivePdfEur" type="checkbox" checked>
+                      EUR
+                    </label>
+                    <label class="currency-check">
+                      <input id="archivePdfActor" type="checkbox" checked>
+                      Actor
+                    </label>
+                    <label class="currency-check">
+                      <input id="archivePdfTime" type="checkbox" checked>
+                      Time
+                    </label>
+                  </div>
+                </div>
               </div>
             </div>
             <div class="panel-body table-wrap">
@@ -4142,6 +4163,10 @@
       ledgerTransactionSort: document.getElementById("ledgerTransactionSort"),
       exportArchiveExcelButton: document.getElementById("exportArchiveExcelButton"),
       exportArchivePdfButton: document.getElementById("exportArchivePdfButton"),
+      archivePdfDirection: document.getElementById("archivePdfDirection"),
+      archivePdfEur: document.getElementById("archivePdfEur"),
+      archivePdfActor: document.getElementById("archivePdfActor"),
+      archivePdfTime: document.getElementById("archivePdfTime"),
       transferList: document.getElementById("transferList"),
       archiveRows: document.getElementById("archiveRows"),
       journalPreview: document.getElementById("journalPreview"),
@@ -7120,6 +7145,11 @@
       return Number.isNaN(date.getTime()) ? "" : date.toLocaleDateString();
     }
 
+    function displayTimeOnly(value) {
+      const date = value ? new Date(value) : new Date();
+      return Number.isNaN(date.getTime()) ? "" : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    }
+
     function archiveClosedWindow(actorName) {
       const closeTimes = state.archives
         .filter((archive) => actorName === "All actors" || archive.actor === actorName)
@@ -7876,6 +7906,7 @@
       const headers = Object.keys(rows[0]);
       const widthByHeader = {
         Date: 18,
+        Time: 10,
         Journal: 12,
         "Order / Transfer No.": 18,
         Source: 16,
@@ -7983,7 +8014,12 @@
       return `Archive - ${actorLabel} - ${monthLabel}`;
     }
 
-    function archiveExportRows(records) {
+    function archiveExportRows(records, options = {}) {
+      const pdfMode = options.pdfMode === true;
+      const includeDirection = !pdfMode || options.includeDirection !== false;
+      const includeEur = !pdfMode || options.includeEur !== false;
+      const includeActor = !pdfMode || options.includeActor !== false;
+      const includeTime = pdfMode && options.includeTime !== false;
       const presentCurrencies = Array.from(new Set(records.map((record) => record.currency).filter(Boolean)));
       const currencies = [
         ...supportedCurrencies.filter((currency) => presentCurrencies.includes(currency)),
@@ -7992,17 +8028,19 @@
       const showCurrencyColumns = currencies.length > 1;
       return records.map((record) => {
         const row = {
-          Date: displayDate(record.date),
-          Actor: record.actor,
-          "Closed Statement": `${archiveMonthLabel(archiveMonthKey(record.closedAt))} / ${record.archiveId}`,
-          Type: record.type,
-          Reference: record.reference,
-          Direction: record.direction,
-          Details: record.details,
-          Amount: `${formatMinor(record.amountMinor, record.currency)} ${record.currency}`
+          Date: pdfMode ? displayDateOnly(record.date) : displayDate(record.date)
         };
+        if (includeTime) row.Time = displayTimeOnly(record.date);
+        if (includeActor) row.Actor = record.actor;
+        row["Closed Statement"] = `${archiveMonthLabel(archiveMonthKey(record.closedAt))} / ${record.archiveId}`;
+        row.Type = record.type;
+        row.Reference = record.reference;
+        if (includeDirection) row.Direction = record.direction;
+        row.Details = record.details;
+        row.Amount = `${formatMinor(record.amountMinor, record.currency)} ${record.currency}`;
         if (showCurrencyColumns) {
           currencies.forEach((currency) => {
+            if (pdfMode && currency === "EUR" && !includeEur) return;
             row[currency] = record.currency === currency ? formatMinor(record.amountMinor, currency) : "";
           });
         }
@@ -8057,9 +8095,23 @@
       const records = archiveRecordsForExport();
       if (!records.length) return;
       const title = archiveExportTitle();
-      const rows = archiveExportRows(records);
+      const options = {
+        pdfMode: true,
+        includeDirection: els.archivePdfDirection.checked,
+        includeEur: els.archivePdfEur.checked,
+        includeActor: els.archivePdfActor.checked,
+        includeTime: els.archivePdfTime.checked
+      };
+      const rows = archiveExportRows(records, options);
+      const presentCurrencies = Array.from(new Set(records.map((record) => record.currency).filter(Boolean)));
+      const omittedEurColumn = !options.includeEur && presentCurrencies.length > 1 && presentCurrencies.includes("EUR");
+      const detailsWidth = 32
+        + (!options.includeDirection ? 18 : 0)
+        + (omittedEurColumn ? 11 : 0)
+        + (!options.includeActor ? 16 : 0)
+        + (!options.includeTime ? 10 : 0);
       downloadBlob(
-        buildLandscapeTablePdf(title, rows, { Details: 32, Direction: 18 }),
+        buildLandscapeTablePdf(title, rows, { Date: 12, Time: 10, Details: detailsWidth, Direction: 18 }),
         `${safeFilename(title)}.pdf`
       );
     }
