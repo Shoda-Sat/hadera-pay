@@ -8388,16 +8388,54 @@
       return `Archive - ${actorLabel} - ${monthLabel}`;
     }
 
+    function orderedArchiveExportRecords(records = []) {
+      const recordsByActor = new Map();
+      records.forEach((record) => {
+        const actorKey = record.actor || "Unknown Actor";
+        if (!recordsByActor.has(actorKey)) recordsByActor.set(actorKey, []);
+        recordsByActor.get(actorKey).push(record);
+      });
+      const closeCurrencyRank = (record) => {
+        if (record.currency === record.baseCurrency) return -1;
+        const supportedRank = supportedCurrencies.indexOf(record.currency);
+        return supportedRank >= 0 ? supportedRank : supportedCurrencies.length;
+      };
+      const closeTime = (record) => {
+        const time = new Date(record.closedAt || record.date || 0).getTime();
+        return Number.isFinite(time) ? time : 0;
+      };
+      const closeSort = (left, right) => {
+        const timeDifference = closeTime(left) - closeTime(right);
+        return timeDifference || closeCurrencyRank(left) - closeCurrencyRank(right);
+      };
+      return Array.from(recordsByActor.values()).flatMap((actorRecords) => {
+        const closedBalances = actorRecords.filter((record) => record.type === "Closed Balance");
+        const transactions = actorRecords.filter((record) => record.type !== "Closed Balance");
+        if (!closedBalances.length) return transactions;
+        const currentCloseTime = Math.max(...closedBalances.map(closeTime));
+        const previousCloses = closedBalances
+          .filter((record) => closeTime(record) < currentCloseTime)
+          .sort(closeSort)
+          .map((record) => ({ ...record, exportType: "Previous Close" }));
+        const currentClose = closedBalances
+          .filter((record) => closeTime(record) === currentCloseTime)
+          .sort(closeSort)
+          .map((record) => ({ ...record, exportType: "Current Close" }));
+        return [...previousCloses, ...transactions, ...currentClose];
+      });
+    }
+
     function archiveExportRows(records, options = {}) {
+      const orderedRecords = orderedArchiveExportRecords(records);
       const pdfMode = options.pdfMode === true;
       const includeDirection = !pdfMode || options.includeDirection !== false;
       const includeEur = !pdfMode || options.includeEur !== false;
       const includeActor = !pdfMode || options.includeActor !== false;
       const includeTime = pdfMode && options.includeTime !== false;
-      const presentCurrencies = Array.from(new Set(records.map((record) => record.currency).filter(Boolean)));
-      const recordActors = Array.from(new Set(records.map((record) => record.actor).filter(Boolean)));
+      const presentCurrencies = Array.from(new Set(orderedRecords.map((record) => record.currency).filter(Boolean)));
+      const recordActors = Array.from(new Set(orderedRecords.map((record) => record.actor).filter(Boolean)));
       const primaryBaseCurrency = recordActors.length === 1
-        ? records.find((record) => record.actor === recordActors[0])?.baseCurrency || ""
+        ? orderedRecords.find((record) => record.actor === recordActors[0])?.baseCurrency || ""
         : "";
       if (primaryBaseCurrency && !presentCurrencies.includes(primaryBaseCurrency)) {
         presentCurrencies.unshift(primaryBaseCurrency);
@@ -8415,7 +8453,7 @@
         if (includeTime) row.Time = displayTimeOnly(record.date);
         if (includeActor) row.Actor = record.actor;
         row["Closed Statement"] = `${archiveMonthLabel(archiveMonthKey(record.closedAt))} / ${record.archiveId}`;
-        row.Type = record.type;
+        row.Type = record.exportType || record.type;
         row.Reference = record.reference;
         if (includeDirection) row.Direction = record.direction;
         row.Details = record.details;
@@ -8429,7 +8467,7 @@
         row.Status = record.status;
         return row;
       };
-      return records.map(buildRow);
+      return orderedRecords.map(buildRow);
     }
 
     function buildLandscapeExcelHtml(title, rows) {
