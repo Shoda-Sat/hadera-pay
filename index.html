@@ -3108,7 +3108,7 @@
             <div class="panel-header">
               <div class="settings-heading">
                 <h2>Master Reset</h2>
-                <small>Erase transaction data or wipe data with Actors after permit confirmation.</small>
+                <small>Erase transaction data and chat history, or wipe them together with Actors.</small>
               </div>
             </div>
             <div class="panel-body" id="resetPanelBody">
@@ -3122,8 +3122,8 @@
                   <div class="field">
                     <label for="resetScope">Reset scope</label>
                     <select id="resetScope">
-                      <option value="data">Erase data - data only</option>
-                      <option value="wipe">Wipe data - data, all Actors, and actor logins</option>
+                      <option value="data">Erase data - transactions and chat history</option>
+                      <option value="wipe">Wipe data - transactions, chat history, all Actors, and actor logins</option>
                     </select>
                   </div>
                 </div>
@@ -3399,6 +3399,7 @@
       chatReplyTo: "",
       chatConversations: [],
       deletedChatIds: [],
+      chatHistoryResetAt: "",
       actors: [
         { id: "ACT-0", name: "Master", role: "Master", currency: "USD", active: true, transferEnabled: true },
         { id: "ACT-1", name: "Eastline Broker", role: "Broker", currency: "USD", active: true, transferEnabled: true },
@@ -3794,6 +3795,10 @@
       if (!remoteState || typeof remoteState !== "object") return false;
       const deletedActorIds = new Set(remoteState.deletedActorIds || []);
       const deletedChatIds = new Set([...(state.deletedChatIds || []), ...(remoteState.deletedChatIds || [])]);
+      const chatHistoryResetTime = Math.max(
+        new Date(state.chatHistoryResetAt || 0).getTime() || 0,
+        new Date(remoteState.chatHistoryResetAt || 0).getTime() || 0
+      );
       const remoteActors = Array.isArray(remoteState.actors) ? remoteState.actors : [];
       state.actors = normalizeActors(mergeById(state.actors, remoteState.actors || []));
       state.actors = state.actors.filter((actor) => !deletedActorIds.has(actor.id) || remoteActors.some((remoteActor) => remoteActor?.id === actor.id));
@@ -3806,10 +3811,17 @@
       state.settlements = Array.isArray(remoteState.settlements) ? remoteState.settlements : state.settlements;
       state.archives = mergeById(state.archives, remoteState.archives || []);
       state.chatConversations = mergeChatConversations(state.chatConversations, remoteState.chatConversations || [])
-        .filter((chat) => !deletedChatIds.has(chat.id));
+        .filter((chat) => !deletedChatIds.has(chat.id))
+        .map((chat) => ({
+          ...chat,
+          messages: (chat.messages || []).filter((message) =>
+            !chatHistoryResetTime || new Date(message.createdAt || 0).getTime() > chatHistoryResetTime
+          )
+        }));
       state.deletedActorIds = Array.from(deletedActorIds);
       state.deletedActorNames = [];
       state.deletedChatIds = Array.from(deletedChatIds);
+      state.chatHistoryResetAt = chatHistoryResetTime ? new Date(chatHistoryResetTime).toISOString() : "";
       state.buyingRates = normalizeBuyingRates(remoteState.buyingRates || { eurToUsdDivider: remoteState.eurToUsdDivider });
       state.orderCounter = Math.max(Number(state.orderCounter || 0), nextOrderNumberFromOrders() - 1, Number(remoteState.orderCounter || 0));
       state.receivableCounter = Math.max(Number(state.receivableCounter || 0), nextReceivableNumberFromReceivables() - 1, Number(remoteState.receivableCounter || 0));
@@ -6721,6 +6733,9 @@
     }
 
     function resetFinancialData(render = true) {
+      state.chatHistoryResetAt = new Date().toISOString();
+      state.chatConversations = state.chatConversations.map((chat) => ({ ...chat, messages: [] }));
+      state.chatReplyTo = "";
       state.orders = [];
       state.receivables = [];
       state.transfers = [];
@@ -11225,7 +11240,7 @@
         }
         els.resetPermit.value = "";
         els.resetError.classList.remove("visible");
-        notifyEvent("Settings reset", scope === "wipe" ? "Data, actors, and actor logins were wiped." : "Data was erased.");
+        notifyEvent("Settings reset", scope === "wipe" ? "Data, chat history, actors, and actor logins were wiped." : "Data and chat history were erased.");
         setView("dashboard");
         renderAll();
       } catch (error) {

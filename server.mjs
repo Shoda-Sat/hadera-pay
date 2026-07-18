@@ -635,6 +635,10 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   const activeActorIds = new Set(membershipActors.map((actor) => actor.id));
   const deletedActorIds = new Set([...(currentState.deletedActorIds || []), ...(incomingState.deletedActorIds || [])]);
   const deletedChatIds = new Set([...(currentState.deletedChatIds || []), ...(incomingState.deletedChatIds || [])]);
+  const chatHistoryResetTime = Math.max(
+    new Date(currentState.chatHistoryResetAt || 0).getTime() || 0,
+    new Date(incomingState.chatHistoryResetAt || 0).getTime() || 0
+  );
   activeActorIds.forEach((actorId) => deletedActorIds.delete(actorId));
   nextState.actors = mergeById(currentState.actors, incomingState.actors);
   nextState.actors = nextState.actors.filter((actor) => !deletedActorIds.has(actor?.id));
@@ -650,7 +654,13 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
     archive.id || [archive.actor, archive.closedAt, archive.closedBy].join(":")
   );
   nextState.chatConversations = mergeChatConversations(currentState.chatConversations, incomingState.chatConversations)
-    .filter((chat) => !deletedChatIds.has(chat?.id));
+    .filter((chat) => !deletedChatIds.has(chat?.id))
+    .map((chat) => ({
+      ...chat,
+      messages: (chat.messages || []).filter((message) =>
+        !chatHistoryResetTime || new Date(message?.createdAt || 0).getTime() > chatHistoryResetTime
+      ),
+    }));
   nextState.actors = mergeById(membershipActors, nextState.actors)
     .map((actor) => ({
       ...actor,
@@ -660,6 +670,7 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   nextState.deletedActorIds = Array.from(deletedActorIds);
   nextState.deletedActorNames = [];
   nextState.deletedChatIds = Array.from(deletedChatIds);
+  nextState.chatHistoryResetAt = chatHistoryResetTime ? new Date(chatHistoryResetTime).toISOString() : "";
   nextState.orderCounter = Math.max(Number(currentState.orderCounter || 0), Number(incomingState.orderCounter || 0), nextOrderNumberFromOrders(nextState.orders) - 1);
   nextState.receivableCounter = Math.max(Number(currentState.receivableCounter || 0), Number(incomingState.receivableCounter || 0), nextReceivableNumberFromReceivables(nextState.receivables) - 1);
   nextState.customerCounter = Math.max(Number(currentState.customerCounter || 0), Number(incomingState.customerCounter || 0));
@@ -689,19 +700,22 @@ function stripRestrictedCreditReminders(state, session) {
 }
 
 function sanitizeIncomingWorkspaceState(state, session) {
-  if (!state || typeof state !== "object" || !Array.isArray(state.receivables)) return state || {};
-  return {
-    ...state,
-    receivables: state.receivables.map((receivable) => {
+  if (!state || typeof state !== "object") return {};
+  const sanitized = { ...state };
+  if (session?.membership?.role !== "Master") delete sanitized.chatHistoryResetAt;
+  if (Array.isArray(state.receivables)) {
+    sanitized.receivables = state.receivables.map((receivable) => {
       if (sessionCanAccessCreditReminder(session, receivable)) return receivable;
       const { creditReminder, ...allowedReceivable } = receivable;
       return allowedReceivable;
-    }),
-  };
+    });
+  }
+  return sanitized;
 }
 
 function resetWorkspaceState(db, workspaceId, scope = "data") {
   const currentState = db.appStates[workspaceId] || {};
+  const chatHistoryResetAt = new Date().toISOString();
   const allActors = mergeById(workspaceActors(db, workspaceId), currentState.actors || []);
   const masterActor = allActors.find((actor) => actor?.role === "Master") || {
     id: "ACT-0",
@@ -726,6 +740,11 @@ function resetWorkspaceState(db, workspaceId, scope = "data") {
     ledger: [],
     masterBankEntries: [],
     archives: [],
+    chatConversations: scope === "wipe"
+      ? []
+      : (currentState.chatConversations || []).map((chat) => ({ ...chat, messages: [] })),
+    chatHistoryResetAt,
+    chatReplyTo: "",
     settlements: scope === "wipe"
       ? []
       : actors
@@ -746,7 +765,7 @@ function resetWorkspaceState(db, workspaceId, scope = "data") {
   if (scope === "wipe") {
     nextState.actorCounter = Number(currentState.actorCounter || 0);
     nextState.selectedActorId = "ACT-0";
-    nextState.chatConversations = [];
+    nextState.selectedChatId = "";
     nextState.chatCounter = 0;
     nextState.messageCounter = 0;
     nextState.deletedActorIds = Array.from(new Set([...(currentState.deletedActorIds || []), ...removedActors.map((actor) => actor.id).filter(Boolean)]));
