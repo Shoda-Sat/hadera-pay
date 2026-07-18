@@ -83,6 +83,25 @@ export function actorCanPayoutCurrency(actor: ActorRecord | undefined, currency:
   return Boolean(actor && actorCanReceivePayouts(actor.role) && actorTransferCurrencies(actor).includes(currency));
 }
 
+export function orderSortForSession(session: UserSession): (left: OrderRecord, right: OrderRecord) => number {
+  const loginStartedAt = new Date(session.loginStartedAt || 0).getTime();
+  const needsPriority = (order: OrderRecord) => {
+    if (!Number.isFinite(loginStartedAt) || loginStartedAt <= 0) return false;
+    const actionAt = new Date(isMasterView(session)
+      ? order.sentAt || order.createdAt
+      : order.assignedAt || order.sentAt || order.createdAt).getTime();
+    if (!Number.isFinite(actionAt) || actionAt <= 0 || actionAt >= loginStartedAt) return false;
+    if (isMasterView(session)) return order.state === "Pending Forward";
+    return actorCanReceivePayouts(session.actorRole) && order.state === "Assigned" &&
+      (order.agentActorId === session.actorId || order.agent === session.actorName);
+  };
+  return (left, right) => {
+    const priority = Number(needsPriority(right)) - Number(needsPriority(left));
+    if (priority) return priority;
+    return new Date(right.createdAt || right.updatedAt || 0).getTime() - new Date(left.createdAt || left.updatedAt || 0).getTime();
+  };
+}
+
 export function transferTargetsFor(session: UserSession, state: WorkspaceState): ActorRecord[] {
   const actor = actorForSession(session, state);
   if (!actor) return [];
@@ -126,6 +145,43 @@ function allNumberedOrders(state: WorkspaceState): Array<{ order: OrderRecord; c
       closedAt: archive.closedAt || ""
     })))
   ];
+}
+
+export function orderRecordIsVoided(order: OrderRecord | undefined): boolean {
+  return order?.state === "Voided" || Boolean(order?.voidedAt || order?.voidJournal || order?.excludedFromCalculations);
+}
+
+export function orderForLedgerLine(state: WorkspaceState, line: LedgerLine): OrderRecord | undefined {
+  if (!String(line.source || "").startsWith("ORDER_")) return undefined;
+  const liveOrder = line.orderId
+    ? state.orders.find((order) => order.id === line.orderId)
+    : state.orders.find((order) => order.journal === line.journal || order.voidJournal === line.journal);
+  if (liveOrder) return liveOrder;
+  const reportedOrders = state.archives.flatMap((archive) => archive.orders || []);
+  if (line.orderId) {
+    return reportedOrders.find((order) => order.id === line.orderId || order.internalOrderId === line.orderId);
+  }
+  return reportedOrders.find((order) => order.journal === line.journal || order.voidJournal === line.journal);
+}
+
+export function ledgerLineIsForVoidedOrder(state: WorkspaceState, line: LedgerLine): boolean {
+  if (line.voided === true || line.excludedFromCalculations === true) return true;
+  return orderRecordIsVoided(orderForLedgerLine(state, line));
+}
+
+export function calculableLedgerLines(state: WorkspaceState, lines: LedgerLine[] = state.ledger): LedgerLine[] {
+  return lines.filter((line) => line.archived !== true && !ledgerLineIsForVoidedOrder(state, line));
+}
+
+function orderBalanceWasClosed(state: WorkspaceState, order: OrderRecord): boolean {
+  if (order.locked === true) return true;
+  const createdAt = new Date(order.createdAt || order.sentAt || 0).getTime();
+  return state.archives.some((archive) => (archive.orders || []).some((reportedOrder) => {
+    if (reportedOrder.id !== order.id && reportedOrder.internalOrderId !== order.id) return false;
+    const closedAt = new Date(archive.closedAt || 0).getTime();
+    if (Number.isFinite(createdAt) && createdAt > 0 && Number.isFinite(closedAt) && closedAt < createdAt) return false;
+    return true;
+  }));
 }
 
 function latestCloseForActor(state: WorkspaceState, actorName: string): number {
@@ -337,13 +393,17 @@ export async function assignOrder(orderId: string, agentId: string, dividerText 
   });
 }
 
-export async function returnOrder(orderId: string): Promise<WorkspaceState> {
+export async function returnOrder(orderId: string, actorName = "Master"): Promise<WorkspaceState> {
   return updateWorkspaceState((state) => {
     const order = state.orders.find((item) => item.id === orderId);
-    if (!order || order.state !== "Pending Forward") return;
+    if (!order) throw new Error("This order is no longer available.");
+    const masterReturn = order.state === "Pending Forward";
+    const payerReturn = order.state === "Assigned" && order.agent === actorName;
+    if (!masterReturn && !payerReturn) throw new Error("This order can no longer be returned.");
     order.state = "Returned";
-    order.returnedBy = "Master";
+    order.returnedBy = actorName;
     order.returnedAt = new Date().toISOString();
+    order.returnedReason = "";
     order.agent = "Unassigned";
     order.agentActorId = "";
     order.updatedAt = order.returnedAt;
@@ -400,9 +460,12 @@ export async function markOrderPaid(orderId: string, actorId: string, proof?: { 
 export async function requestOrderVoid(orderId: string, actorName: string): Promise<WorkspaceState> {
   return updateWorkspaceState((state) => {
     const order = state.orders.find((item) => item.id === orderId);
-    if (!order || order.state !== "Paid" || !order.journal || order.voidJournal) throw new Error("This order cannot request a void.");
+    if (!order || order.state !== "Paid" || !order.journal || order.voidJournal || orderBalanceWasClosed(state, order)) {
+      throw new Error("This order cannot request a void because it is unavailable or its balance is closed.");
+    }
     order.state = "Void Requested";
     order.voidRequested = true;
+    order.excludedFromCalculations = false;
     order.voidRequestedBy = actorName;
     order.voidRequestedAt = new Date().toISOString();
     order.updatedAt = order.voidRequestedAt;
@@ -412,9 +475,12 @@ export async function requestOrderVoid(orderId: string, actorName: string): Prom
 export async function rejectOrderVoid(orderId: string, actorName: string): Promise<WorkspaceState> {
   return updateWorkspaceState((state) => {
     const order = state.orders.find((item) => item.id === orderId);
-    if (!order || order.state !== "Void Requested") return;
+    if (!order || order.state !== "Void Requested" || order.voidJournal || orderBalanceWasClosed(state, order)) {
+      throw new Error("This void request is no longer available or its balance is closed.");
+    }
     order.state = "Paid";
     order.voidRequested = false;
+    order.excludedFromCalculations = false;
     order.voidRejectedBy = actorName;
     order.voidRejectedAt = new Date().toISOString();
     order.updatedAt = order.voidRejectedAt;
@@ -424,21 +490,34 @@ export async function rejectOrderVoid(orderId: string, actorName: string): Promi
 export async function approveOrderVoid(orderId: string, actorName: string): Promise<WorkspaceState> {
   return updateWorkspaceState((state) => {
     const order = state.orders.find((item) => item.id === orderId);
-    if (!order?.journal || order.state !== "Void Requested" || order.voidJournal) throw new Error("This void request is no longer available.");
-    const paidLines = state.ledger.filter((line) => line.source === "ORDER_PAYMENT" && line.journal === order.journal);
+    if (!order?.journal || order.state !== "Void Requested" || order.voidJournal || orderBalanceWasClosed(state, order)) {
+      throw new Error("This void request is no longer available or its balance is closed.");
+    }
+    const paidLines = state.ledger.filter((line) => line.archived !== true && line.source === "ORDER_PAYMENT" && line.journal === order.journal);
     if (!paidLines.length) throw new Error("The payment journal could not be found.");
     const journal = nextJournalId(state);
     const postedAt = new Date().toISOString();
+    paidLines.forEach((line) => {
+      line.orderId = order.id;
+      line.voided = true;
+      line.excludedFromCalculations = true;
+      line.voidedAt = postedAt;
+    });
     state.ledger.unshift(...paidLines.map((line) => ({
       ...line,
       journal,
       source: "ORDER_VOID",
       direction: line.direction === "Debit" ? "Credit" as const : "Debit" as const,
+      details: `Void of ${brokerOrderNumber(order)}`,
+      voided: true,
+      excludedFromCalculations: true,
+      voidedAt: postedAt,
       postedAt
     })));
     order.state = "Voided";
     order.voidJournal = journal;
     order.voidRequested = false;
+    order.excludedFromCalculations = true;
     order.voidedAt = postedAt;
     order.voidedBy = actorName;
     order.updatedAt = postedAt;

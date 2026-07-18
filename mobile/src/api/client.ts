@@ -2,6 +2,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import type {
   ActorRecord,
   ApiSession,
+  ArchiveRecord,
   Currency,
   FundingType,
   InviteRecord,
@@ -125,6 +126,7 @@ function normalizeSession(session: ApiSession | null | undefined): UserSession |
   if (!session?.user || !session.workspace || !session.membership) return null;
   const actorRole = session.membership.actorRole || (session.membership.role === "Master" ? "Master" : "Agent");
   return {
+    loginStartedAt: session.loginStartedAt || "",
     userId: session.user.id || "",
     name: session.user.name || session.membership.actorName || "",
     email: session.user.email || "",
@@ -141,17 +143,85 @@ function normalizeSession(session: ApiSession | null | undefined): UserSession |
   };
 }
 
+type ArchiveCollection = "orders" | "receivables" | "transfers" | "ledger";
+
+function archiveSnapshotItemKey(type: ArchiveCollection, item: unknown): string {
+  const value = item as Record<string, unknown>;
+  if (type === "orders") {
+    return [value.id || value.brokerOrderNumber, value.createdAt || value.sentAt, value.broker, value.agent, value.sourceCurrency, value.sourceAmountMinor, value.payoutCurrency, value.payoutAmountMinor, value.journal].join(":");
+  }
+  if (type === "receivables") return [value.id || value.orderId, value.createdAt, value.orderId, value.borrower, value.currency, value.principalMinor].join(":");
+  if (type === "transfers") return [value.id || value.journal, value.createdAt || value.sentAt, value.from, value.to, value.currency, value.amountMinor, value.journal].join(":");
+  return [value.entryId, value.journal, value.source, value.account, value.direction, value.currency, value.amountMinor, value.postedAt].join(":");
+}
+
+function normalizeArchiveSnapshots(value: ArchiveRecord[] | undefined): ArchiveRecord[] {
+  const archives = (Array.isArray(value) ? value : []).map((archive) => ({
+    ...archive,
+    orders: Array.isArray(archive.orders) ? archive.orders : [],
+    receivables: Array.isArray(archive.receivables) ? archive.receivables : [],
+    transfers: Array.isArray(archive.transfers) ? archive.transfers : [],
+    ledger: Array.isArray(archive.ledger) ? archive.ledger : []
+  }));
+  const seenByActor = new Map<string, Record<ArchiveCollection, Set<string>>>();
+  archives
+    .map((archive, index) => ({ archive, index }))
+    .sort((left, right) => new Date(left.archive.closedAt || 0).getTime() - new Date(right.archive.closedAt || 0).getTime() || left.index - right.index)
+    .forEach(({ archive }) => {
+      const actorKey = String(archive.actorId || archive.actor || "Unknown Actor");
+      const seen = seenByActor.get(actorKey) || {
+        orders: new Set<string>(),
+        receivables: new Set<string>(),
+        transfers: new Set<string>(),
+        ledger: new Set<string>()
+      };
+      seenByActor.set(actorKey, seen);
+      (["orders", "receivables", "transfers", "ledger"] as ArchiveCollection[]).forEach((type) => {
+        const items = archive[type] || [];
+        const unique = items.filter((item) => {
+          const key = archiveSnapshotItemKey(type, item);
+          if (!key || seen[type].has(key)) return false;
+          seen[type].add(key);
+          return true;
+        });
+        if (type === "orders") archive.orders = unique as NonNullable<ArchiveRecord["orders"]>;
+        else if (type === "receivables") archive.receivables = unique as NonNullable<ArchiveRecord["receivables"]>;
+        else if (type === "transfers") archive.transfers = unique as NonNullable<ArchiveRecord["transfers"]>;
+        else archive.ledger = unique as NonNullable<ArchiveRecord["ledger"]>;
+      });
+    });
+  return archives;
+}
+
+function removeOrdersAlreadyReported(orders: OrderRecord[] | undefined, archives: ArchiveRecord[]): OrderRecord[] {
+  const reportedAt = new Map<string, number>();
+  archives.forEach((archive) => {
+    const closedAt = new Date(archive.closedAt || 0).getTime();
+    (archive.orders || []).forEach((order) => {
+      if (!order.id) return;
+      reportedAt.set(order.id, Math.max(reportedAt.get(order.id) || 0, Number.isFinite(closedAt) ? closedAt : 0));
+    });
+  });
+  return (Array.isArray(orders) ? orders : []).filter((order) => {
+    const closedAt = reportedAt.get(order.id);
+    if (closedAt === undefined) return true;
+    const createdAt = new Date(order.createdAt || order.sentAt || 0).getTime();
+    return Number.isFinite(createdAt) && createdAt > closedAt;
+  });
+}
+
 function normalizeState(state: Partial<WorkspaceState> | null | undefined): WorkspaceState {
+  const archives = normalizeArchiveSnapshots(state?.archives);
   return {
     ...(state || {}),
     actors: Array.isArray(state?.actors) ? state.actors : [],
-    orders: Array.isArray(state?.orders) ? state.orders : [],
+    orders: removeOrdersAlreadyReported(state?.orders, archives),
     receivables: Array.isArray(state?.receivables) ? state.receivables : [],
     savedCustomers: Array.isArray(state?.savedCustomers) ? state.savedCustomers : [],
     transfers: Array.isArray(state?.transfers) ? state.transfers : [],
     ledger: Array.isArray(state?.ledger) ? state.ledger : [],
     masterBankEntries: Array.isArray(state?.masterBankEntries) ? state.masterBankEntries : [],
-    archives: Array.isArray(state?.archives) ? state.archives : [],
+    archives,
     settlements: Array.isArray(state?.settlements) ? state.settlements : [],
     chatConversations: Array.isArray(state?.chatConversations) ? state.chatConversations : []
   };
@@ -302,6 +372,14 @@ export async function removeWorkspaceActor(actorId: string, actorName: string): 
   const result = await api<{ state: WorkspaceState }>("/api/app-state/remove-actor", {
     method: "POST",
     body: { actorId, actorName }
+  });
+  return normalizeState(result.state);
+}
+
+export async function resetWorkspaceActorData(actorId: string): Promise<WorkspaceState> {
+  const result = await api<{ state: WorkspaceState }>("/api/app-state/reset-actor", {
+    method: "POST",
+    body: { actorId }
   });
   return normalizeState(result.state);
 }

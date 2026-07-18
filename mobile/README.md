@@ -16,7 +16,7 @@ By default the app talks to `https://haderapay.com`. To point a build at another
 
 - HaderaPay branding, colors, and compact operational layout.
 - Login, signup, session restore, password reset, and visible logout controls.
-- Offline read access to the last synchronized dashboard, orders, search, ledger, settlement, archive, and receivables. Posting remains online-only.
+- Offline read access to the last synchronized dashboard, orders, search, ledger, settlement, Report, and receivables. Posting remains online-only.
 - Role-aware navigation and actions for Owner, Master, Broker, Agent, Special Broker, and Special Agent.
 - Money transfer form with live source-to-payout conversion.
 - Order and Transfer Source, Rate, and Payout fields calculate the third value from whichever two values are entered.
@@ -29,10 +29,14 @@ By default the app talks to `https://haderapay.com`. To point a build at another
 - Assignment messages delivered to payout actors, with replies, reactions, and Master message forwarding in chat.
 - Master Pending & Cancelled order view with direct payout-actor reminders.
 - Internal transfers with approval, plus Master journal and withdrawal tools.
-- Consolidated workspace search returns one permitted result per transaction and participant instead of duplicate order, ledger, receivable, and archive rows.
+- Consolidated workspace search returns one permitted result per transaction and participant instead of duplicate order, ledger, receivable, and Report rows.
 - Account-selectable inactivity logout from 10 seconds to 2 hours, including offline-cache expiry, plus server lockout warnings after repeated failed logins.
-- Ledger and Archive transactions can be sorted by date or Order/Transfer number.
-- Fully collected receivables move into a separate monthly collapsible Archive section when their balance is closed.
+- Ledger and Report transactions can be sorted by date or Order/Transfer number.
+- Fully collected receivables move into a separate monthly collapsible Report section when their balance is closed.
+- Repeated Report snapshots are deduplicated, reported orders do not return to the live orderbook, and signed currency positions keep the Actor/Master direction visible.
+- Master can reset one Actor's active data while preserving Ledger, Master Bank, Report, login, and Actor settings.
+- Old unforwarded and unpaid orders move to the top after login, with confirmation prompts for Master and payer return/cancel actions.
+- Approved voids are locked after balance closing, permanently excluded from financial calculations, and highlighted red in Master, initiator, and payer ledgers.
 - Chat opens at the message composer and Reply returns focus to the composer.
 - Master ledger with a collapsible Income Statement, permanent income snapshots, Actors management, invite codes, and transfer permissions.
 - Master ledger with an independent collapsible Bank Account, green Money In, red Money Out, running currency balances, reasoned funding, and shareable monthly statements.

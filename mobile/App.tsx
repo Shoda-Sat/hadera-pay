@@ -49,7 +49,7 @@ import {
 import { BrandHeader, Button, Field, Panel, Pill, SelectRow, setUserActivityHandler, SummaryRow } from "./src/components/ui";
 import type { PillTone } from "./src/components/ui";
 import { colors, radius, shadow, spacing } from "./src/theme";
-import { actingSessionFor, activeActors, isMasterView, transferTargetsFor } from "./src/domain/workspace";
+import { actingSessionFor, activeActors, calculableLedgerLines, isMasterView, orderRecordIsVoided, orderSortForSession, transferTargetsFor } from "./src/domain/workspace";
 import {
   ActorsScreen,
   ChatScreen,
@@ -135,10 +135,6 @@ function actorForSession(session: UserSession, workspaceState: WorkspaceState | 
     workspaceState?.actors.find((actor) => actor.name === session.actorName);
 }
 
-function newestOrders(a: OrderRecord, b: OrderRecord): number {
-  return new Date(b.createdAt || b.updatedAt || 0).getTime() - new Date(a.createdAt || a.updatedAt || 0).getTime();
-}
-
 function visibleOrdersFor(session: UserSession, workspaceState: WorkspaceState | null): OrderRecord[] {
   const orders = workspaceState?.orders || [];
   const visible = session.actorRole === "Master"
@@ -151,7 +147,7 @@ function visibleOrdersFor(session: UserSession, workspaceState: WorkspaceState |
   return visible
     .filter((order) => !["Voided", "Cancelled"].includes(order.state) && order.locked !== true)
     .slice()
-    .sort(newestOrders);
+    .sort(orderSortForSession(session));
 }
 
 function stateTone(state: OrderRecord["state"]): PillTone {
@@ -216,10 +212,11 @@ function savedCustomersFor(session: UserSession, workspaceState: WorkspaceState 
 type SettlementRow = { actor: ActorRecord; currency: Currency; netMinor: number };
 
 function settlementRowsFor(session: UserSession, workspaceState: WorkspaceState | null): SettlementRow[] {
+  if (!workspaceState) return [];
   const actors = (workspaceState?.actors || []).filter((actor) => actor.active !== false && actor.role !== "Master");
   const visibleActors = session.actorRole === "Master" ? actors : actors.filter((actor) => actor.id === session.actorId);
   const balances = new Map<string, Partial<Record<Currency, number>>>();
-  (workspaceState?.ledger || []).forEach((line) => {
+  calculableLedgerLines(workspaceState).forEach((line) => {
     const actor = actors.find((candidate) => line.account === candidate.name || line.account === `${candidate.name} ACTOR_CLEARING`);
     if (!actor) return;
     const balance = balances.get(actor.id) || {};
@@ -743,7 +740,7 @@ function MoreScreen({
     { screen: "search", label: "Search" },
     { screen: "chat", label: "Chat" },
     { screen: "settlement", label: "Settlement" },
-    { screen: "archive", label: "Archive" },
+    { screen: "archive", label: "Report" },
     ...(isMasterView(session) || ["Broker", "Special Broker"].includes(session.actorRole) ? [{ screen: "receivables" as AppScreen, label: "Receivables" }] : []),
     ...(isMasterView(session) ? [{ screen: "actors" as AppScreen, label: "Actors" }] : []),
     { screen: "settings", label: "Settings" }
@@ -938,9 +935,9 @@ function ArchiveScreen({
 
   return (
     <View style={styles.screen}>
-      <HeaderTitle title="Archive" subtitle="Monthly closed statements" />
+      <HeaderTitle title="Report" subtitle="Monthly closed statements" />
       <Button
-        label="Refresh archive"
+        label="Refresh report"
         variant="secondary"
         onPress={onRefresh}
         loading={stateLoading}
@@ -1037,7 +1034,9 @@ function ArchiveScreen({
       {filteredArchives.length ? filteredArchives.map((archive, index) => {
         const statementId = archive.id || `${archive.actor || "actor"}-${archive.closedAt || index}`;
         const expanded = expandedStatements.includes(statementId);
-        const balanceRows = currencies
+        const actorBaseCurrency = archive.actorCurrency || workspaceState?.actors.find((actor) => actor.id === archive.actorId || actor.name === archive.actor)?.currency || session.currency;
+        const reportCurrencies = [actorBaseCurrency, ...currencies.filter((currency) => currency !== actorBaseCurrency)];
+        const balanceRows = reportCurrencies
           .map((currency) => ({ currency, netMinor: Number(archive.balances?.[currency] || 0) }))
           .filter((row) => row.netMinor !== 0);
         const referenceCompare = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
@@ -1061,7 +1060,7 @@ function ArchiveScreen({
             <View style={styles.archiveStatementHead}>
               <View style={{ flex: 1 }}>
                 <Text style={styles.archiveStatementDate}>{archiveClosedLabel(archive.closedAt)}</Text>
-                <Text style={styles.archiveStatementReference}>{archive.id || "Archived close"}</Text>
+                <Text style={styles.archiveStatementReference}>{archive.id || "Reported close"}</Text>
               </View>
               <LockKeyhole size={20} color={colors.danger} />
             </View>
@@ -1078,7 +1077,7 @@ function ArchiveScreen({
                     </Text>
                   </View>
                   <Text style={[styles.archiveBalanceAmount, goodForViewer ? styles.archiveBalanceGood : styles.archiveBalanceDanger]}>
-                    {compactAmount(row.currency, majorFromMinor(Math.abs(row.netMinor), row.currency))}
+                    {row.netMinor >= 0 ? "+" : "-"}{compactAmount(row.currency, majorFromMinor(Math.abs(row.netMinor), row.currency))}
                   </Text>
                 </View>
               );
@@ -1096,16 +1095,18 @@ function ArchiveScreen({
 
             {expanded ? (
               <View style={styles.archiveDetails}>
-                {orders.map((order) => (
-                  <View key={`order-${statementId}-${order.id}`} style={styles.archiveDetailRow}>
+                {orders.map((order) => {
+                  const voided = orderRecordIsVoided(order);
+                  return <View key={`order-${statementId}-${order.id}`} style={[styles.archiveDetailRow, voided && styles.reportVoidRow]}>
                     <Text style={styles.archiveDetailTitle}>Order {orderNumber(order, session)}</Text>
+                    {voided ? <Text style={styles.reportVoidText}>Voided - Excluded from all calculations</Text> : null}
                     <Text style={styles.archiveDetailMeta}>{order.receiverName || order.accountNumber || order.phoneNumber || "No receiver details"}</Text>
                     {order.receiverCity ? <Text style={styles.archiveDetailMeta}>Receiver City: {order.receiverCity}</Text> : null}
                     <Text style={styles.archiveDetailAmount}>
                       {compactAmount(order.sourceCurrency, majorFromMinor(order.sourceAmountMinor, order.sourceCurrency))} to {compactAmount(order.payoutCurrency, majorFromMinor(order.payoutAmountMinor, order.payoutCurrency))}
                     </Text>
-                  </View>
-                ))}
+                  </View>;
+                })}
                 {transfers.map((transfer, transferIndex) => {
                   const currency = transfer.currency || transfer.sourceCurrency || session.currency;
                   return (
@@ -1130,8 +1131,8 @@ function ArchiveScreen({
           </Panel>
         );
       }) : (
-        <Panel title="No statements">
-          <Text style={styles.mutedText}>{activeMonth ? `No balances were closed in ${archiveMonthLabel(activeMonth)}.` : "No closed balances have been archived yet."}</Text>
+        <Panel title="No reports">
+          <Text style={styles.mutedText}>{activeMonth ? `No balances were closed in ${archiveMonthLabel(activeMonth)}.` : "No closed balance reports are available yet."}</Text>
         </Panel>
       )}
     </View>
@@ -1756,6 +1757,16 @@ const styles = StyleSheet.create({
     borderTopColor: colors.line,
     paddingVertical: spacing.md,
     gap: 3
+  },
+  reportVoidRow: {
+    backgroundColor: colors.dangerSoft,
+    borderTopColor: colors.cancelledSoft,
+    paddingHorizontal: spacing.sm
+  },
+  reportVoidText: {
+    color: colors.danger,
+    fontSize: 12,
+    fontWeight: "900"
   },
   archiveDetailTitle: {
     color: colors.ink,

@@ -23,6 +23,7 @@ export type MembershipRole = "Owner" | "Master" | "Actor";
 export type ActorRole = "Owner" | "Master" | "Broker" | "Agent" | "Special Broker" | "Special Agent";
 
 export interface UserSession {
+  loginStartedAt?: string;
   userId: string;
   name: string;
   email: string;
@@ -39,6 +40,7 @@ export interface UserSession {
 }
 
 export interface ApiSession {
+  loginStartedAt?: string;
   user?: {
     id?: string;
     name?: string;
@@ -99,6 +101,7 @@ export type OrderState =
 
 export interface OrderRecord {
   id: string;
+  internalOrderId?: string;
   brokerOrderNumber?: string;
   brokerActorId?: string;
   agentOrderNumber?: string;
@@ -142,6 +145,7 @@ export interface OrderRecord {
   voidRejectedAt?: string;
   voidedBy?: string;
   voidedAt?: string;
+  excludedFromCalculations?: boolean;
   assignedAt?: string;
   cancelledAt?: string;
   lastReminderAt?: string;
@@ -216,6 +220,11 @@ export interface LedgerLine {
   amountMinor: number;
   postedAt?: string;
   details?: string;
+  archived?: boolean;
+  closedAt?: string;
+  voided?: boolean;
+  voidedAt?: string;
+  excludedFromCalculations?: boolean;
   [key: string]: unknown;
 }
 
@@ -301,6 +310,7 @@ export interface ArchiveRecord {
   actor?: string;
   actorId?: string;
   actorRole?: ActorRole;
+  actorCurrency?: Currency;
   closedAt?: string;
   incomeProfitMinor?: number;
   incomeProfitCurrency?: Currency;
