@@ -2214,9 +2214,9 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 2v20"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7H14a3.5 3.5 0 0 1 0 7H6"/></svg>
           Settlement
         </button>
-        <button data-view="archive" type="button" aria-label="Archive">
+        <button data-view="archive" type="button" aria-label="Report">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>
-          Archive
+          Report
         </button>
         <button data-view="actors" type="button" aria-label="Actors">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><path d="M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z"/><path d="M19 8v6"/><path d="M22 11h-6"/></svg>
@@ -2890,7 +2890,7 @@
         <section class="view" id="archive">
           <div class="panel">
             <div class="panel-header">
-              <h2>Archive</h2>
+              <h2>Report</h2>
               <div class="panel-actions">
                 <button class="btn secondary" id="exportArchiveExcelButton" type="button">Export Excel</button>
                 <button class="btn secondary" id="exportArchivePdfButton" type="button">Export PDF</button>
@@ -2947,7 +2947,7 @@
                 </div>
                 <div class="field full">
                   <label>PDF columns</label>
-                  <div class="ledger-export-checks" role="group" aria-label="Archive PDF columns">
+                  <div class="ledger-export-checks" role="group" aria-label="Report PDF columns">
                     <label class="currency-check">
                       <input id="archivePdfDirection" type="checkbox" checked>
                       Direction
@@ -3211,7 +3211,7 @@
               <div class="reset-actor-section">
                 <div class="settings-heading">
                   <strong>Reset Specific Actor</strong>
-                  <small>Erase this Actor's active orders, receivables, transfers, saved customers, and authored chat messages. Ledger, Master Bank, Archive, login, and Actor settings remain unchanged.</small>
+                  <small>Erase this Actor's active orders, receivables, transfers, saved customers, and authored chat messages. Ledger, Master Bank, Report, login, and Actor settings remain unchanged.</small>
                 </div>
                 <form id="actorResetForm">
                   <div class="form-grid">
@@ -3671,12 +3671,12 @@
 
     function archiveSnapshotItemKey(type, item = {}) {
       if (type === "orders") {
-        return String(item.id || item.brokerOrderNumber || [item.broker, item.agent, item.createdAt, item.sourceCurrency, item.sourceAmountMinor].join(":"));
+        return [item.id || item.brokerOrderNumber, item.createdAt || item.sentAt, item.broker, item.agent, item.sourceCurrency, item.sourceAmountMinor, item.payoutCurrency, item.payoutAmountMinor, item.journal].join(":");
       }
-      if (type === "receivables") return String(item.id || item.orderId || "");
-      if (type === "transfers") return String(item.id || item.journal || "");
+      if (type === "receivables") return [item.id || item.orderId, item.createdAt, item.orderId, item.borrower, item.currency, item.principalMinor].join(":");
+      if (type === "transfers") return [item.id || item.journal, item.createdAt || item.sentAt, item.from, item.to, item.currency, item.amountMinor, item.journal].join(":");
       if (type === "ledger") {
-        return String(item.entryId || [item.journal, item.source, item.account, item.direction, item.currency, item.amountMinor, item.postedAt].join(":"));
+        return [item.entryId, item.journal, item.source, item.account, item.direction, item.currency, item.amountMinor, item.postedAt].join(":");
       }
       return "";
     }
@@ -3722,14 +3722,22 @@
     }
 
     function removeOrdersAlreadyArchived(orders = [], archives = []) {
-      const archivedOrderIds = new Set(
-        normalizeArchiveSnapshots(archives)
-          .flatMap((archive) => archive.orders)
-          .map((order) => String(order?.id || ""))
-          .filter(Boolean)
-      );
+      const archivedOrderTimes = new Map();
+      normalizeArchiveSnapshots(archives).forEach((archive) => {
+        const closedAt = new Date(archive.closedAt || 0).getTime();
+        archive.orders.forEach((order) => {
+          const orderId = String(order?.id || "");
+          if (!orderId) return;
+          archivedOrderTimes.set(orderId, Math.max(archivedOrderTimes.get(orderId) || 0, Number.isFinite(closedAt) ? closedAt : 0));
+        });
+      });
       return (Array.isArray(orders) ? orders : [])
-        .filter((order) => !archivedOrderIds.has(String(order?.id || "")));
+        .filter((order) => {
+          const archivedAt = archivedOrderTimes.get(String(order?.id || ""));
+          if (archivedAt === undefined) return true;
+          const createdAt = new Date(order?.createdAt || order?.sentAt || 0).getTime();
+          return Number.isFinite(createdAt) && createdAt > archivedAt;
+        });
     }
 
     function normalizeSavedCustomers(customers) {
@@ -4357,7 +4365,7 @@
       chat: ["Chat", "Master-only direct chats and Master-created groups."],
       ledger: ["Ledger", "Immutable journal lines with debit-credit balance."],
       settlement: ["Settlement", "Net actor positions against Master cash."],
-      archive: ["Archive", "Closed transactions locked after balance closing."],
+      archive: ["Report", "Closed transaction reports locked after balance closing."],
       actors: ["Actors", "Master can create and remove ledger actors."],
       settings: ["Settings", "Account security and workspace controls."],
       owner: ["Owner", "Create Masters and manage subscription access."]
@@ -8385,7 +8393,7 @@
       const monthLabel = els.archiveMonthFilter.value
         ? archiveMonthLabel(els.archiveMonthFilter.value)
         : "All closed months";
-      return `Archive - ${actorLabel} - ${monthLabel}`;
+      return `Report - ${actorLabel} - ${monthLabel}`;
     }
 
     function orderedArchiveExportRecords(records = []) {
@@ -8486,7 +8494,7 @@
             </style>
             <!--[if gte mso 9]><xml>
               <x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet>
-                <x:Name>Archive</x:Name>
+                <x:Name>Report</x:Name>
                 <x:WorksheetOptions><x:PageSetup><x:Layout x:Orientation="Landscape"/></x:PageSetup></x:WorksheetOptions>
               </x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook>
             </xml><![endif]-->
@@ -9115,7 +9123,7 @@
       const direction = netMinor > 0 ? "Owes Master" : "Master owes";
       const amount = money(currency, amountMinor);
       const details = [
-        `Archive: ${archive.id}`,
+        `Report: ${archive.id}`,
         `Actor: ${archive.actor}`,
         `Direction: ${direction}`,
         `Amount: ${amount}`,
@@ -11752,7 +11760,7 @@
       els.actorResetError.classList.toggle("visible", !actor || !allowed);
       if (!actor || !allowed) return;
       confirmAction(
-        `Reset ${actor.name}? Active records will be erased, but Ledger, Master Bank, Archive, login, and Actor settings will remain.`,
+        `Reset ${actor.name}? Active records will be erased, but Ledger, Master Bank, Report, login, and Actor settings will remain.`,
         async () => {
           const affectedOrderIds = state.orders
             .filter((item) => orderBelongsToResetActor(item, actor))
@@ -11796,7 +11804,7 @@
             els.actorResetPermit.value = "";
             els.actorResetError.classList.remove("visible");
             const erasedCount = Object.values(counts || {}).reduce((sum, value) => sum + Number(value || 0), 0);
-            notifyEvent("Actor reset", `${actor.name}: ${erasedCount} active records erased. Ledger and Archive were preserved.`);
+            notifyEvent("Actor reset", `${actor.name}: ${erasedCount} active records erased. Ledger and Report were preserved.`);
             renderAll();
           } catch (error) {
             els.actorResetError.textContent = error.message;

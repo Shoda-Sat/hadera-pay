@@ -710,12 +710,12 @@ function mergeByKey(existingItems = [], incomingItems = [], keyForItem) {
 
 function archiveSnapshotItemKey(type, item = {}) {
   if (type === "orders") {
-    return String(item.id || item.brokerOrderNumber || [item.broker, item.agent, item.createdAt, item.sourceCurrency, item.sourceAmountMinor].join(":"));
+    return [item.id || item.brokerOrderNumber, item.createdAt || item.sentAt, item.broker, item.agent, item.sourceCurrency, item.sourceAmountMinor, item.payoutCurrency, item.payoutAmountMinor, item.journal].join(":");
   }
-  if (type === "receivables") return String(item.id || item.orderId || "");
-  if (type === "transfers") return String(item.id || item.journal || "");
+  if (type === "receivables") return [item.id || item.orderId, item.createdAt, item.orderId, item.borrower, item.currency, item.principalMinor].join(":");
+  if (type === "transfers") return [item.id || item.journal, item.createdAt || item.sentAt, item.from, item.to, item.currency, item.amountMinor, item.journal].join(":");
   if (type === "ledger") {
-    return String(item.entryId || [item.journal, item.source, item.account, item.direction, item.currency, item.amountMinor, item.postedAt].join(":"));
+    return [item.entryId, item.journal, item.source, item.account, item.direction, item.currency, item.amountMinor, item.postedAt].join(":");
   }
   return "";
 }
@@ -761,14 +761,22 @@ function normalizeArchiveSnapshots(archives = []) {
 }
 
 function removeOrdersAlreadyArchived(orders = [], archives = []) {
-  const archivedOrderIds = new Set(
-    normalizeArchiveSnapshots(archives)
-      .flatMap((archive) => archive.orders)
-      .map((order) => String(order?.id || ""))
-      .filter(Boolean)
-  );
+  const archivedOrderTimes = new Map();
+  normalizeArchiveSnapshots(archives).forEach((archive) => {
+    const closedAt = new Date(archive.closedAt || 0).getTime();
+    archive.orders.forEach((order) => {
+      const orderId = String(order?.id || "");
+      if (!orderId) return;
+      archivedOrderTimes.set(orderId, Math.max(archivedOrderTimes.get(orderId) || 0, Number.isFinite(closedAt) ? closedAt : 0));
+    });
+  });
   return (Array.isArray(orders) ? orders : [])
-    .filter((order) => !archivedOrderIds.has(String(order?.id || "")));
+    .filter((order) => {
+      const archivedAt = archivedOrderTimes.get(String(order?.id || ""));
+      if (archivedAt === undefined) return true;
+      const createdAt = new Date(order?.createdAt || order?.sentAt || 0).getTime();
+      return Number.isFinite(createdAt) && createdAt > archivedAt;
+    });
 }
 
 function mergeChatConversations(existingItems = [], incomingItems = []) {
