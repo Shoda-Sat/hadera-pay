@@ -964,7 +964,15 @@
     }
 
     .void-row td {
+      background: var(--danger-soft);
+      color: var(--danger);
       border-bottom-color: #ffd0ca;
+    }
+
+    .void-row td .debit,
+    .void-row td .credit,
+    .void-row td .muted {
+      color: var(--danger);
     }
 
     .table-wrap {
@@ -7363,6 +7371,7 @@
     }
 
     function ledgerLineIsForVoidedOrder(line) {
+      if (line?.voided === true || line?.excludedFromCalculations === true) return true;
       const order = orderForLedgerLine(line);
       return Boolean(order && orderRecordIsVoided(order));
     }
@@ -7669,8 +7678,19 @@
 
     function orderForLedgerLine(line) {
       if (!line || !String(line.source || "").startsWith("ORDER_")) return null;
-      if (line.orderId) return state.orders.find((order) => order.id === line.orderId) || null;
-      return state.orders.find((order) =>
+      const liveOrder = line.orderId
+        ? state.orders.find((order) => order.id === line.orderId)
+        : state.orders.find((order) =>
+            order.journal === line.journal || order.voidJournal === line.journal
+          );
+      if (liveOrder) return liveOrder;
+      const reportedOrders = (state.archives || []).flatMap((archive) => archive.orders || []);
+      if (line.orderId) {
+        return reportedOrders.find((order) =>
+          order.id === line.orderId || order.internalOrderId === line.orderId
+        ) || null;
+      }
+      return reportedOrders.find((order) =>
         order.journal === line.journal || order.voidJournal === line.journal
       ) || null;
     }
@@ -10693,6 +10713,10 @@
       const journalId = nextJournalId();
       const postedAt = new Date().toISOString();
       paidLines.forEach((line) => {
+        line.orderId = order.id;
+        line.voided = true;
+        line.excludedFromCalculations = true;
+        line.voidedAt = postedAt;
         state.ledger.unshift({
           journal: journalId,
           orderId: order.id,
@@ -10702,6 +10726,9 @@
           currency: line.currency,
           amountMinor: line.amountMinor,
           details: `Void of ${brokerOrderNumberForOrder(order)}`,
+          voided: true,
+          excludedFromCalculations: true,
+          voidedAt: postedAt,
           postedAt
         });
       });
