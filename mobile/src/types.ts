@@ -34,6 +34,7 @@ export interface UserSession {
   workingCurrencies: Currency[];
   workspaceId: string;
   workspace: string;
+  idleTimeoutSeconds: number;
   managedByMaster?: boolean;
 }
 
@@ -42,6 +43,7 @@ export interface ApiSession {
     id?: string;
     name?: string;
     email?: string;
+    idleTimeoutSeconds?: number;
   };
   workspace?: {
     id?: string;
@@ -116,6 +118,7 @@ export interface OrderRecord {
   commissionPercent: number;
   senderName: string;
   receiverName: string;
+  receiverCity: string;
   accountNumber: string;
   phoneNumber: string;
   remarks: string;
@@ -173,9 +176,11 @@ export interface ReceivableRecord {
   principalMinor: number;
   senderName: string;
   receiverName: string;
+  receiverCity: string;
   accountNumber: string;
   phoneNumber: string;
   remarks: string;
+  creditReminder?: string;
   createdAt: string;
   updatedAt: string;
   createdBy: string;
@@ -192,6 +197,7 @@ export interface SavedCustomerRecord {
   actorId: string;
   kind: "sender" | "receiver";
   name: string;
+  receiverCity: string;
   accountNumber: string;
   phoneNumber: string;
   remarks: string;
@@ -415,9 +421,11 @@ export interface TransferDraft {
   fundingType: FundingType;
   senderName: string;
   receiverName: string;
+  receiverCity: string;
   phoneNumber: string;
   accountNumber: string;
   remarks: string;
+  creditReminder: string;
 }
 
 export interface TransferQuote {

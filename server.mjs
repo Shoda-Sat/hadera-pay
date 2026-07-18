@@ -13,8 +13,11 @@ const inviteTtlMs = 1000 * 60 * 60;
 const ownerUser = process.env.OWNER_USER ?? "Owner";
 const ownerPassword = process.env.OWNER_PASSWORD ?? "1453@Siem#";
 let saveQueue = Promise.resolve();
-const sessionIdleMs = 1000 * 60 * 60 * 3;
-const sessionCookieMaxAgeSeconds = Math.floor(sessionIdleMs / 1000);
+const allowedSessionIdleSeconds = new Set([10, 20, 30, 60, 300, 900, 1800, 3600, 7200]);
+const defaultSessionIdleSeconds = 7200;
+const loginLockMs = 1000 * 60 * 60;
+const loginAttemptWindowMs = 1000 * 60 * 60;
+const loginOperationLocks = new Map();
 const subscriptionPlans = new Map([
   ["one_day", { label: "1 day", days: 1 }],
   ["three_days", { label: "3 days", days: 3 }],
@@ -44,6 +47,8 @@ const blankDb = () => ({
   sessions: [],
   appStates: {},
   ownerPasswordHash: "",
+  ownerIdleTimeoutSeconds: defaultSessionIdleSeconds,
+  loginAttempts: {},
 });
 
 async function readPersistedDb() {
@@ -59,6 +64,29 @@ function mergeRecordsById(existingItems = [], incomingItems = []) {
   [...existingItems, ...incomingItems].forEach((item) => {
     if (!item || typeof item !== "object" || !item.id) return;
     merged.set(item.id, { ...(merged.get(item.id) || {}), ...item });
+  });
+  return Array.from(merged.values());
+}
+
+function mergeSessionsById(existingItems = [], incomingItems = []) {
+  const merged = new Map(existingItems
+    .filter((item) => item?.id)
+    .map((item) => [item.id, item]));
+  incomingItems.forEach((incoming) => {
+    if (!incoming?.id) return;
+    const existing = merged.get(incoming.id);
+    if (!existing) {
+      merged.set(incoming.id, incoming);
+      return;
+    }
+    const existingActivity = new Date(existing.lastActivityAt || 0).getTime();
+    const incomingActivity = new Date(incoming.lastActivityAt || 0).getTime();
+    merged.set(
+      incoming.id,
+      incomingActivity >= existingActivity
+        ? { ...existing, ...incoming }
+        : { ...incoming, ...existing }
+    );
   });
   return Array.from(merged.values());
 }
@@ -85,8 +113,9 @@ function mergeDatabase(existingDb, incomingDb) {
     workspaces: mergeRecordsById(existingDb.workspaces, incomingDb.workspaces),
     memberships: mergeRecordsById(existingDb.memberships, incomingDb.memberships),
     invites: mergeRecordsById(existingDb.invites, incomingDb.invites),
-    sessions: mergeRecordsById(existingDb.sessions, incomingDb.sessions),
+    sessions: mergeSessionsById(existingDb.sessions, incomingDb.sessions),
     appStates: mergeAppStates(existingDb.appStates, incomingDb.appStates),
+    loginAttempts: { ...(incomingDb.loginAttempts || {}) },
   };
 }
 
@@ -230,6 +259,71 @@ function verifyPassword(password, stored) {
   return crypto.timingSafeEqual(Buffer.from(hash, "hex"), Buffer.from(next, "hex"));
 }
 
+function normalizedSessionIdleSeconds(value) {
+  const seconds = Number(value);
+  return allowedSessionIdleSeconds.has(seconds) ? seconds : defaultSessionIdleSeconds;
+}
+
+function accountIdleTimeoutSeconds(db, userId) {
+  if (userId === "__owner") return normalizedSessionIdleSeconds(db.ownerIdleTimeoutSeconds);
+  const user = db.users.find((item) => item.id === userId);
+  return normalizedSessionIdleSeconds(user?.idleTimeoutSeconds);
+}
+
+function loginAttemptKey(login) {
+  return crypto.createHash("sha256").update(String(login || "").trim().toLowerCase()).digest("hex");
+}
+
+async function withLoginOperationLock(login, operation) {
+  const key = loginAttemptKey(login);
+  const previous = loginOperationLocks.get(key) || Promise.resolve();
+  let release;
+  const current = new Promise((resolve) => {
+    release = resolve;
+  });
+  loginOperationLocks.set(key, current);
+  await previous.catch(() => {});
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (loginOperationLocks.get(key) === current) loginOperationLocks.delete(key);
+  }
+}
+
+function activeLoginAttempt(db, login, now = Date.now()) {
+  db.loginAttempts ||= {};
+  const key = loginAttemptKey(login);
+  const attempt = db.loginAttempts[key];
+  if (!attempt) return { key, attempt: null };
+  const lockedUntil = new Date(attempt.lockedUntil || 0).getTime();
+  const lastFailedAt = new Date(attempt.lastFailedAt || 0).getTime();
+  const stale = (!Number.isFinite(lockedUntil) || lockedUntil <= now) &&
+    (!Number.isFinite(lastFailedAt) || now - lastFailedAt >= loginAttemptWindowMs);
+  if (stale || (Number.isFinite(lockedUntil) && lockedUntil > 0 && lockedUntil <= now)) {
+    delete db.loginAttempts[key];
+    return { key, attempt: null };
+  }
+  return { key, attempt };
+}
+
+function recordFailedLogin(db, login, now = Date.now()) {
+  const { key, attempt } = activeLoginAttempt(db, login, now);
+  const failedAttempts = Math.min(4, Number(attempt?.failedAttempts || 0) + 1);
+  const nextAttempt = {
+    failedAttempts,
+    lastFailedAt: new Date(now).toISOString(),
+    lockedUntil: failedAttempts >= 4 ? new Date(now + loginLockMs).toISOString() : "",
+  };
+  db.loginAttempts[key] = nextAttempt;
+  return nextAttempt;
+}
+
+function clearLoginAttempts(db, login) {
+  if (!db.loginAttempts) return;
+  delete db.loginAttempts[loginAttemptKey(login)];
+}
+
 function sendJson(response, status, data) {
   response.writeHead(status, { "content-type": "application/json; charset=utf-8" });
   response.end(JSON.stringify(data));
@@ -257,7 +351,8 @@ function sessionIsExpired(session, now = Date.now()) {
   const expiresAt = new Date(session?.expiresAt || 0).getTime();
   if (!Number.isFinite(expiresAt) || expiresAt <= now) return true;
   const lastActivityAt = new Date(session?.lastActivityAt || 0).getTime();
-  return Number.isFinite(lastActivityAt) && lastActivityAt > 0 && now - lastActivityAt >= sessionIdleMs;
+  const idleMs = normalizedSessionIdleSeconds(session?.idleTimeoutSeconds) * 1000;
+  return Number.isFinite(lastActivityAt) && lastActivityAt > 0 && now - lastActivityAt >= idleMs;
 }
 
 function activeSessionRecord(db, sessionId, now = Date.now()) {
@@ -267,12 +362,15 @@ function activeSessionRecord(db, sessionId, now = Date.now()) {
 
 function touchSession(session, now = Date.now()) {
   const timestamp = new Date(now).toISOString();
+  const idleTimeoutSeconds = normalizedSessionIdleSeconds(session?.idleTimeoutSeconds);
+  session.idleTimeoutSeconds = idleTimeoutSeconds;
   session.lastActivityAt = timestamp;
-  session.expiresAt = new Date(now + sessionIdleMs).toISOString();
+  session.expiresAt = new Date(now + idleTimeoutSeconds * 1000).toISOString();
 }
 
-function setSessionCookie(response, sessionId) {
-  response.setHeader("Set-Cookie", `hp_session=${encodeURIComponent(sessionId)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${sessionCookieMaxAgeSeconds}`);
+function setSessionCookie(response, session) {
+  const idleTimeoutSeconds = normalizedSessionIdleSeconds(session?.idleTimeoutSeconds);
+  response.setHeader("Set-Cookie", `hp_session=${encodeURIComponent(session.id)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${idleTimeoutSeconds}`);
 }
 
 function clearSessionCookie(response) {
@@ -289,7 +387,7 @@ function publicSessionForRecord(db, session) {
   if (!session) return null;
   if (session.userId === "__owner") {
     return {
-      user: { id: "__owner", name: ownerUser, email: ownerUser },
+      user: { id: "__owner", name: ownerUser, email: ownerUser, idleTimeoutSeconds: accountIdleTimeoutSeconds(db, "__owner") },
       workspace: { id: "__owner", name: "Owner Console" },
       subscription: { ownerUserId: "__owner", ownerName: ownerUser, active: true, inactive: false, expiresAt: "", expired: false },
       membership: {
@@ -308,7 +406,7 @@ function publicSessionForRecord(db, session) {
   if (!user || !membership || !workspace) return null;
   const subscription = workspaceOwnerSubscription(db, workspace);
   return {
-    user: { id: user.id, name: user.name, email: user.email },
+    user: { id: user.id, name: user.name, email: user.email, idleTimeoutSeconds: accountIdleTimeoutSeconds(db, user.id) },
     workspace: { id: workspace.id, name: workspace.name },
     subscription,
     membership: {
@@ -570,6 +668,38 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   return nextState;
 }
 
+function sessionCanAccessCreditReminder(session, receivable) {
+  if (session?.membership?.role !== "Actor") return false;
+  if (!["Broker", "Special Broker"].includes(session.membership.actorRole)) return false;
+  const actorIdMatches = receivable?.borrowerActorId && receivable.borrowerActorId === session.membership.actorId;
+  const actorNameMatches = receivable?.borrower && receivable.borrower === session.membership.actorName;
+  return Boolean(actorIdMatches || actorNameMatches);
+}
+
+function stripRestrictedCreditReminders(state, session) {
+  if (!state || typeof state !== "object") return state;
+  return {
+    ...state,
+    receivables: (state.receivables || []).map((receivable) => {
+      if (sessionCanAccessCreditReminder(session, receivable)) return receivable;
+      const { creditReminder, ...visibleReceivable } = receivable;
+      return visibleReceivable;
+    }),
+  };
+}
+
+function sanitizeIncomingWorkspaceState(state, session) {
+  if (!state || typeof state !== "object" || !Array.isArray(state.receivables)) return state || {};
+  return {
+    ...state,
+    receivables: state.receivables.map((receivable) => {
+      if (sessionCanAccessCreditReminder(session, receivable)) return receivable;
+      const { creditReminder, ...allowedReceivable } = receivable;
+      return allowedReceivable;
+    }),
+  };
+}
+
 function resetWorkspaceState(db, workspaceId, scope = "data") {
   const currentState = db.appStates[workspaceId] || {};
   const allActors = mergeById(workspaceActors(db, workspaceId), currentState.actors || []);
@@ -625,7 +755,7 @@ function resetWorkspaceState(db, workspaceId, scope = "data") {
   return nextState;
 }
 
-async function requireSession(request, response, db) {
+async function requireSession(request, response, db, { touch = true } = {}) {
   const sessionId = parseCookies(request).hp_session;
   const sessionRecord = activeSessionRecord(db, sessionId);
   const session = publicSessionForRecord(db, sessionRecord);
@@ -642,9 +772,11 @@ async function requireSession(request, response, db) {
     sendJson(response, 403, { error: "This workspace is inactive." });
     return null;
   }
-  touchSession(sessionRecord);
-  setSessionCookie(response, sessionRecord.id);
-  await saveDb(db);
+  if (touch) {
+    touchSession(sessionRecord);
+    setSessionCookie(response, sessionRecord);
+    await saveDb(db);
+  }
   return session;
 }
 
@@ -659,13 +791,15 @@ function requireOwner(session, response) {
 function createSession(db, userId, workspaceId) {
   const now = Date.now();
   const timestamp = new Date(now).toISOString();
+  const idleTimeoutSeconds = accountIdleTimeoutSeconds(db, userId);
   const session = {
     id: id("sess"),
     userId,
     workspaceId,
     createdAt: timestamp,
     lastActivityAt: timestamp,
-    expiresAt: new Date(now + sessionIdleMs).toISOString(),
+    idleTimeoutSeconds,
+    expiresAt: new Date(now + idleTimeoutSeconds * 1000).toISOString(),
   };
   db.sessions.push(session);
   return session;
@@ -687,7 +821,7 @@ async function handleApi(request, response, url) {
     const session = publicSessionForRecord(db, sessionRecord);
     if (sessionRecord && session) {
       touchSession(sessionRecord);
-      setSessionCookie(response, sessionRecord.id);
+      setSessionCookie(response, sessionRecord);
       await saveDb(db);
     } else {
       clearSessionCookie(response);
@@ -706,7 +840,14 @@ async function handleApi(request, response, url) {
     if (db.users.some((user) => user.email === email)) return sendJson(response, 409, { error: "That email already has an account." });
     if (role === "Master") return sendJson(response, 403, { error: "Master accounts are created by Owner." });
 
-    const user = { id: id("usr"), name, email, passwordHash: hashPassword(password), createdAt: new Date().toISOString() };
+    const user = {
+      id: id("usr"),
+      name,
+      email,
+      passwordHash: hashPassword(password),
+      idleTimeoutSeconds: defaultSessionIdleSeconds,
+      createdAt: new Date().toISOString(),
+    };
     let workspace;
     let membership;
 
@@ -753,9 +894,10 @@ async function handleApi(request, response, url) {
 
     db.users.push(user);
     db.memberships.push(membership);
+    clearLoginAttempts(db, email);
     const session = createSession(db, user.id, workspace.id);
     await saveDb(db);
-    setSessionCookie(response, session.id);
+    setSessionCookie(response, session);
     sendJson(response, 200, { session: publicSession(db, session.id) });
     return;
   }
@@ -764,31 +906,76 @@ async function handleApi(request, response, url) {
     const body = await readJson(request);
     const rawLogin = String(body.email || body.username || "").trim();
     const rawPassword = String(body.password || "").trim();
-    if (
-      rawLogin.toLowerCase() === ownerUser.toLowerCase() &&
-      (db.ownerPasswordHash ? verifyPassword(rawPassword, db.ownerPasswordHash) : rawPassword === ownerPassword)
-    ) {
-      const session = createSession(db, "__owner", "__owner");
-      await saveDb(db);
-      setSessionCookie(response, session.id);
-      sendJson(response, 200, { session: publicSession(db, session.id) });
-      return;
-    }
-    const email = rawLogin.toLowerCase();
-    const user = db.users.find((item) => item.email === email);
-    if (!user || !verifyPassword(body.password, user.passwordHash)) return sendJson(response, 401, { error: "Email or password is incorrect." });
-    const membership = db.memberships.find((item) => item.userId === user.id);
-    if (!membership) return sendJson(response, 401, { error: "This account is not linked to a workspace." });
-    const workspace = db.workspaces.find((item) => item.id === membership.workspaceId);
-    const subscription = workspaceOwnerSubscription(db, workspace);
-    if (membership.role === "Master" && user.active === false) return sendJson(response, 403, { error: "This Master account is inactive." });
-    if (subscription.inactive) return sendJson(response, 403, { error: "This workspace is inactive." });
-    if (subscription.expired) return sendJson(response, 402, { error: "This workspace subscription has expired." });
-    const session = createSession(db, user.id, membership.workspaceId);
-    await saveDb(db);
-    setSessionCookie(response, session.id);
-    sendJson(response, 200, { session: publicSession(db, session.id) });
-    return;
+    return withLoginOperationLock(rawLogin, async () => {
+      const loginDb = await loadDb();
+      const now = Date.now();
+      const { attempt } = activeLoginAttempt(loginDb, rawLogin, now);
+      const lockedUntil = new Date(attempt?.lockedUntil || 0).getTime();
+      if (Number.isFinite(lockedUntil) && lockedUntil > now) {
+        const retryAfterSeconds = Math.max(1, Math.ceil((lockedUntil - now) / 1000));
+        response.setHeader("Retry-After", String(retryAfterSeconds));
+        return sendJson(response, 423, {
+          error: "This account is locked for one hour after four failed login attempts. Try again later.",
+          lockedUntil: new Date(lockedUntil).toISOString(),
+        });
+      }
+      const ownerLogin = rawLogin.toLowerCase() === ownerUser.toLowerCase();
+      const ownerMatches = ownerLogin &&
+        (loginDb.ownerPasswordHash ? verifyPassword(rawPassword, loginDb.ownerPasswordHash) : rawPassword === ownerPassword);
+      const email = rawLogin.toLowerCase();
+      const user = loginDb.users.find((item) => item.email === email);
+      const userMatches = user && verifyPassword(body.password, user.passwordHash);
+      if (!ownerMatches && !userMatches) {
+        const failedLogin = recordFailedLogin(loginDb, rawLogin, now);
+        await saveDb(loginDb);
+        if (failedLogin.failedAttempts >= 4) {
+          response.setHeader("Retry-After", String(Math.floor(loginLockMs / 1000)));
+          return sendJson(response, 423, {
+            error: "This account is now locked for one hour after four failed login attempts.",
+            lockedUntil: failedLogin.lockedUntil,
+          });
+        }
+        if (failedLogin.failedAttempts === 3) {
+          return sendJson(response, 401, {
+            error: "Email or password is incorrect. Warning: one attempt remains before this account is locked for one hour.",
+            warning: true,
+            attemptsRemaining: 1,
+          });
+        }
+        return sendJson(response, 401, { error: "Email or password is incorrect." });
+      }
+      clearLoginAttempts(loginDb, rawLogin);
+      if (ownerMatches) {
+        const session = createSession(loginDb, "__owner", "__owner");
+        await saveDb(loginDb);
+        setSessionCookie(response, session);
+        sendJson(response, 200, { session: publicSession(loginDb, session.id) });
+        return;
+      }
+      const membership = loginDb.memberships.find((item) => item.userId === user.id);
+      if (!membership) {
+        await saveDb(loginDb);
+        return sendJson(response, 401, { error: "This account is not linked to a workspace." });
+      }
+      const workspace = loginDb.workspaces.find((item) => item.id === membership.workspaceId);
+      const subscription = workspaceOwnerSubscription(loginDb, workspace);
+      if (membership.role === "Master" && user.active === false) {
+        await saveDb(loginDb);
+        return sendJson(response, 403, { error: "This Master account is inactive." });
+      }
+      if (subscription.inactive) {
+        await saveDb(loginDb);
+        return sendJson(response, 403, { error: "This workspace is inactive." });
+      }
+      if (subscription.expired) {
+        await saveDb(loginDb);
+        return sendJson(response, 402, { error: "This workspace subscription has expired." });
+      }
+      const session = createSession(loginDb, user.id, membership.workspaceId);
+      await saveDb(loginDb);
+      setSessionCookie(response, session);
+      sendJson(response, 200, { session: publicSession(loginDb, session.id) });
+    });
   }
 
   if (url.pathname === "/api/auth/logout" && method === "POST") {
@@ -800,8 +987,46 @@ async function handleApi(request, response, url) {
     return;
   }
 
-  const session = await requireSession(request, response, db);
+  const backgroundRead = method === "GET" && url.pathname === "/api/app-state";
+  const session = await requireSession(request, response, db, { touch: !backgroundRead });
   if (!session) return;
+
+  if (url.pathname === "/api/auth/activity" && method === "POST") {
+    sendJson(response, 200, { ok: true });
+    return;
+  }
+
+  if (url.pathname === "/api/auth/timeout" && method === "PUT") {
+    const body = await readJson(request);
+    const idleTimeoutSeconds = Number(body.idleTimeoutSeconds);
+    if (!allowedSessionIdleSeconds.has(idleTimeoutSeconds)) {
+      return sendJson(response, 400, { error: "Choose one of the available automatic logout times." });
+    }
+    if (session.user.id === "__owner") {
+      db.ownerIdleTimeoutSeconds = idleTimeoutSeconds;
+    } else {
+      const user = db.users.find((item) => item.id === session.user.id);
+      if (!user) return sendJson(response, 404, { error: "This account was not found." });
+      user.idleTimeoutSeconds = idleTimeoutSeconds;
+    }
+    const now = Date.now();
+    db.sessions
+      .filter((item) => item.userId === session.user.id)
+      .forEach((item) => {
+        item.idleTimeoutSeconds = idleTimeoutSeconds;
+        touchSession(item, now);
+      });
+    const sessionId = parseCookies(request).hp_session;
+    const currentSessionRecord = db.sessions.find((item) => item.id === sessionId);
+    if (currentSessionRecord) setSessionCookie(response, currentSessionRecord);
+    await saveDb(db);
+    sendJson(response, 200, {
+      ok: true,
+      idleTimeoutSeconds,
+      session: publicSessionForRecord(db, currentSessionRecord),
+    });
+    return;
+  }
 
   if (url.pathname === "/api/auth/password" && method === "POST") {
     const body = await readJson(request);
@@ -852,6 +1077,7 @@ async function handleApi(request, response, url) {
       name,
       email,
       passwordHash: hashPassword(password),
+      idleTimeoutSeconds: defaultSessionIdleSeconds,
       createdAt: new Date().toISOString(),
       active: true,
       subscriptionPlan: planId,
@@ -964,7 +1190,7 @@ async function handleApi(request, response, url) {
     const state = mergeWorkspaceState(db, session.workspace.id, currentState);
     db.appStates[session.workspace.id] = state;
     await saveDb(db);
-    sendJson(response, 200, { state });
+    sendJson(response, 200, { state: stripRestrictedCreditReminders(state, session) });
     return;
   }
 
@@ -1007,7 +1233,7 @@ async function handleApi(request, response, url) {
     if (nextState.expandedSpecialDividerActorId === actorId) nextState.expandedSpecialDividerActorId = "";
     db.appStates[session.workspace.id] = nextState;
     await saveDb(db, { replace: true });
-    sendJson(response, 200, { ok: true, state: nextState });
+    sendJson(response, 200, { ok: true, state: stripRestrictedCreditReminders(nextState, session) });
     return;
   }
 
@@ -1047,13 +1273,14 @@ async function handleApi(request, response, url) {
     }
     db.appStates[session.workspace.id] = nextState;
     await saveDb(db, { replace: scope === "wipe" });
-    sendJson(response, 200, { ok: true, state: nextState });
+    sendJson(response, 200, { ok: true, state: stripRestrictedCreditReminders(nextState, session) });
     return;
   }
 
   if (url.pathname === "/api/app-state" && method === "PUT") {
     const body = await readJson(request);
-    db.appStates[session.workspace.id] = mergeWorkspaceState(db, session.workspace.id, body.state || {});
+    const incomingState = sanitizeIncomingWorkspaceState(body.state || {}, session);
+    db.appStates[session.workspace.id] = mergeWorkspaceState(db, session.workspace.id, incomingState);
     await saveDb(db);
     sendJson(response, 200, { ok: true });
     return;

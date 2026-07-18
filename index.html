@@ -2345,6 +2345,10 @@
                         <option value="credit">Credit</option>
                       </select>
                     </div>
+                    <div class="field hidden" id="creditReminderField">
+                      <label for="creditReminder">Credit Reminder</label>
+                      <input id="creditReminder" placeholder="Collection reminder">
+                    </div>
                     <div class="field customer-field" data-customer-field="sender">
                       <label for="senderName">Sender name</label>
                       <div class="customer-input-line">
@@ -2360,6 +2364,10 @@
                         <button class="btn secondary customer-save-button" id="saveReceiverCustomer" type="button" data-customer-control>Save</button>
                       </div>
                       <div class="customer-picker hidden" id="receiverCustomerPicker" role="listbox"></div>
+                    </div>
+                    <div class="field">
+                      <label for="receiverCity">Receiver city</label>
+                      <input id="receiverCity" autocomplete="address-level2" placeholder="City or address area">
                     </div>
                     <div class="field">
                       <label for="accountNumber">Account number</label>
@@ -2662,6 +2670,17 @@
               </div>
             </div>
             <div class="panel-body">
+              <div class="form-grid">
+                <div class="field">
+                  <label for="ledgerTransactionSort">Sort transactions</label>
+                  <select id="ledgerTransactionSort">
+                    <option value="date-desc">Date - Newest first</option>
+                    <option value="date-asc">Date - Oldest first</option>
+                    <option value="reference-asc">Order / Transfer No. - Ascending</option>
+                    <option value="reference-desc">Order / Transfer No. - Descending</option>
+                  </select>
+                </div>
+              </div>
               <div class="form-grid ledger-export-options" data-master-action>
                 <div class="field">
                   <label for="ledgerActorSelect">Actor ledger</label>
@@ -2815,6 +2834,15 @@
                   <label for="archiveMonthFilter">Closed month</label>
                   <select id="archiveMonthFilter">
                     <option value="">All months</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="archiveTransactionSort">Sort transactions</label>
+                  <select id="archiveTransactionSort">
+                    <option value="date-desc">Date - Newest first</option>
+                    <option value="date-asc">Date - Oldest first</option>
+                    <option value="reference-asc">Order / Transfer No. - Ascending</option>
+                    <option value="reference-desc">Order / Transfer No. - Descending</option>
                   </select>
                 </div>
                 <div class="field">
@@ -2980,7 +3008,44 @@
 
         <section class="view" id="settings">
           <div class="grid">
-            <div class="panel span-12 settings-category" data-settings-panel="actorAccess">
+            <div class="panel span-12 settings-category" data-settings-panel="accountTimeout">
+            <div class="panel-header">
+              <div class="settings-heading">
+                <h2>Time Out Settings</h2>
+              </div>
+              <div class="panel-actions">
+                <span id="accountTimeoutStatus" class="state-pill">2 Hours</span>
+                <button class="btn secondary settings-panel-toggle" data-settings-toggle="accountTimeout" type="button" aria-expanded="true">
+                  <span data-settings-toggle-text>Collapse</span>
+                </button>
+              </div>
+            </div>
+            <div class="panel-body" data-settings-body>
+              <form id="accountTimeoutForm">
+                <div class="form-grid">
+                  <div class="field">
+                    <label for="accountTimeoutSelect">Automatic logout after inactivity</label>
+                    <select id="accountTimeoutSelect">
+                      <option value="10">10 Seconds</option>
+                      <option value="20">20 Seconds</option>
+                      <option value="30">30 Seconds</option>
+                      <option value="60">1 Minute</option>
+                      <option value="300">5 Minutes</option>
+                      <option value="900">15 Minutes</option>
+                      <option value="1800">30 Minutes</option>
+                      <option value="3600">1 Hour</option>
+                      <option value="7200">2 Hours</option>
+                    </select>
+                  </div>
+                </div>
+                <span class="field-error" id="accountTimeoutError"></span>
+                <div class="actions">
+                  <button class="btn primary" type="submit">Save Time Out</button>
+                </div>
+              </form>
+            </div>
+            </div>
+            <div class="panel span-12 settings-category" data-settings-panel="actorAccess" data-master-settings>
             <div class="panel-header">
               <div class="settings-heading">
                 <h2>Actor Access</h2>
@@ -2999,7 +3064,7 @@
               </table>
             </div>
             </div>
-            <div class="panel span-12 settings-category" data-settings-panel="agentVisibility">
+            <div class="panel span-12 settings-category" data-settings-panel="agentVisibility" data-master-settings>
             <div class="panel-header">
               <div class="settings-heading">
                 <h2>Agent Visibility</h2>
@@ -3018,7 +3083,7 @@
               </table>
             </div>
             </div>
-            <div class="panel span-5 settings-category">
+            <div class="panel span-5 settings-category" data-master-settings>
             <div class="panel-header">
               <div class="settings-heading">
                 <h2>Master Reset</h2>
@@ -3050,7 +3115,7 @@
               </form>
             </div>
             </div>
-            <div class="panel span-7 settings-category" data-settings-panel="inviteCodes">
+            <div class="panel span-7 settings-category" data-settings-panel="inviteCodes" data-master-settings>
             <div class="panel-header">
               <div class="settings-heading">
                 <h2>Invite Codes</h2>
@@ -3096,7 +3161,7 @@
               </table>
             </div>
             </div>
-            <div class="panel span-6 settings-category" data-settings-panel="fixedOrderRates">
+            <div class="panel span-6 settings-category" data-settings-panel="fixedOrderRates" data-master-settings>
             <div class="panel-header">
               <div class="settings-heading">
                 <h2>Fixed Order Rates</h2>
@@ -3115,7 +3180,7 @@
               </table>
             </div>
             </div>
-            <div class="panel span-6 settings-category">
+            <div class="panel span-6 settings-category" data-master-settings>
             <div class="panel-header">
               <div class="settings-heading">
                 <h2>Income Statement Rates</h2>
@@ -3156,6 +3221,10 @@
     let suppressRemoteSave = false;
     let remoteRefreshTimer = null;
     let inactivityCheckTimer = null;
+    let lastSessionActivityPingAt = 0;
+    let sessionActivityPingPending = false;
+    let sessionActivityPingTimer = null;
+    let endingAuthSession = false;
     const processingOrderIds = new Set();
     const pendingProofFiles = new Map();
     const pendingProofUploads = new Map();
@@ -3165,7 +3234,8 @@
     const expandedLedgerDetailKeys = new Set();
     let ledgerScrollUpdateFrame = null;
     let syncingLedgerScroll = false;
-    const authIdleMs = 1000 * 60 * 60 * 3;
+    const allowedAuthIdleSeconds = new Set([10, 20, 30, 60, 300, 900, 1800, 3600, 7200]);
+    const defaultAuthIdleSeconds = 7200;
     const maxProofFileBytes = 4 * 1024 * 1024;
     const supportedCurrencies = ["USD", "ETB", "EUR", "ERN"];
 
@@ -3249,6 +3319,7 @@
     }
 
     const settingsPanelDefaults = {
+      accountTimeout: true,
       actorAccess: true,
       agentVisibility: true,
       inviteCodes: true,
@@ -3467,12 +3538,13 @@
           actorId: clean(customer.actorId),
           kind: customer.kind === "sender" ? "sender" : "receiver",
           name: clean(customer.name),
+          receiverCity: clean(customer.receiverCity),
           accountNumber: clean(customer.accountNumber),
           phoneNumber: clean(customer.phoneNumber),
           remarks: clean(customer.remarks),
           updatedAt: clean(customer.updatedAt) || clean(customer.createdAt) || new Date(0).toISOString()
         }))
-        .filter((customer) => customer.name || customer.accountNumber || customer.phoneNumber || customer.remarks);
+        .filter((customer) => customer.name || customer.receiverCity || customer.accountNumber || customer.phoneNumber || customer.remarks);
     }
 
     function transferCommissionPercent(transfer) {
@@ -3786,14 +3858,70 @@
       }
     }
 
+    function normalizedAuthIdleSeconds(value) {
+      const seconds = Number(value);
+      return allowedAuthIdleSeconds.has(seconds) ? seconds : defaultAuthIdleSeconds;
+    }
+
+    function authIdleSeconds(session = currentAuth) {
+      return normalizedAuthIdleSeconds(session?.user?.idleTimeoutSeconds);
+    }
+
+    function authIdleMilliseconds(session = currentAuth) {
+      return authIdleSeconds(session) * 1000;
+    }
+
+    function authIdleLabel(seconds = authIdleSeconds()) {
+      const labels = {
+        10: "10 seconds",
+        20: "20 seconds",
+        30: "30 seconds",
+        60: "1 minute",
+        300: "5 minutes",
+        900: "15 minutes",
+        1800: "30 minutes",
+        3600: "1 hour",
+        7200: "2 hours"
+      };
+      return labels[normalizedAuthIdleSeconds(seconds)] || "2 hours";
+    }
+
     function authSessionIsIdle(session = currentAuth) {
       const lastActivity = lastAuthActivity(session);
-      return lastActivity > 0 && Date.now() - lastActivity >= authIdleMs;
+      return lastActivity > 0 && Date.now() - lastActivity >= authIdleMilliseconds(session);
+    }
+
+    function pingSessionActivity() {
+      if (!currentAuth || endingAuthSession || sessionActivityPingPending) return;
+      if (sessionActivityPingTimer) clearTimeout(sessionActivityPingTimer);
+      sessionActivityPingTimer = null;
+      lastSessionActivityPingAt = Date.now();
+      sessionActivityPingPending = true;
+      api("/api/auth/activity", { method: "POST" })
+        .catch((error) => {
+          if (String(error?.message || "").includes("Please log in")) endAuthSession({ notify: true });
+        })
+        .finally(() => {
+          sessionActivityPingPending = false;
+        });
     }
 
     function noteUserActivity() {
-      if (!currentAuth) return;
+      if (!currentAuth || endingAuthSession) return;
+      if (authSessionIsIdle()) {
+        endAuthSession({ notify: true });
+        return;
+      }
       rememberAuthActivity(currentAuth);
+      startInactivityWatch();
+      const now = Date.now();
+      const pingInterval = Math.max(2000, Math.min(30000, Math.floor(authIdleMilliseconds() / 3)));
+      const timeUntilPing = pingInterval - (now - lastSessionActivityPingAt);
+      if (timeUntilPing <= 0) {
+        pingSessionActivity();
+      } else if (!sessionActivityPingTimer) {
+        sessionActivityPingTimer = setTimeout(pingSessionActivity, timeUntilPing);
+      }
     }
 
     function stopInactivityWatch() {
@@ -3803,13 +3931,27 @@
 
     function startInactivityWatch() {
       stopInactivityWatch();
-      inactivityCheckTimer = setInterval(() => {
-        if (authSessionIsIdle()) endAuthSession({ notify: true });
-      }, 60000);
+      if (!currentAuth) return;
+      const lastActivity = lastAuthActivity(currentAuth) || Date.now();
+      const remaining = authIdleMilliseconds(currentAuth) - (Date.now() - lastActivity);
+      if (remaining <= 0) {
+        endAuthSession({ notify: true });
+        return;
+      }
+      inactivityCheckTimer = setTimeout(() => {
+        if (authSessionIsIdle()) {
+          endAuthSession({ notify: true });
+        } else {
+          startInactivityWatch();
+        }
+      }, remaining);
     }
 
     async function endAuthSession({ notify = false } = {}) {
+      if (endingAuthSession) return;
+      endingAuthSession = true;
       const session = currentAuth;
+      const idleLabel = authIdleLabel(authIdleSeconds(session));
       await api("/api/auth/logout", { method: "POST" }).catch(() => {});
       forgetAuthActivity(session);
       currentAuth = null;
@@ -3817,9 +3959,14 @@
       if (remoteRefreshTimer) clearInterval(remoteRefreshTimer);
       remoteRefreshTimer = null;
       stopInactivityWatch();
+      lastSessionActivityPingAt = 0;
+      sessionActivityPingPending = false;
+      if (sessionActivityPingTimer) clearTimeout(sessionActivityPingTimer);
+      sessionActivityPingTimer = null;
       els.authScreen.classList.remove("hidden");
       els.accountBadge.textContent = "Not logged in";
-      if (notify) showAuthError(els.loginError, "You were logged out after 3 hours of inactivity.");
+      if (notify) showAuthError(els.loginError, `You were logged out after ${idleLabel} of inactivity.`);
+      endingAuthSession = false;
     }
 
     function signedInRole() {
@@ -3853,7 +4000,9 @@
     }
 
     async function applyAuthSession(session) {
+      endingAuthSession = false;
       currentAuth = session;
+      lastSessionActivityPingAt = Date.now();
       rememberAuthActivity(session);
       remoteStateReady = false;
       storageKey = authStorageKey(session);
@@ -3897,7 +4046,7 @@
       settlement: ["Settlement", "Net actor positions against Master cash."],
       archive: ["Archive", "Closed transactions locked after balance closing."],
       actors: ["Actors", "Master can create and remove ledger actors."],
-      settings: ["Settings", "Master controls actor permissions."],
+      settings: ["Settings", "Account security and workspace controls."],
       owner: ["Owner", "Create Masters and manage subscription access."]
     };
 
@@ -3924,6 +4073,10 @@
       passwordButton: document.getElementById("passwordButton"),
       passwordCancel: document.getElementById("passwordCancel"),
       passwordError: document.getElementById("passwordError"),
+      accountTimeoutForm: document.getElementById("accountTimeoutForm"),
+      accountTimeoutSelect: document.getElementById("accountTimeoutSelect"),
+      accountTimeoutStatus: document.getElementById("accountTimeoutStatus"),
+      accountTimeoutError: document.getElementById("accountTimeoutError"),
       authScreen: document.getElementById("authScreen"),
       showLogin: document.getElementById("showLogin"),
       showSignup: document.getElementById("showSignup"),
@@ -3986,6 +4139,7 @@
       ledgerExportOrderedAmount: document.getElementById("ledgerExportOrderedAmount"),
       ledgerExportRate: document.getElementById("ledgerExportRate"),
       ledgerExportPercent: document.getElementById("ledgerExportPercent"),
+      ledgerTransactionSort: document.getElementById("ledgerTransactionSort"),
       exportArchiveExcelButton: document.getElementById("exportArchiveExcelButton"),
       exportArchivePdfButton: document.getElementById("exportArchivePdfButton"),
       transferList: document.getElementById("transferList"),
@@ -4037,6 +4191,7 @@
       actorError: document.getElementById("actorError"),
       archiveActorFilter: document.getElementById("archiveActorFilter"),
       archiveMonthFilter: document.getElementById("archiveMonthFilter"),
+      archiveTransactionSort: document.getElementById("archiveTransactionSort"),
       archiveDatePreset: document.getElementById("archiveDatePreset"),
       archiveDateFrom: document.getElementById("archiveDateFrom"),
       archiveDateTo: document.getElementById("archiveDateTo"),
@@ -4336,10 +4491,14 @@
     function updateOrderFundingMode() {
       const actor = selectedActor();
       const hidePayoutAgent = ["Broker", "Special Broker"].includes(actor?.role);
+      const isCredit = document.getElementById("orderFundingType").value === "credit";
+      const creditReminder = document.getElementById("creditReminder");
       document.querySelectorAll("[data-credit-optional]").forEach((field) => {
         field.classList.remove("hidden");
       });
       document.getElementById("agent")?.closest(".field")?.classList.toggle("hidden", hidePayoutAgent);
+      document.getElementById("creditReminderField")?.classList.toggle("hidden", !isCredit);
+      if (!isCredit && creditReminder) creditReminder.value = "";
       applyFixedOrderRate();
       buildJournalPreview();
     }
@@ -4369,6 +4528,7 @@
       return {
         kind,
         name: text(document.getElementById(isSender ? "senderName" : "receiverName").value),
+        receiverCity: isSender ? "" : text(document.getElementById("receiverCity").value),
         accountNumber: isSender ? "" : text(document.getElementById("accountNumber").value),
         phoneNumber: isSender ? "" : text(document.getElementById("phoneNumber").value),
         remarks: isSender ? "" : text(document.getElementById("remarks").value)
@@ -4376,7 +4536,7 @@
     }
 
     function upsertSavedCustomer(actor, details) {
-      if (!actor || !details || (!details.name && !details.accountNumber && !details.phoneNumber && !details.remarks)) return null;
+      if (!actor || !details || (!details.name && !details.receiverCity && !details.accountNumber && !details.phoneNumber && !details.remarks)) return null;
       state.savedCustomers = normalizeSavedCustomers(state.savedCustomers);
       const normalizedName = details.name.toLocaleLowerCase();
       const existing = state.savedCustomers.find((customer) =>
@@ -4391,6 +4551,7 @@
         actorId: actor.id,
         kind: details.kind,
         name: details.name,
+        receiverCity: details.receiverCity,
         accountNumber: details.accountNumber,
         phoneNumber: details.phoneNumber,
         remarks: details.remarks,
@@ -4415,13 +4576,13 @@
       }
       const query = text(input.value).toLocaleLowerCase();
       const customers = savedCustomersForActor(actor, kind).filter((customer) => {
-        const haystack = [customer.name, customer.phoneNumber, customer.accountNumber, customer.remarks]
+        const haystack = [customer.name, customer.receiverCity, customer.phoneNumber, customer.accountNumber, customer.remarks]
           .join(" ").toLocaleLowerCase();
         return !query || haystack.includes(query);
       });
       picker.innerHTML = customers.length
         ? customers.map((customer) => {
-          const details = [customer.phoneNumber, customer.accountNumber].filter(Boolean).join(" | ");
+          const details = [customer.receiverCity, customer.phoneNumber, customer.accountNumber].filter(Boolean).join(" | ");
           return `<button class="customer-option" type="button" role="option" data-saved-customer-id="${escapeHtml(customer.id)}" data-saved-customer-kind="${kind}">
             <strong>${escapeHtml(customer.name || customer.phoneNumber || customer.accountNumber)}</strong>
             ${details ? `<span>${escapeHtml(details)}</span>` : ""}
@@ -4436,6 +4597,7 @@
       const nameInput = document.getElementById(kind === "sender" ? "senderName" : "receiverName");
       if (nameInput) nameInput.value = customer.name || "";
       if (kind === "receiver") {
+        document.getElementById("receiverCity").value = customer.receiverCity || "";
         document.getElementById("accountNumber").value = customer.accountNumber || "";
         document.getElementById("phoneNumber").value = customer.phoneNumber || "";
         document.getElementById("remarks").value = customer.remarks || "";
@@ -4449,7 +4611,7 @@
       const actor = selectedActor();
       if (!canUseSavedCustomers(actor)) return;
       const details = customerDetailsFromForm(kind);
-      if (!details.name && !details.accountNumber && !details.phoneNumber && !details.remarks) {
+      if (!details.name && !details.receiverCity && !details.accountNumber && !details.phoneNumber && !details.remarks) {
         notifyEvent("Customer not saved", `Enter ${kind} details first.`);
         return;
       }
@@ -4465,6 +4627,7 @@
       upsertSavedCustomer(brokerActor, {
         kind: "sender",
         name: input.senderName,
+        receiverCity: "",
         accountNumber: "",
         phoneNumber: "",
         remarks: ""
@@ -4472,6 +4635,7 @@
       upsertSavedCustomer(brokerActor, {
         kind: "receiver",
         name: input.receiverName,
+        receiverCity: input.receiverCity,
         accountNumber: input.accountNumber,
         phoneNumber: input.phoneNumber,
         remarks: input.remarks
@@ -4503,14 +4667,17 @@
         grossMinor: sourceAmountMinor + commissionMinor,
         senderName: text(document.getElementById("senderName").value),
         receiverName: text(document.getElementById("receiverName").value),
+        receiverCity: text(document.getElementById("receiverCity").value),
         accountNumber: text(document.getElementById("accountNumber").value),
         phoneNumber: text(document.getElementById("phoneNumber").value),
         remarks: text(document.getElementById("remarks").value),
         rate: effectiveRate,
         commissionPercent,
         fundingType: document.getElementById("orderFundingType").value,
+        creditReminder: text(document.getElementById("creditReminder").value),
         receiverFields: [
           document.getElementById("receiverName").value,
+          document.getElementById("receiverCity").value,
           document.getElementById("accountNumber").value,
           document.getElementById("phoneNumber").value,
           document.getElementById("remarks").value
@@ -4747,6 +4914,7 @@
         commissionPercent: input.commissionPercent,
         senderName: input.senderName,
         receiverName: input.receiverName,
+        receiverCity: input.receiverCity,
         accountNumber: input.accountNumber,
         phoneNumber: input.phoneNumber,
         remarks: input.remarks,
@@ -4777,12 +4945,13 @@
       document.getElementById("orderFundingType").value = order.fundingType || "cash";
       document.getElementById("senderName").value = order.senderName || "";
       document.getElementById("receiverName").value = order.receiverName || "";
+      document.getElementById("receiverCity").value = order.receiverCity || "";
       document.getElementById("accountNumber").value = order.accountNumber || "";
       document.getElementById("phoneNumber").value = order.phoneNumber || "";
       document.getElementById("remarks").value = order.remarks || "";
+      document.getElementById("creditReminder").value = receivableForOrder(order)?.creditReminder || "";
       renderActorSelectors();
-      applyFixedOrderRate();
-      buildJournalPreview();
+      updateOrderFundingMode();
     }
 
     function clearOrderDetails() {
@@ -4796,12 +4965,14 @@
       document.getElementById("orderFundingType").value = "";
       document.getElementById("senderName").value = "";
       document.getElementById("receiverName").value = "";
+      document.getElementById("receiverCity").value = "";
       document.getElementById("accountNumber").value = "";
       document.getElementById("phoneNumber").value = "";
       document.getElementById("remarks").value = "";
+      document.getElementById("creditReminder").value = "";
       els.receiverError.classList.remove("visible");
       document.getElementById("rate").disabled = false;
-      buildJournalPreview();
+      updateOrderFundingMode();
     }
 
     function nextOrderId() {
@@ -4835,9 +5006,11 @@
         principalMinor: input.sourceAmountMinor,
         senderName: input.senderName,
         receiverName: input.receiverName,
+        receiverCity: input.receiverCity,
         accountNumber: input.accountNumber,
         phoneNumber: input.phoneNumber,
         remarks: input.remarks,
+        creditReminder: input.creditReminder,
         createdAt: existing?.createdAt || now,
         updatedAt: now,
         createdBy: existing?.createdBy || selectedActor()?.name || input.broker,
@@ -5019,7 +5192,7 @@
     function privilegeViews(role, actor = selectedActor()) {
       if (role === "Owner") return ["owner"];
       if (role === "Master") return ["dashboard", "search", "orders", "pendingCancelled", "transfers", "receivables", "chat", "ledger", "settlement", "archive", "actors", "settings"];
-      const views = ["dashboard", "search", "orders", "chat", "ledger", "settlement", "archive"];
+      const views = ["dashboard", "search", "orders", "chat", "ledger", "settlement", "archive", "settings"];
       if (actor?.transferEnabled !== false) views.splice(views.indexOf("chat"), 0, "transfers");
       if (["Broker", "Special Broker"].includes(role)) views.splice(views.indexOf("chat"), 0, "receivables");
       if (role === "Broker") return views;
@@ -5956,6 +6129,9 @@
       document.querySelectorAll("[data-master-action]").forEach((el) => {
         el.classList.toggle("hidden", role !== "Master");
       });
+      document.querySelectorAll("[data-master-settings]").forEach((el) => {
+        el.classList.toggle("hidden", !signedInAsMaster());
+      });
       document.querySelectorAll("[data-agent-action]").forEach((el) => {
         el.classList.toggle("hidden", !canActAsSelectedActor || (role !== "Agent" && role !== "Special Agent" && role !== "Special Broker"));
       });
@@ -6394,6 +6570,15 @@
       });
     }
 
+    function renderAccountTimeoutSettings() {
+      const seconds = authIdleSeconds(currentAuth);
+      if (els.accountTimeoutSelect) els.accountTimeoutSelect.value = String(seconds);
+      if (els.accountTimeoutStatus) {
+        const label = authIdleLabel(seconds);
+        els.accountTimeoutStatus.textContent = label.charAt(0).toUpperCase() + label.slice(1);
+      }
+    }
+
     async function renderSubscriptions() {
       if (!currentAuth || currentAuth.membership?.role !== "Owner") {
         if (els.subscriptionRows) els.subscriptionRows.innerHTML = '<tr><td colspan="8">Only Owner can manage subscriptions.</td></tr>';
@@ -6628,6 +6813,7 @@
         orderDetailItem("orderingActor", viewer?.role === "Master" && order.broker ? `Ordering Actor: ${escapeHtml(order.broker)}` : ""),
         orderDetailItem("sender", order.senderName ? `Sender: ${escapeHtml(order.senderName)}` : ""),
         orderDetailItem("receiver", order.receiverName ? `Receiver: ${escapeHtml(order.receiverName)}` : ""),
+        orderDetailItem("receiverCity", order.receiverCity ? `Receiver City: ${escapeHtml(order.receiverCity)}` : ""),
         orderDetailItem("phone", order.phoneNumber ? `Phone: ${escapeHtml(order.phoneNumber)}` : ""),
         orderDetailItem("account", order.accountNumber ? `Account: ${escapeHtml(order.accountNumber)}` : ""),
         orderDetailItem("remarks", order.remarks ? `Remarks: ${escapeHtml(order.remarks)}` : ""),
@@ -6696,6 +6882,7 @@
       return [
         ["Sender Name", order.senderName],
         ["Receiver Name", order.receiverName],
+        ["Receiver City", order.receiverCity],
         ["Source Amount", orderCopyAmount(sourceCurrency, order.sourceAmountMinor)],
         ["Total Payout", orderCopyAmount(payoutCurrency, payoutMinor)],
         ["Phone Number", order.phoneNumber],
@@ -7037,14 +7224,57 @@
       return rows.join("");
     }
 
+    const transactionReferenceCollator = new Intl.Collator(undefined, {
+      numeric: true,
+      sensitivity: "base"
+    });
+
+    function sortedTransactionRows(rows, sortValue, getDate, getReference) {
+      const sortByReference = String(sortValue || "date-desc").startsWith("reference-");
+      const descending = String(sortValue || "date-desc").endsWith("-desc");
+      return rows
+        .map((item, index) => ({ item, index }))
+        .sort((left, right) => {
+          let comparison = 0;
+          if (sortByReference) {
+            const leftReference = String(getReference(left.item) || "").trim();
+            const rightReference = String(getReference(right.item) || "").trim();
+            if (!leftReference || !rightReference) {
+              if (!leftReference && !rightReference) return left.index - right.index;
+              return leftReference ? -1 : 1;
+            }
+            comparison = transactionReferenceCollator.compare(leftReference, rightReference);
+          } else {
+            const leftTime = new Date(getDate(left.item) || "").getTime();
+            const rightTime = new Date(getDate(right.item) || "").getTime();
+            const leftHasDate = Number.isFinite(leftTime);
+            const rightHasDate = Number.isFinite(rightTime);
+            if (!leftHasDate || !rightHasDate) {
+              if (!leftHasDate && !rightHasDate) return left.index - right.index;
+              return leftHasDate ? -1 : 1;
+            }
+            comparison = leftTime - rightTime;
+          }
+          if (comparison !== 0) return descending ? -comparison : comparison;
+          return left.index - right.index;
+        })
+        .map(({ item }) => item);
+    }
+
     function currentLedgerContext() {
       const actor = selectedActor();
       const ledgerActor = actor?.role === "Master"
         ? activeActors().find((item) => item.name === state.selectedLedgerActor)
         : actor;
-      const lines = actor?.role === "Master"
+      const unsortedLines = actor?.role === "Master"
         ? activeLedgerLines(state.ledger).filter((line) => ledgerActor ? lineBelongsToActor(line, ledgerActor) : false)
         : activeLedgerLines(state.ledger).filter((line) => lineBelongsToActor(line, actor));
+      const lines = sortedTransactionRows(
+        unsortedLines,
+        els.ledgerTransactionSort?.value || "date-desc",
+        (line) => line.postedAt,
+        (line) => ledgerReferenceNumber(line, actor, ledgerActor)
+      );
       return {
         actor,
         ledgerActor,
@@ -7463,6 +7693,7 @@
         orderDisplayNumber(order, viewer, contextActor) ? `Order: ${orderDisplayNumber(order, viewer, contextActor)}` : "",
         order.senderName ? `Sender: ${order.senderName}` : "",
         order.receiverName ? `Receiver: ${order.receiverName}` : "",
+        order.receiverCity ? `Receiver City: ${order.receiverCity}` : "",
         order.accountNumber ? `Account: ${order.accountNumber}` : "",
         order.phoneNumber ? `Phone: ${order.phoneNumber}` : "",
         order.remarks ? `Remarks: ${order.remarks}` : ""
@@ -7618,6 +7849,20 @@
       return clean.length > width ? `${clean.slice(0, Math.max(0, width - 1))}.` : clean.padEnd(width, " ");
     }
 
+    function wrappedFixedCell(value, width) {
+      let remaining = String(value ?? "").replace(/\s+/g, " ").trim();
+      if (!remaining) return ["".padEnd(width, " ")];
+      const lines = [];
+      while (remaining.length > width) {
+        let breakAt = remaining.lastIndexOf(" ", width);
+        if (breakAt <= 0) breakAt = width;
+        lines.push(remaining.slice(0, breakAt).trimEnd().padEnd(width, " "));
+        remaining = remaining.slice(breakAt).trimStart();
+      }
+      lines.push(remaining.padEnd(width, " "));
+      return lines;
+    }
+
     function pdfSafe(value) {
       return String(value ?? "")
         .normalize("NFKD")
@@ -7661,7 +7906,13 @@
         widths.map((width) => "-".repeat(width)).join(" ")
       ];
       rows.forEach((row) => {
-        textRows.push(headers.map((header, index) => fixedCell(row[header], widths[index])).join(" "));
+        const wrappedCells = headers.map((header, index) => wrappedFixedCell(row[header], widths[index]));
+        const rowHeight = wrappedCells.reduce((height, cellLines) => Math.max(height, cellLines.length), 1);
+        for (let lineIndex = 0; lineIndex < rowHeight; lineIndex += 1) {
+          textRows.push(wrappedCells
+            .map((cellLines, index) => cellLines[lineIndex] || "".padEnd(widths[index], " "))
+            .join(" "));
+        }
       });
 
       const pageWidth = 842;
@@ -7952,6 +8203,11 @@
         : activeReceivables.filter((item) => item.borrower === actor?.name || item.borrowerActorId === actor?.id);
     }
 
+    function actorCanSeeCreditReminder(receivable, actor = selectedActor()) {
+      if (!actor || signedInAsMaster() || !actorCanInitiateOrders(actor.role)) return false;
+      return receivable?.borrower === actor.name || receivable?.borrowerActorId === actor.id;
+    }
+
     function renderReceivables() {
       const activePaymentInput = document.activeElement?.closest?.(".receivable-payment");
       if (activePaymentInput && els.receivableRows.contains(activePaymentInput)) {
@@ -7978,9 +8234,11 @@
         const details = [
           item.senderName ? `Sender: ${item.senderName}` : "",
           item.receiverName ? `Receiver: ${item.receiverName}` : "",
+          item.receiverCity ? `Receiver City: ${item.receiverCity}` : "",
           item.phoneNumber ? `Phone: ${item.phoneNumber}` : "",
           item.accountNumber ? `Account: ${item.accountNumber}` : "",
           item.remarks ? `Remarks: ${item.remarks}` : "",
+          actorCanSeeCreditReminder(item, actor) && item.creditReminder ? `Credit Reminder: ${item.creditReminder}` : "",
           isVoided ? `Voided: ${displayDate(item.voidedAt)}` : "",
           paymentHistory ? `Payments: ${paymentHistory}` : ""
         ].filter(Boolean).join(" - ");
@@ -8087,6 +8345,7 @@
         ...orderNumberDetailValues(order, viewer),
         order.senderName ? `Sender: ${order.senderName}` : "",
         order.receiverName ? `Receiver: ${order.receiverName}` : "",
+        order.receiverCity ? `Receiver City: ${order.receiverCity}` : "",
         order.phoneNumber ? `Phone: ${order.phoneNumber}` : "",
         order.accountNumber ? `Account: ${order.accountNumber}` : "",
         order.remarks ? `Remarks: ${order.remarks}` : "",
@@ -8116,6 +8375,23 @@
       return details.filter(Boolean).join(" - ");
     }
 
+    function uniqueSearchParticipants(values = []) {
+      return Array.from(new Set(values.map((value) => text(value)).filter(Boolean)));
+    }
+
+    function orderSearchGroupKey(order) {
+      const id = text(order?.internalOrderId || order?.id || order?.brokerOrderNumber);
+      return id ? `order:${id}` : "";
+    }
+
+    function orderSearchParticipants(order) {
+      return uniqueSearchParticipants([
+        order?.broker,
+        order?.agent && order.agent !== "Unassigned" ? order.agent : "",
+        "Master"
+      ]);
+    }
+
     function orderSearchResult(order, viewer, type = "Order", statusOverride = "") {
       const sourceCurrency = order.sourceCurrency || "USD";
       const payoutCurrency = order.payoutCurrency || sourceCurrency;
@@ -8137,6 +8413,10 @@
           ]
         : [];
       return {
+        searchGroupKey: orderSearchGroupKey(order),
+        searchKind: "order",
+        searchParticipants: orderSearchParticipants(order),
+        searchParticipant: "",
         type,
         date: order.paidAt || order.sentAt || order.createdAt || order.archivedAt || "",
         time: new Date(order.paidAt || order.sentAt || order.createdAt || order.archivedAt || 0).getTime() || 0,
@@ -8196,6 +8476,10 @@
       const amount = `${money(sourceCurrency, transfer.sourceAmountMinor || transfer.amountMinor || 0)} -> ${money(payoutCurrency, transfer.amountMinor || 0)}`;
       const details = transferDetailsForSearch(transfer);
       return {
+        searchGroupKey: transfer.id ? `transfer:${transfer.id}` : "",
+        searchKind: "transfer",
+        searchParticipants: uniqueSearchParticipants([transfer.from, transfer.to, "Master"]),
+        searchParticipant: "",
         type,
         date: transfer.reversedAt || transfer.paidOutAt || transfer.approvedAt || transfer.sentAt || transfer.createdAt || transfer.archivedAt || "",
         time: new Date(transfer.reversedAt || transfer.paidOutAt || transfer.approvedAt || transfer.sentAt || transfer.createdAt || transfer.archivedAt || 0).getTime() || 0,
@@ -8222,8 +8506,27 @@
       };
     }
 
+    function ledgerSearchParticipant(line) {
+      const actorName = actorNameFromAccount(line?.account);
+      if (actorName) return actorName;
+      const account = text(line?.account);
+      return /^MASTER(?:_|\s|$)/i.test(account) ? "Master" : account;
+    }
+
+    function ledgerSearchGroupKey(line) {
+      if (line?.orderId) return `order:${line.orderId}`;
+      if (line?.transferId) return `transfer:${line.transferId}`;
+      const linkedOrder = orderForLedgerLine(line);
+      if (linkedOrder) return orderSearchGroupKey(linkedOrder);
+      const linkedTransfer = transferForLedgerLine(line);
+      if (linkedTransfer?.id) return `transfer:${linkedTransfer.id}`;
+      const reference = text(line?.journal || line?.entryId);
+      return reference ? `ledger:${reference}` : "";
+    }
+
     function ledgerSearchResult(line, viewer, typeOverride = "") {
       const reference = ledgerReferenceNumber(line) || line.entryId || line.journal || "";
+      const participant = ledgerSearchParticipant(line);
       const details = [
         line.details || ledgerLineDetails(line, viewer),
         `Journal: ${line.journal || ""}`,
@@ -8234,11 +8537,15 @@
       ].filter(Boolean).join(" - ");
       const amount = money(line.currency || "USD", line.amountMinor || 0);
       return {
+        searchGroupKey: ledgerSearchGroupKey(line),
+        searchKind: "ledger",
+        searchParticipants: participant ? [participant] : [],
+        searchParticipant: participant,
         type: typeOverride || (line.source === "JOURNAL" ? "Journal" : line.source === "WITHDRAWAL" ? "Withdrawal" : "Ledger"),
         date: line.postedAt || line.archivedAt || "",
         time: new Date(line.postedAt || line.archivedAt || 0).getTime() || 0,
         reference,
-        actors: actorNameFromAccount(line.account) || line.account || "",
+        actors: participant,
         amount,
         status: line.direction || "Posted",
         details,
@@ -8259,7 +8566,7 @@
       };
     }
 
-    function receivableDetailsForSearch(item) {
+    function receivableDetailsForSearch(item, viewer = selectedActor()) {
       const paidMinor = receivablePaidMinor(item);
       const balanceMinor = Math.max(0, Number(item.principalMinor || 0) - paidMinor);
       const paymentHistory = (item.payments || [])
@@ -8270,6 +8577,7 @@
         item.agentOrderNumber ? `Payer Number: ${item.agentOrderNumber}` : "",
         item.senderName ? `Sender: ${item.senderName}` : "",
         item.receiverName ? `Receiver: ${item.receiverName}` : "",
+        item.receiverCity ? `Receiver City: ${item.receiverCity}` : "",
         item.phoneNumber ? `Phone: ${item.phoneNumber}` : "",
         item.accountNumber ? `Account: ${item.accountNumber}` : "",
         item.remarks ? `Remarks: ${item.remarks}` : "",
@@ -8281,13 +8589,17 @@
       ].filter(Boolean).join(" - ");
     }
 
-    function receivableSearchResult(item) {
+    function receivableSearchResult(item, viewer = selectedActor()) {
       const paidMinor = receivablePaidMinor(item);
       const balanceMinor = Math.max(0, Number(item.principalMinor || 0) - paidMinor);
-      const details = receivableDetailsForSearch(item);
+      const details = receivableDetailsForSearch(item, viewer);
       const amount = `Principal ${money(item.currency, item.principalMinor || 0)} / Balance ${money(item.currency, balanceMinor)}`;
       const status = receivableIsVoided(item) ? "Voided" : balanceMinor === 0 ? "Paid" : "Open";
       return {
+        searchGroupKey: item.orderId ? `order:${item.orderId}` : item.id ? `receivable:${item.id}` : "",
+        searchKind: "receivable",
+        searchParticipants: uniqueSearchParticipants([item.borrower, "Master"]),
+        searchParticipant: "",
         type: "Receivable",
         date: item.createdAt || item.updatedAt || "",
         time: new Date(item.createdAt || item.updatedAt || 0).getTime() || 0,
@@ -8305,6 +8617,7 @@
           item.currency,
           item.senderName,
           item.receiverName,
+          item.receiverCity,
           item.phoneNumber,
           item.accountNumber,
           item.remarks,
@@ -8374,6 +8687,59 @@
       };
     }
 
+    function searchResultPriority(result) {
+      const kindPriority = {
+        order: 40,
+        transfer: 40,
+        receivable: 30,
+        ledger: 20
+      }[result?.searchKind] || 10;
+      const livePriority = String(result?.type || "").startsWith("Archived") ? 0 : 5;
+      return kindPriority + livePriority;
+    }
+
+    function preferredGroupedSearchResult(results, participant = "") {
+      const transactionSummaries = results.filter((result) => ["order", "transfer"].includes(result.searchKind));
+      const participantResults = participant
+        ? results.filter((result) => result.searchParticipant === participant)
+        : [];
+      const candidates = transactionSummaries.length
+        ? transactionSummaries
+        : participantResults.length
+          ? participantResults
+          : results;
+      return candidates.slice().sort((a, b) => {
+        const priorityDifference = searchResultPriority(b) - searchResultPriority(a);
+        if (priorityDifference) return priorityDifference;
+        return Number(b.time || 0) - Number(a.time || 0);
+      })[0];
+    }
+
+    function consolidateGlobalSearchResults(results, viewer) {
+      const grouped = new Map();
+      results.forEach((result, index) => {
+        const key = result.searchGroupKey || `single:${index}`;
+        if (!grouped.has(key)) grouped.set(key, []);
+        grouped.get(key).push(result);
+      });
+      return Array.from(grouped.entries()).flatMap(([key, group]) => {
+        if (key.startsWith("single:")) return group;
+        if (viewer?.role !== "Master") {
+          const preferred = preferredGroupedSearchResult(group, viewer?.name || "");
+          return preferred ? [{ ...preferred, actors: viewer?.name || preferred.actors }] : [];
+        }
+        const participants = uniqueSearchParticipants(group.flatMap((result) => [
+          ...(result.searchParticipants || []),
+          result.searchParticipant
+        ]));
+        const visibleParticipants = participants.length ? participants : ["Master"];
+        return visibleParticipants.map((participant) => {
+          const preferred = preferredGroupedSearchResult(group, participant);
+          return { ...preferred, actors: participant };
+        });
+      });
+    }
+
     function buildGlobalSearchResults(actor, terms) {
       if (!actor || !terms.length) return [];
       const viewerIsMaster = actor.role === "Master";
@@ -8424,7 +8790,7 @@
           ).map((result) => ({ ...result, status: "Locked" }));
           return [...balanceRows, ...orderRows, ...receivableRows, ...transferRows, ...ledgerRows];
         });
-      return [...orderResults, ...transferResults, ...ledgerResults, ...receivableResults, ...archiveResults]
+      const matchingResults = [...orderResults, ...transferResults, ...ledgerResults, ...receivableResults, ...archiveResults]
         .filter((result) => matchesSearch([
           result.type,
           result.date,
@@ -8434,7 +8800,8 @@
           result.status,
           result.details,
           result.searchValues
-        ], terms))
+        ], terms));
+      return consolidateGlobalSearchResults(matchingResults, actor)
         .sort((a, b) => b.time - a.time);
     }
 
@@ -8985,6 +9352,7 @@
         const details = [
           order.senderName ? `Sender: ${order.senderName}` : "",
           order.receiverName ? `Receiver: ${order.receiverName}` : "",
+          order.receiverCity ? `Receiver City: ${order.receiverCity}` : "",
           order.phoneNumber ? `Phone: ${order.phoneNumber}` : "",
           order.accountNumber ? `Account: ${order.accountNumber}` : "",
           order.remarks ? `Remarks: ${order.remarks}` : "",
@@ -9000,6 +9368,7 @@
           order.agent,
           order.senderName,
           order.receiverName,
+          order.receiverCity,
           order.phoneNumber,
           order.accountNumber,
           order.remarks,
@@ -9020,6 +9389,7 @@
         const direction = receivable.borrower ? `Borrower: ${receivable.borrower}` : "";
         const details = [
           receivable.receiverName ? `Receiver: ${receivable.receiverName}` : "",
+          receivable.receiverCity ? `Receiver City: ${receivable.receiverCity}` : "",
           `Collected: ${money(currency, receivablePaidMinor(receivable))}`
         ].filter(Boolean).join(" - ");
         addRow({
@@ -9037,6 +9407,7 @@
           receivable.borrower,
           receivable.senderName,
           receivable.receiverName,
+          receivable.receiverCity,
           receivable.accountNumber,
           receivable.phoneNumber,
           receivable.remarks,
@@ -9104,13 +9475,24 @@
       );
     }
 
+    function sortedArchiveStatements(archives) {
+      const oldestFirst = els.archiveTransactionSort?.value === "date-asc";
+      return archives.slice().sort((left, right) => {
+        const comparison = new Date(left.closedAt || 0).getTime() - new Date(right.closedAt || 0).getTime();
+        return oldestFirst ? comparison : -comparison;
+      });
+    }
+
     function archiveRecordsForExport() {
       const actor = selectedActor();
       const filters = archiveFilterValues();
-      return filteredArchiveStatements(actor, filters)
-        .slice()
-        .sort((a, b) => new Date(b.closedAt).getTime() - new Date(a.closedAt).getTime())
-        .flatMap((archive) => archiveRecordRows(archive, actor, filters));
+      return sortedArchiveStatements(filteredArchiveStatements(actor, filters))
+        .flatMap((archive) => sortedTransactionRows(
+          archiveRecordRows(archive, actor, filters),
+          els.archiveTransactionSort?.value || "date-desc",
+          (record) => record.date,
+          (record) => record.reference
+        ));
     }
 
     function renderArchive() {
@@ -9150,11 +9532,14 @@
       let recordCount = 0;
       const rows = Object.entries(byActor).flatMap(([actorName, archives]) => {
         const actorRows = [`<tr><td colspan="6"><strong>${escapeHtml(actorName)}</strong></td></tr>`];
-        archives
-          .slice()
-          .sort((a, b) => new Date(b.closedAt).getTime() - new Date(a.closedAt).getTime())
+        sortedArchiveStatements(archives)
           .forEach((archive) => {
-            const records = archiveRecordRows(archive, actor, filters);
+            const records = sortedTransactionRows(
+              archiveRecordRows(archive, actor, filters),
+              els.archiveTransactionSort?.value || "date-desc",
+              (record) => record.date,
+              (record) => record.reference
+            );
             if (!records.length) return;
             recordCount += records.length;
             actorRows.push(`
@@ -9502,6 +9887,7 @@
         agent: order.agent,
         senderName: order.senderName || "",
         receiverName: order.receiverName || "",
+        receiverCity: order.receiverCity || "",
         accountNumber: order.accountNumber || "",
         phoneNumber: order.phoneNumber || "",
         remarks: order.remarks || "",
@@ -9538,6 +9924,7 @@
         principalMinor: Number(receivable.principalMinor || 0),
         senderName: receivable.senderName || "",
         receiverName: receivable.receiverName || "",
+        receiverCity: receivable.receiverCity || "",
         accountNumber: receivable.accountNumber || "",
         phoneNumber: receivable.phoneNumber || "",
         remarks: receivable.remarks || "",
@@ -10269,6 +10656,30 @@
       }
     });
 
+    els.accountTimeoutForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!currentAuth) return;
+      els.accountTimeoutError.classList.remove("visible");
+      const idleTimeoutSeconds = Number(els.accountTimeoutSelect.value);
+      try {
+        const result = await api("/api/auth/timeout", {
+          method: "PUT",
+          body: { idleTimeoutSeconds }
+        });
+        if (result.session) currentAuth = result.session;
+        rememberAuthActivity(currentAuth);
+        lastSessionActivityPingAt = Date.now();
+        if (sessionActivityPingTimer) clearTimeout(sessionActivityPingTimer);
+        sessionActivityPingTimer = null;
+        startInactivityWatch();
+        renderAccountTimeoutSettings();
+        notifyEvent("Time Out updated", `Automatic logout is set to ${authIdleLabel(idleTimeoutSeconds)}.`);
+      } catch (error) {
+        els.accountTimeoutError.textContent = error.message;
+        els.accountTimeoutError.classList.add("visible");
+      }
+    });
+
     els.confirmYes.addEventListener("click", () => {
       const action = pendingConfirmation?.onYes;
       closeConfirmation();
@@ -10316,7 +10727,7 @@
       saveState();
     });
 
-    [els.archiveActorFilter, els.archiveMonthFilter, els.archiveDatePreset, els.archiveDateFrom, els.archiveDateTo, els.archiveAmountMin, els.archiveAmountMax, els.archiveSearch].forEach((input) => {
+    [els.archiveActorFilter, els.archiveMonthFilter, els.archiveTransactionSort, els.archiveDatePreset, els.archiveDateFrom, els.archiveDateTo, els.archiveAmountMin, els.archiveAmountMax, els.archiveSearch].forEach((input) => {
       input.addEventListener("input", renderArchive);
       input.addEventListener("change", renderArchive);
     });
@@ -10599,6 +11010,8 @@
       renderLedger();
       saveState();
     });
+
+    els.ledgerTransactionSort.addEventListener("change", renderLedger);
 
     els.ledgerRows.addEventListener("click", (event) => {
       const button = event.target.closest(".ledger-detail-toggle");
@@ -11741,6 +12154,7 @@
       renderActors();
       renderPermissionSettings();
       renderVisibilityPermissions();
+      renderAccountTimeoutSettings();
       renderSettingsCollapses();
       renderSubscriptions();
       renderFixedRateSettings();
@@ -11769,7 +12183,7 @@
           forgetAuthActivity(session);
           els.authScreen.classList.remove("hidden");
           els.accountBadge.textContent = "Not logged in";
-          showAuthError(els.loginError, "You were logged out after 3 hours of inactivity.");
+          showAuthError(els.loginError, `You were logged out after ${authIdleLabel(authIdleSeconds(session))} of inactivity.`);
         } else {
           await applyAuthSession(session);
         }

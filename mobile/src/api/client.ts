@@ -24,8 +24,16 @@ const apiBaseUrl = (typeof process !== "undefined" && process?.env?.EXPO_PUBLIC_
   ? process.env.EXPO_PUBLIC_HADERAPAY_API_URL
   : defaultApiBaseUrl).replace(/\/+$/, "");
 const sessionCacheKey = "haderapay.mobile.session.v1";
+const sessionActivityCacheKey = "haderapay.mobile.activity.v1";
 const workspaceCachePrefix = "haderapay.mobile.workspace.v1.";
 let activeSession: UserSession | null = null;
+
+export const allowedIdleTimeoutSeconds = [10, 20, 30, 60, 300, 900, 1800, 3600, 7200] as const;
+
+function normalizeIdleTimeoutSeconds(value: unknown): number {
+  const seconds = Number(value);
+  return allowedIdleTimeoutSeconds.includes(seconds as typeof allowedIdleTimeoutSeconds[number]) ? seconds : 7200;
+}
 
 class OfflineError extends Error {}
 
@@ -90,6 +98,15 @@ async function cacheSession(session: UserSession): Promise<void> {
   await writeCache(sessionCacheKey, session);
 }
 
+export async function getLastSessionActivityAt(): Promise<number> {
+  const value = await readCache<number>(sessionActivityCacheKey);
+  return Number.isFinite(Number(value)) ? Number(value) : 0;
+}
+
+export async function rememberSessionActivity(at = Date.now()): Promise<void> {
+  await writeCache(sessionActivityCacheKey, at);
+}
+
 function workspaceCacheKey(workspaceId: string): string {
   return `${workspaceCachePrefix}${workspaceId}`;
 }
@@ -119,6 +136,7 @@ function normalizeSession(session: ApiSession | null | undefined): UserSession |
     workingCurrencies: (session.membership.workingCurrencies || []).map((currency) => safeCurrency(currency)),
     workspaceId: session.workspace.id || "",
     workspace: session.workspace.name || "HaderaPay Workspace",
+    idleTimeoutSeconds: normalizeIdleTimeoutSeconds(session.user.idleTimeoutSeconds),
     managedByMaster: false
   };
 }
@@ -151,17 +169,21 @@ export async function getCurrentSession(): Promise<UserSession | null> {
   try {
     const result = await api<{ session: ApiSession | null }>("/api/session");
     const session = normalizeSession(result.session);
-    if (session) await cacheSession(session);
+    if (session) {
+      await cacheSession(session);
+      await rememberSessionActivity();
+    }
     else {
       activeSession = null;
-      await AsyncStorage.removeItem(sessionCacheKey);
+      await AsyncStorage.multiRemove([sessionCacheKey, sessionActivityCacheKey]);
     }
     return session;
   } catch (error) {
     if (!(error instanceof OfflineError)) throw error;
     const cached = await readCache<UserSession>(sessionCacheKey);
-    activeSession = cached;
-    return cached;
+    const normalizedCached = cached ? { ...cached, idleTimeoutSeconds: normalizeIdleTimeoutSeconds(cached.idleTimeoutSeconds) } : null;
+    activeSession = normalizedCached;
+    return normalizedCached;
   }
 }
 
@@ -176,6 +198,7 @@ export async function login(email: string, password: string): Promise<UserSessio
   const session = normalizeSession(result.session);
   if (!session) throw new Error("This login is not linked to a workspace.");
   await cacheSession(session);
+  await rememberSessionActivity();
   return session;
 }
 
@@ -201,16 +224,34 @@ export async function signup(input: {
   const session = normalizeSession(result.session);
   if (!session) throw new Error("This signup was not linked to a workspace.");
   await cacheSession(session);
+  await rememberSessionActivity();
   return session;
 }
 
 export async function logout(): Promise<void> {
+  activeSession = null;
+  await AsyncStorage.multiRemove([sessionCacheKey, sessionActivityCacheKey]);
   try {
     await api<{ ok: boolean }>("/api/auth/logout", { method: "POST" });
   } finally {
     activeSession = null;
-    await AsyncStorage.removeItem(sessionCacheKey);
   }
+}
+
+export async function updateIdleTimeout(idleTimeoutSeconds: number): Promise<UserSession> {
+  const result = await api<{ session: ApiSession }>("/api/auth/timeout", {
+    method: "PUT",
+    body: { idleTimeoutSeconds }
+  });
+  const session = normalizeSession(result.session);
+  if (!session) throw new Error("The updated account session could not be loaded.");
+  await cacheSession(session);
+  await rememberSessionActivity();
+  return session;
+}
+
+export async function reportSessionActivity(): Promise<void> {
+  await api<{ ok: boolean }>("/api/auth/activity", { method: "POST" });
 }
 
 export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
@@ -375,9 +416,11 @@ function buildReceivable(session: UserSession, draft: TransferDraft, order: Orde
     principalMinor: order.sourceAmountMinor,
     senderName: draft.senderName,
     receiverName: draft.receiverName,
+    receiverCity: draft.receiverCity,
     accountNumber: draft.accountNumber,
     phoneNumber: draft.phoneNumber,
     remarks: draft.remarks,
+    creditReminder: draft.creditReminder.trim(),
     createdAt: existing?.createdAt || now,
     updatedAt: now,
     createdBy: existing?.createdBy || session.actorName,
@@ -408,6 +451,7 @@ function upsertSavedCustomer(state: WorkspaceState, actor: ActorRecord | undefin
     actorId: actor.id,
     kind: details.kind,
     name: details.name,
+    receiverCity: details.receiverCity,
     accountNumber: details.accountNumber,
     phoneNumber: details.phoneNumber,
     remarks: details.remarks,
@@ -421,6 +465,7 @@ function rememberOrderCustomers(state: WorkspaceState, actor: ActorRecord | unde
   upsertSavedCustomer(state, actor, {
     kind: "sender",
     name: draft.senderName.trim(),
+    receiverCity: "",
     accountNumber: "",
     phoneNumber: "",
     remarks: ""
@@ -428,6 +473,7 @@ function rememberOrderCustomers(state: WorkspaceState, actor: ActorRecord | unde
   upsertSavedCustomer(state, actor, {
     kind: "receiver",
     name: draft.receiverName.trim(),
+    receiverCity: draft.receiverCity.trim(),
     accountNumber: draft.accountNumber.trim(),
     phoneNumber: draft.phoneNumber.trim(),
     remarks: draft.remarks.trim()
@@ -438,7 +484,7 @@ export async function submitTransferOrder(session: UserSession, draft: TransferD
   if (!canCreateOrders(session)) {
     throw new Error("Only Brokers and Special Brokers can send new orders.");
   }
-  if (!draft.receiverName.trim() && !draft.phoneNumber.trim() && !draft.accountNumber.trim() && !draft.remarks.trim()) {
+  if (!draft.receiverName.trim() && !draft.receiverCity.trim() && !draft.phoneNumber.trim() && !draft.accountNumber.trim() && !draft.remarks.trim()) {
     throw new Error("Enter at least one receiver detail.");
   }
   if (!draft.fundingType) {
@@ -477,6 +523,7 @@ export async function submitTransferOrder(session: UserSession, draft: TransferD
     commissionPercent: Number(draft.commissionPercent || 0) || 0,
     senderName: draft.senderName.trim(),
     receiverName: draft.receiverName.trim(),
+    receiverCity: draft.receiverCity.trim(),
     accountNumber: draft.accountNumber.trim(),
     phoneNumber: draft.phoneNumber.trim(),
     remarks: draft.remarks.trim(),

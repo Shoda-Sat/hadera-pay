@@ -21,6 +21,7 @@ import {
   X
 } from "lucide-react-native";
 import {
+  allowedIdleTimeoutSeconds,
   changePassword,
   createOwnerMaster,
   createInvite,
@@ -29,7 +30,8 @@ import {
   loadInvites,
   removeWorkspaceActor,
   resetWorkspaceData,
-  setOwnerMasterActive
+  setOwnerMasterActive,
+  updateIdleTimeout
 } from "../api/client";
 import { Button, Field, Panel, Pill, SelectRow, SummaryRow, type PillTone } from "../components/ui";
 import {
@@ -98,6 +100,7 @@ type CommonProps = {
   onNavigate: (screen: AppScreen) => void;
   onRefresh: () => void;
   onScrollToEnd?: () => void;
+  onSessionTimeout?: (session: UserSession) => void;
 };
 
 function ScreenTitle({ title, subtitle }: { title: string; subtitle: string }) {
@@ -230,6 +233,7 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
                 {isMasterView(session) ? <SummaryRow label="Ordering broker" value={order.broker} /> : null}
                 {order.senderName ? <SummaryRow label="Sender" value={order.senderName} /> : null}
                 {order.receiverName ? <SummaryRow label="Receiver" value={order.receiverName} /> : null}
+                {order.receiverCity ? <SummaryRow label="Receiver city" value={order.receiverCity} /> : null}
                 {order.phoneNumber ? <SummaryRow label="Phone" value={order.phoneNumber} /> : null}
                 {order.accountNumber ? <SummaryRow label="Account" value={order.accountNumber} /> : null}
                 {order.remarks ? <SummaryRow label="Remarks" value={order.remarks} /> : null}
@@ -429,15 +433,181 @@ export function TransfersScreen(props: CommonProps) {
   );
 }
 
+type MobileSearchResult = {
+  key: string;
+  groupKey: string;
+  kind: "order" | "transfer" | "receivable" | "ledger" | "archive";
+  type: string;
+  reference: string;
+  actor: string;
+  participants: string[];
+  participant?: string;
+  amount: string;
+  status: string;
+  details: string;
+  time: number;
+  screen: AppScreen;
+  searchText: string;
+};
+
+function uniqueSearchNames(values: Array<string | undefined>): string[] {
+  return Array.from(new Set(values.map((value) => String(value || "").trim()).filter(Boolean)));
+}
+
+function searchResultPriority(result: MobileSearchResult): number {
+  const priority = { order: 40, transfer: 40, receivable: 30, ledger: 20, archive: 10 }[result.kind];
+  return priority + (result.type.startsWith("Archived") ? 0 : 5);
+}
+
+function preferredSearchResult(results: MobileSearchResult[], participant = ""): MobileSearchResult | undefined {
+  const transactionRows = results.filter((result) => ["order", "transfer"].includes(result.kind));
+  const participantRows = participant ? results.filter((result) => result.participant === participant) : [];
+  const candidates = transactionRows.length ? transactionRows : participantRows.length ? participantRows : results;
+  return candidates.slice().sort((a, b) => searchResultPriority(b) - searchResultPriority(a) || b.time - a.time)[0];
+}
+
+function consolidateSearchResults(results: MobileSearchResult[], session: UserSession): MobileSearchResult[] {
+  const grouped = new Map<string, MobileSearchResult[]>();
+  results.forEach((result) => grouped.set(result.groupKey, [...(grouped.get(result.groupKey) || []), result]));
+  return Array.from(grouped.entries()).flatMap(([groupKey, group]) => {
+    if (groupKey.startsWith("single:")) return group;
+    if (!isMasterView(session)) {
+      const preferred = preferredSearchResult(group, session.actorName);
+      return preferred ? [{ ...preferred, key: `${groupKey}:${session.actorName}`, actor: session.actorName }] : [];
+    }
+    const participants = uniqueSearchNames(group.flatMap((result) => [...result.participants, result.participant]));
+    return (participants.length ? participants : ["Master"]).flatMap((participant) => {
+      const preferred = preferredSearchResult(group, participant);
+      return preferred ? [{ ...preferred, key: `${groupKey}:${participant}`, actor: participant }] : [];
+    });
+  }).sort((a, b) => b.time - a.time);
+}
+
 export function SearchScreen({ session, state, onNavigate }: CommonProps) {
   const [query, setQuery] = useState("");
-  const needle = query.trim().toLocaleLowerCase();
-  const orders = visibleOrders(session, { ...state, orders: state.orders.filter((order) => JSON.stringify(order).toLocaleLowerCase().includes(needle)) });
-  const transfers = state.transfers.filter((item) => (isMasterView(session) || item.from === session.actorName || item.to === session.actorName) && JSON.stringify(item).toLocaleLowerCase().includes(needle));
-  const ledger = state.ledger.filter((line) => (isMasterView(session) || String(line.account).includes(session.actorName)) && JSON.stringify(line).toLocaleLowerCase().includes(needle));
-  const archives = state.archives.filter((archive) => (isMasterView(session) || archive.actor === session.actorName) && JSON.stringify(archive).toLocaleLowerCase().includes(needle));
-  const count = needle ? orders.length + transfers.length + ledger.length + archives.length : 0;
-  return <View style={styles.screen}><ScreenTitle title="Search" subtitle="Find any permitted workspace record" /><Field label="Search names, numbers, remarks, transfers..." value={query} onChangeText={setQuery} autoCapitalize="none" />{!needle ? <Panel><Text style={styles.muted}>Start typing to filter matching records.</Text></Panel> : <><Pill label={`${count} result${count === 1 ? "" : "s"}`} tone={count ? "good" : "neutral"} />{orders.map((order) => <Pressable key={`o-${order.id}`} onPress={() => onNavigate("orders")}><Panel title={orderNumber(order, session)} badge={order.state}><Text style={styles.primaryLine}>{order.senderName} to {order.receiverName}</Text><Text style={styles.muted}>{compactAmount(order.sourceCurrency, majorFromMinor(order.sourceAmountMinor, order.sourceCurrency))} to {compactAmount(order.payoutCurrency, majorFromMinor(order.payoutAmountMinor, order.payoutCurrency))} - {order.remarks}</Text></Panel></Pressable>)}{transfers.map((transfer) => <Pressable key={`t-${transfer.id}`} onPress={() => onNavigate("transfers")}><Panel title={transfer.id} badge={transfer.state}><Text style={styles.primaryLine}>{transfer.from} to {transfer.to}</Text><Text style={styles.muted}>{transfer.remarks}</Text></Panel></Pressable>)}{ledger.map((line, index) => <Pressable key={`l-${line.journal}-${index}`} onPress={() => onNavigate("ledger")}><Panel title={String(line.journal || line.entryId || "Ledger")} badge={line.direction}><Text style={styles.primaryLine}>{line.account}</Text><Text style={styles.muted}>{compactAmount(line.currency, majorFromMinor(line.amountMinor, line.currency))} - {String(line.details || "")}</Text></Panel></Pressable>)}{archives.map((archive, index) => <Pressable key={`a-${archive.id || index}`} onPress={() => onNavigate("archive")}><Panel title={archive.actor || "Closed statement"} badge="Archive"><Text style={styles.muted}>{new Date(archive.closedAt || 0).toLocaleString()}</Text></Panel></Pressable>)}</>}</View>;
+  const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+  const viewerActor = actorForSession(session, state);
+  const rawResults: MobileSearchResult[] = [];
+  let singleIndex = 0;
+
+  const addOrder = (order: OrderRecord, type = "Order", status: string = order.state, archivedAt = "") => {
+    const isPayer = order.agent === session.actorName || order.agentActorId === session.actorId;
+    const isBroker = order.broker === session.actorName;
+    const visibility = viewerActor?.orderVisibilityPermissions || {};
+    const canSeeSource = isMasterView(session) || isBroker || !isPayer || (visibility.sourceCurrency !== false && visibility.baseAmount !== false);
+    const canSeeRate = isMasterView(session) || isBroker || !isPayer || visibility.rate !== false;
+    const canSeeCommission = isMasterView(session) || isBroker || !isPayer || visibility.commission !== false;
+    const sourceAmount = compactAmount(order.sourceCurrency, majorFromMinor(order.sourceAmountMinor, order.sourceCurrency));
+    const payoutAmount = compactAmount(order.payoutCurrency, majorFromMinor(order.payoutAmountMinor, order.payoutCurrency));
+    const details = [
+      order.senderName ? `Sender: ${order.senderName}` : "",
+      order.receiverName ? `Receiver: ${order.receiverName}` : "",
+      order.receiverCity ? `Receiver City: ${order.receiverCity}` : "",
+      order.phoneNumber ? `Phone: ${order.phoneNumber}` : "",
+      order.accountNumber ? `Account: ${order.accountNumber}` : "",
+      order.remarks ? `Remarks: ${order.remarks}` : "",
+      isMasterView(session) && order.broker ? `Ordering Actor: ${order.broker}` : "",
+      order.agent && order.agent !== "Unassigned" ? `Payer: ${order.agent}` : "",
+      canSeeSource ? `Source Amount: ${sourceAmount}` : "",
+      `Payout Amount: ${payoutAmount}`,
+      canSeeRate && order.rate ? `Rate: ${order.rate}` : "",
+      canSeeCommission ? `Commission: ${order.commissionPercent || 0}%` : "",
+      order.fundingType ? `Payment Type: ${order.fundingType}` : "",
+      order.journal ? `Journal: ${order.journal}` : "",
+      order.voidJournal ? `Void Journal: ${order.voidJournal}` : ""
+    ].filter(Boolean).join(" - ");
+    const reference = orderNumber(order, session);
+    const participants = uniqueSearchNames([order.broker, order.agent !== "Unassigned" ? order.agent : "", "Master"]);
+    const searchableParticipants = isMasterView(session) ? participants : uniqueSearchNames([session.actorName, "Master"]);
+    rawResults.push({
+      key: `${type}:${order.id}`,
+      groupKey: `order:${order.id}`,
+      kind: "order",
+      type,
+      reference,
+      actor: "",
+      participants,
+      amount: canSeeSource ? `${sourceAmount} to ${payoutAmount}` : payoutAmount,
+      status,
+      details,
+      time: new Date(order.paidAt || order.sentAt || order.createdAt || archivedAt || 0).getTime() || 0,
+      screen: type.startsWith("Archived") ? "archive" : "orders",
+      searchText: [reference, order.id, order.brokerOrderNumber, order.agentOrderNumber, Object.values(order.agentOrderNumbers || {}), status, searchableParticipants, details].flat().join(" ").toLocaleLowerCase()
+    });
+  };
+
+  const addTransfer = (transfer: WorkspaceState["transfers"][number] | NonNullable<WorkspaceState["archives"][number]["transfers"]>[number], type = "Transfer", archivedAt = "") => {
+    const sourceCurrency = transfer.sourceCurrency || transfer.currency || "USD";
+    const payoutCurrency = transfer.currency || sourceCurrency;
+    const sourceAmount = compactAmount(sourceCurrency, majorFromMinor(Number(transfer.sourceAmountMinor || transfer.amountMinor || 0), sourceCurrency));
+    const payoutAmount = compactAmount(payoutCurrency, majorFromMinor(Number(transfer.amountMinor || 0), payoutCurrency));
+    const details = [transfer.from ? `From: ${transfer.from}` : "", transfer.to ? `To: ${transfer.to}` : "", transfer.remarks ? `Remarks: ${transfer.remarks}` : "", transfer.journal ? `Journal: ${transfer.journal}` : "", transfer.reversalJournal ? `Reversal: ${transfer.reversalJournal}` : ""].filter(Boolean).join(" - ");
+    const reference = transfer.id || transfer.journal || "Transfer";
+    const participants = uniqueSearchNames([transfer.from, transfer.to, "Master"]);
+    const status = type.startsWith("Archived") ? "Locked" : transfer.state || "Posted";
+    rawResults.push({ key: `${type}:${reference}`, groupKey: transfer.id ? `transfer:${transfer.id}` : `single:${singleIndex++}`, kind: "transfer", type, reference, actor: "", participants, amount: `${sourceAmount} to ${payoutAmount}`, status, details, time: new Date(transfer.reversedAt || transfer.paidOutAt || transfer.approvedAt || transfer.sentAt || transfer.createdAt || archivedAt || 0).getTime() || 0, screen: type.startsWith("Archived") ? "archive" : "transfers", searchText: [reference, status, participants, details, sourceAmount, payoutAmount].flat().join(" ").toLocaleLowerCase() });
+  };
+
+  const ledgerParticipant = (account: string) => {
+    const actor = state.actors.find((candidate) => account === candidate.name || account.startsWith(`${candidate.name} `) || account.startsWith(`${candidate.name}_`));
+    return actor?.name || (/^MASTER(?:_|\s|$)/i.test(account) ? "Master" : account);
+  };
+  const addLedger = (line: WorkspaceState["ledger"][number], type = "Ledger", archivedAt = "") => {
+    const participant = ledgerParticipant(String(line.account || ""));
+    const reference = String(line.journal || line.orderId || line.transferId || line.entryId || "Ledger");
+    const groupKey = line.orderId ? `order:${line.orderId}` : line.transferId ? `transfer:${line.transferId}` : `ledger:${reference}`;
+    const amount = compactAmount(line.currency, majorFromMinor(line.amountMinor, line.currency));
+    const details = [line.details, line.source ? `Source: ${line.source}` : "", line.account ? `Account: ${line.account}` : "", `Direction: ${line.direction}`].filter(Boolean).join(" - ");
+    rawResults.push({ key: `${type}:${reference}:${participant}`, groupKey, kind: "ledger", type, reference, actor: participant, participants: participant ? [participant] : [], participant, amount, status: type.startsWith("Archived") ? "Locked" : line.direction, details, time: new Date(line.postedAt || archivedAt || 0).getTime() || 0, screen: type.startsWith("Archived") ? "archive" : "ledger", searchText: [reference, participant, amount, details].join(" ").toLocaleLowerCase() });
+  };
+
+  const addReceivable = (item: WorkspaceState["receivables"][number], type = "Receivable", archivedAt = "") => {
+    const paidMinor = (item.payments || []).reduce((sum, payment) => sum + Number(payment.amountMinor || 0), 0);
+    const balanceMinor = Math.max(0, item.principalMinor - paidMinor);
+    const principal = compactAmount(item.currency, majorFromMinor(item.principalMinor, item.currency));
+    const balance = compactAmount(item.currency, majorFromMinor(balanceMinor, item.currency));
+    const status = type.startsWith("Archived") ? "Locked" : item.voided ? "Voided" : balanceMinor ? "Open" : "Paid";
+    const details = [item.senderName ? `Sender: ${item.senderName}` : "", item.receiverName ? `Receiver: ${item.receiverName}` : "", item.receiverCity ? `Receiver City: ${item.receiverCity}` : "", item.phoneNumber ? `Phone: ${item.phoneNumber}` : "", item.accountNumber ? `Account: ${item.accountNumber}` : "", item.remarks ? `Remarks: ${item.remarks}` : "", `Principal: ${principal}`, `Balance: ${balance}`].filter(Boolean).join(" - ");
+    const reference = item.brokerOrderNumber || item.orderId || item.id;
+    rawResults.push({ key: `${type}:${item.id}`, groupKey: item.orderId ? `order:${item.orderId}` : `receivable:${item.id}`, kind: "receivable", type, reference, actor: item.borrower, participants: uniqueSearchNames([item.borrower, "Master"]), amount: `Principal ${principal} / Balance ${balance}`, status, details, time: new Date(item.createdAt || item.updatedAt || archivedAt || 0).getTime() || 0, screen: type.startsWith("Archived") ? "archive" : "receivables", searchText: [reference, item.id, item.borrower, status, details].join(" ").toLocaleLowerCase() });
+  };
+
+  (isMasterView(session) ? state.orders : state.orders.filter((order) => order.broker === session.actorName || order.agent === session.actorName || order.agentActorId === session.actorId)).forEach((order) => addOrder(order));
+  (isMasterView(session) ? state.transfers : state.transfers.filter((transfer) => transfer.from === session.actorName || transfer.to === session.actorName)).forEach((transfer) => addTransfer(transfer));
+  state.ledger.filter((line) => isMasterView(session) || ledgerParticipant(String(line.account || "")) === session.actorName).forEach((line) => addLedger(line, line.source === "JOURNAL" ? "Journal" : line.source === "WITHDRAWAL" ? "Withdrawal" : "Ledger"));
+  state.receivables.filter((item) => isMasterView(session) || item.borrower === session.actorName).forEach((item) => addReceivable(item));
+  state.archives.filter((archive) => isMasterView(session) || archive.actor === session.actorName).forEach((archive) => {
+    (archive.orders || []).forEach((order) => addOrder(order, "Archived Order", "Locked", archive.closedAt));
+    (archive.transfers || []).forEach((transfer) => addTransfer(transfer, "Archived Transfer", archive.closedAt));
+    (archive.ledger || []).forEach((line) => addLedger(line, "Archived Ledger", archive.closedAt));
+    (archive.receivables || []).forEach((item) => addReceivable(item, "Archived Receivable", archive.closedAt));
+    Object.entries(archive.balances || {}).filter(([, minor]) => Number(minor || 0) !== 0).forEach(([currency, minor]) => {
+      const amount = compactAmount(currency as Currency, majorFromMinor(Math.abs(Number(minor)), currency as Currency));
+      const details = `${archive.actor || "Actor"} - ${Number(minor) > 0 ? "Owes Master" : "Master owes"} - Closed ${new Date(archive.closedAt || 0).toLocaleString()}`;
+      rawResults.push({ key: `archive:${archive.id}:${currency}`, groupKey: `single:${singleIndex++}`, kind: "archive", type: "Closed Balance", reference: archive.id || "Archive", actor: archive.actor || "", participants: uniqueSearchNames([archive.actor]), amount, status: "Locked", details, time: new Date(archive.closedAt || 0).getTime() || 0, screen: "archive", searchText: [archive.id, archive.actor, currency, amount, details].join(" ").toLocaleLowerCase() });
+    });
+  });
+
+  const results = terms.length ? consolidateSearchResults(rawResults.filter((result) => terms.every((term) => result.searchText.includes(term))), session) : [];
+  return (
+    <View style={styles.screen}>
+      <ScreenTitle title="Search" subtitle="Find any permitted workspace record" />
+      <Field label="Search names, numbers, remarks, transfers..." value={query} onChangeText={setQuery} autoCapitalize="none" />
+      {!terms.length ? <Panel><Text style={styles.muted}>Start typing to filter matching records.</Text></Panel> : <>
+        <Pill label={`${results.length} result${results.length === 1 ? "" : "s"}`} tone={results.length ? "good" : "neutral"} />
+        {results.map((result) => (
+          <Pressable key={result.key} onPress={() => onNavigate(result.screen)}>
+            <Panel title={result.reference} badge={result.status} badgeTone={tone(result.status)}>
+              <Text style={styles.primaryLine}>{result.type} - {result.actor}</Text>
+              <Text style={styles.amountLine}>{result.amount}</Text>
+              {result.details ? <Text style={styles.muted}>{result.details}</Text> : null}
+            </Panel>
+          </Pressable>
+        ))}
+        {!results.length ? <Panel><Text style={styles.muted}>No matching records.</Text></Panel> : null}
+      </>}
+    </View>
+  );
 }
 
 export function ReceivablesScreen({ session, state, offline, onState }: CommonProps) {
@@ -450,7 +620,7 @@ export function ReceivablesScreen({ session, state, offline, onState }: CommonPr
     setBusy(id);
     try { onState(await collectReceivable(id, amounts[id] || "", session.actorName)); setAmounts((current) => ({ ...current, [id]: "" })); } catch (error) { Alert.alert("Collection", errorMessage(error)); } finally { setBusy(""); }
   };
-  return <View style={styles.screen}><ScreenTitle title="Receivables" subtitle="Credit orders and loan collections" /><OfflineGuard offline={offline} />{records.map((item) => { const balance = receivableBalance(item); return <Panel key={item.id} title={item.orderId} badge={item.voided ? "Voided" : balance ? "Open" : "Collected"}><SummaryRow label="Borrower" value={item.borrower} /><SummaryRow label="Principal" value={compactAmount(item.currency, majorFromMinor(item.principalMinor, item.currency))} /><SummaryRow label="Collected" value={compactAmount(item.currency, majorFromMinor(item.principalMinor - balance, item.currency))} /><SummaryRow label="Balance" value={compactAmount(item.currency, majorFromMinor(balance, item.currency))} strong />{balance > 0 && !item.voided ? <View style={styles.actionBlock}><Field label="Collection amount" value={amounts[item.id] || ""} onChangeText={(value) => setAmounts((current) => ({ ...current, [item.id]: value }))} keyboardType="decimal-pad" /><Button label="Record collection" loading={busy === item.id} disabled={offline} onPress={() => collect(item.id)} /></View> : null}</Panel>; })}<Panel title="Outstanding totals">{totals.length ? totals.map((item) => <SummaryRow key={item.currency} label={item.currency} value={compactAmount(item.currency, majorFromMinor(item.minor, item.currency))} strong />) : <Text style={styles.muted}>No outstanding receivables.</Text>}</Panel></View>;
+  return <View style={styles.screen}><ScreenTitle title="Receivables" subtitle="Credit orders and loan collections" /><OfflineGuard offline={offline} />{records.map((item) => { const balance = receivableBalance(item); const showReminder = !isMasterView(session) && item.borrower === session.actorName && Boolean(item.creditReminder); return <Panel key={item.id} title={item.brokerOrderNumber || item.orderId} badge={item.voided ? "Voided" : balance ? "Open" : "Collected"}><SummaryRow label="Borrower" value={item.borrower} />{item.senderName ? <SummaryRow label="Sender" value={item.senderName} /> : null}{item.receiverName ? <SummaryRow label="Receiver" value={item.receiverName} /> : null}{item.receiverCity ? <SummaryRow label="Receiver city" value={item.receiverCity} /> : null}{showReminder ? <SummaryRow label="Credit Reminder" value={item.creditReminder || ""} /> : null}<SummaryRow label="Principal" value={compactAmount(item.currency, majorFromMinor(item.principalMinor, item.currency))} /><SummaryRow label="Collected" value={compactAmount(item.currency, majorFromMinor(item.principalMinor - balance, item.currency))} /><SummaryRow label="Balance" value={compactAmount(item.currency, majorFromMinor(balance, item.currency))} strong />{balance > 0 && !item.voided ? <View style={styles.actionBlock}><Field label="Collection amount" value={amounts[item.id] || ""} onChangeText={(value) => setAmounts((current) => ({ ...current, [item.id]: value }))} keyboardType="decimal-pad" /><Button label="Record collection" loading={busy === item.id} disabled={offline} onPress={() => collect(item.id)} /></View> : null}</Panel>; })}<Panel title="Outstanding totals">{totals.length ? totals.map((item) => <SummaryRow key={item.currency} label={item.currency} value={compactAmount(item.currency, majorFromMinor(item.minor, item.currency))} strong />) : <Text style={styles.muted}>No outstanding receivables.</Text>}</Panel></View>;
 }
 
 const likeReaction = "\uD83D\uDC4D";
@@ -687,9 +857,16 @@ export function LedgerScreen({ session, state, onState }: CommonProps) {
   const [bankAmount, setBankAmount] = useState("");
   const [bankReason, setBankReason] = useState("");
   const [bankBusy, setBankBusy] = useState(false);
+  const [transactionSort, setTransactionSort] = useState<"Date" | "Order / Transfer No.">("Date");
   const selected = isMasterView(session) ? actorChoices.find((actor) => actor.id === actorId) : actorForSession(session, state);
   const actorName = selected?.name || session.actorName;
-  const lines = state.ledger.filter((line) => isMasterView(session) ? (!selected || String(line.account).includes(actorName)) : String(line.account).includes(session.actorName));
+  const referenceForLine = (line: WorkspaceState["ledger"][number]) => String(line.journal || line.orderId || line.transferId || line.entryId || "");
+  const lines = state.ledger
+    .filter((line) => isMasterView(session) ? (!selected || String(line.account).includes(actorName)) : String(line.account).includes(session.actorName))
+    .slice()
+    .sort((a, b) => transactionSort === "Date"
+      ? new Date(b.postedAt || 0).getTime() - new Date(a.postedAt || 0).getTime()
+      : referenceForLine(a).localeCompare(referenceForLine(b), undefined, { numeric: true, sensitivity: "base" }));
   const balances = supportedCurrencies.map((currency) => ({ currency, minor: lines.filter((line) => line.currency === currency).reduce((sum, line) => sum + (line.direction === "Debit" ? 1 : -1) * Number(line.amountMinor || 0), 0) }));
   const incomeOrders = state.orders.filter((order) => order.state === "Paid" && order.journal && !order.voidJournal && Number.isFinite(Number(order.incomeProfitMinor)));
   const totalIncomeUsdMinor = incomeOrders.reduce((sum, order) => sum + Number(order.incomeProfitMinor || 0), 0);
@@ -753,6 +930,7 @@ export function LedgerScreen({ session, state, onState }: CommonProps) {
       <Panel title="Running balance" badge={actorName}>
         {balances.map((item) => <SummaryRow key={item.currency} label={item.currency} value={`${item.minor >= 0 ? "+" : "-"}${compactAmount(item.currency, majorFromMinor(Math.abs(item.minor), item.currency))}`} strong />)}
       </Panel>
+      <SelectRow label="Sort transactions by" options={["Date", "Order / Transfer No."]} value={transactionSort} onChange={setTransactionSort} />
       <ScrollView horizontal showsHorizontalScrollIndicator>
         <View style={styles.ledgerTable}>
           <View style={[styles.ledgerRow, styles.ledgerHead]}><Text style={styles.colDate}>Date</Text><Text style={styles.colRef}>Journal / No.</Text><Text style={styles.colDirection}>Type</Text><Text style={styles.colAmount}>Amount</Text><Text style={styles.colDetails}>Details</Text></View>
@@ -826,10 +1004,19 @@ export function ActorsScreen({ state, offline, onState }: CommonProps) {
   return <View style={styles.screen}><ScreenTitle title="Actors" subtitle="Create and manage workspace actors" /><OfflineGuard offline={offline} /><Panel title="Create managed actor" badge="No login"><Field label="Actor name" value={name} onChangeText={setName} /><SelectRow label="Role" options={roles} value={role} onChange={setRole} /><SelectRow label="Base currency" options={supportedCurrencies} value={currency} onChange={setCurrency} />{["Special Broker", "Special Agent"].includes(role) ? <><Text style={styles.fieldLabel}>Working currencies</Text><View style={styles.choiceWrap}>{supportedCurrencies.map((item) => <Pressable key={item} onPress={() => setWorking((current) => current.includes(item) ? current.filter((value) => value !== item) : [...current, item])} style={[styles.choice, working.includes(item) && styles.choiceActive]}><Text style={[styles.choiceText, working.includes(item) && styles.choiceTextActive]}>{item}</Text></Pressable>)}</View></> : null}<Button label="Create actor" icon={<UserPlus size={17} color="#fff" />} loading={busy === "create"} disabled={offline} onPress={() => run("create", async () => { const next = await createManagedActor({ name, role, currency, workingCurrencies: working }); setName(""); return next; })} /></Panel><Panel title="Active actors" badge={String(activeActors(state).length - 1)}>{activeActors(state).filter((actor) => actor.role !== "Master").map((actor) => <View key={actor.id} style={styles.recordRow}><View style={styles.recordMain}><Text style={styles.primaryLine}>{actor.name}</Text><Text style={styles.muted}>{actor.role} - {actor.currency}{actor.managedByMaster ? " - Master managed" : ""}</Text></View><Button label="Remove" variant="danger" disabled={offline} loading={busy === actor.id} onPress={() => Alert.alert("Remove actor?", "The actor will be hidden and its transaction history will remain.", [{ text: "Cancel", style: "cancel" }, { text: "Remove", style: "destructive", onPress: () => run(actor.id, () => removeWorkspaceActor(actor.id, actor.name)) }])} /></View>)}</Panel></View>;
 }
 
-export function SettingsScreen({ session, state, offline, onState }: CommonProps) {
+function idleTimeoutLabel(seconds: number): string {
+  if (seconds < 60) return `${seconds} Seconds`;
+  if (seconds === 60) return "1 Minute";
+  if (seconds < 3600) return `${seconds / 60} Minutes`;
+  return `${seconds / 3600} ${seconds === 3600 ? "Hour" : "Hours"}`;
+}
+
+export function SettingsScreen({ session, state, offline, onState, onSessionTimeout }: CommonProps) {
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [busy, setBusy] = useState("");
+  const timeoutOptions = allowedIdleTimeoutSeconds.map(idleTimeoutLabel);
+  const [timeoutLabel, setTimeoutLabel] = useState(idleTimeoutLabel(session.idleTimeoutSeconds || 7200));
   const [invites, setInvites] = useState<InviteRecord[]>([]);
   const [inviteRole, setInviteRole] = useState<ActorRole>("Broker");
   const [inviteCurrency, setInviteCurrency] = useState<Currency>("USD");
@@ -852,6 +1039,21 @@ export function SettingsScreen({ session, state, offline, onState }: CommonProps
   const [resetPermit, setResetPermit] = useState("");
   const [resetScope, setResetScope] = useState<"data" | "wipe">("data");
   const master = isMasterView(session);
+  const saveTimeout = async () => {
+    if (offline) return Alert.alert("Offline", "Reconnect before changing the automatic logout time.");
+    const selectedIndex = timeoutOptions.indexOf(timeoutLabel);
+    const idleTimeoutSeconds = allowedIdleTimeoutSeconds[selectedIndex] || 7200;
+    setBusy("timeout");
+    try {
+      const nextSession = await updateIdleTimeout(idleTimeoutSeconds);
+      onSessionTimeout?.(nextSession);
+      Alert.alert("Time Out updated", `Automatic logout is set to ${idleTimeoutLabel(idleTimeoutSeconds)}.`);
+    } catch (error) {
+      Alert.alert("Time Out", errorMessage(error));
+    } finally {
+      setBusy("");
+    }
+  };
   const change = async () => { if (offline) return Alert.alert("Offline", "Reconnect before changing your password."); setBusy("password"); try { await changePassword(currentPassword, newPassword); setCurrentPassword(""); setNewPassword(""); Alert.alert("Password updated", "Your new password is ready."); } catch (error) { Alert.alert("Password", errorMessage(error)); } finally { setBusy(""); } };
   const setMode = async (actorId: string, mode: ActorRecord["transferMode"]) => { if (offline) return Alert.alert("Offline", "Reconnect before changing permissions."); setBusy(actorId); try { onState(await updateActorTransferMode(actorId, mode)); } catch (error) { Alert.alert("Permissions", errorMessage(error)); } finally { setBusy(""); } };
   const refreshInvites = async () => { setBusy("invites"); try { setInvites(await loadInvites()); } catch (error) { Alert.alert("Invite codes", errorMessage(error)); } finally { setBusy(""); } };
@@ -873,6 +1075,7 @@ export function SettingsScreen({ session, state, offline, onState }: CommonProps
       <ScreenTitle title="Settings" subtitle="Account and workspace permissions" />
       <OfflineGuard offline={offline} />
       <Panel title="Reset password"><Field label="Current password" value={currentPassword} onChangeText={setCurrentPassword} secureTextEntry /><Field label="New password" value={newPassword} onChangeText={setNewPassword} secureTextEntry /><Button label="Update password" loading={busy === "password"} disabled={offline} onPress={change} /></Panel>
+      <Panel title="Time Out" badge="Automatic logout"><SelectRow label="Inactive for" options={timeoutOptions} value={timeoutLabel} onChange={setTimeoutLabel} /><Button label="Save Time Out" loading={busy === "timeout"} disabled={offline} onPress={saveTimeout} /></Panel>
       {master ? <>
         <Panel title="Buying rates" badge="Income statement"><Field label="EUR to USD" value={buying.eurToUsd} onChangeText={(value) => setBuying({ ...buying, eurToUsd: value })} keyboardType="decimal-pad" /><Field label="USD to ETB" value={buying.usdToEtb} onChangeText={(value) => setBuying({ ...buying, usdToEtb: value })} keyboardType="decimal-pad" /><Field label="USD to ERN" value={buying.usdToErn} onChangeText={(value) => setBuying({ ...buying, usdToErn: value })} keyboardType="decimal-pad" /><Button label="Save buying rates" loading={busy === "buying"} disabled={offline} onPress={saveRates} /></Panel>
         <Panel title="Income statement rates" badge="Future orders only">

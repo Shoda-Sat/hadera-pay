@@ -174,6 +174,7 @@ function orderDetails(order: OrderRecord): string {
     `Order: ${brokerOrderNumber(order)}`,
     order.senderName ? `Sender: ${order.senderName}` : "",
     order.receiverName ? `Receiver: ${order.receiverName}` : "",
+    order.receiverCity ? `Receiver City: ${order.receiverCity}` : "",
     order.accountNumber ? `Account: ${order.accountNumber}` : "",
     order.phoneNumber ? `Phone: ${order.phoneNumber}` : "",
     order.remarks ? `Remarks: ${order.remarks}` : ""

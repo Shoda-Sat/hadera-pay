@@ -1,8 +1,9 @@
 import { StatusBar } from "expo-status-bar";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  AppState,
   BackHandler,
   KeyboardAvoidingView,
   Platform,
@@ -35,14 +36,17 @@ import {
 import type { LucideProps } from "lucide-react-native";
 import {
   canCreateOrders,
+  getLastSessionActivityAt,
   getCurrentSession,
   loadWorkspaceState,
   login,
   logout,
+  rememberSessionActivity,
+  reportSessionActivity,
   signup,
   submitTransferOrder
 } from "./src/api/client";
-import { BrandHeader, Button, Field, Panel, Pill, SelectRow, SummaryRow } from "./src/components/ui";
+import { BrandHeader, Button, Field, Panel, Pill, SelectRow, setUserActivityHandler, SummaryRow } from "./src/components/ui";
 import type { PillTone } from "./src/components/ui";
 import { colors, radius, shadow, spacing } from "./src/theme";
 import { actingSessionFor, activeActors, isMasterView, transferTargetsFor } from "./src/domain/workspace";
@@ -90,9 +94,11 @@ const emptyDraft: TransferDraft = {
   fundingType: "cash",
   senderName: "",
   receiverName: "",
+  receiverCity: "",
   phoneNumber: "",
   accountNumber: "",
-  remarks: ""
+  remarks: "",
+  creditReminder: ""
 };
 
 function draftForSession(session: UserSession): TransferDraft {
@@ -103,7 +109,8 @@ function draftForSession(session: UserSession): TransferDraft {
   };
 }
 
-function draftForOrder(order: OrderRecord): TransferDraft {
+function draftForOrder(order: OrderRecord, workspaceState: WorkspaceState | null): TransferDraft {
+  const receivable = workspaceState?.receivables.find((item) => item.orderId === order.id);
   return {
     broker: order.broker,
     sourceCurrency: order.sourceCurrency,
@@ -115,9 +122,11 @@ function draftForOrder(order: OrderRecord): TransferDraft {
     fundingType: order.fundingType || "cash",
     senderName: order.senderName || "",
     receiverName: order.receiverName || "",
+    receiverCity: order.receiverCity || receivable?.receiverCity || "",
     phoneNumber: order.phoneNumber || "",
     accountNumber: order.accountNumber || "",
-    remarks: order.remarks || ""
+    remarks: order.remarks || "",
+    creditReminder: order.fundingType === "credit" ? receivable?.creditReminder || "" : ""
   };
 }
 
@@ -236,8 +245,12 @@ export default function App() {
   const [workspaceState, setWorkspaceState] = useState<WorkspaceState | null>(null);
   const [stateLoading, setStateLoading] = useState(false);
   const [stateError, setStateError] = useState("");
+  const [lastActivityAt, setLastActivityAt] = useState(Date.now());
   const historyRef = useRef<AppScreen[]>(["home"]);
   const contentScrollRef = useRef<ScrollView>(null);
+  const lastActivityRef = useRef(Date.now());
+  const lastServerActivityRef = useRef(0);
+  const logoutInFlightRef = useRef(false);
   const selectedActor = workspaceState?.actors.find((actor) => actor.id === selectedActorId);
   const actingSession = session ? actingSessionFor(session, selectedActor) : null;
   const quote = useMemo(() => calculateQuote(draft), [draft]);
@@ -245,8 +258,13 @@ export default function App() {
   useEffect(() => {
     let mounted = true;
     getCurrentSession()
-      .then((savedSession) => {
+      .then(async (savedSession) => {
         if (!mounted || !savedSession) return;
+        const cachedActivityAt = await getLastSessionActivityAt();
+        if (!mounted) return;
+        const activityAt = cachedActivityAt || Date.now();
+        lastActivityRef.current = activityAt;
+        setLastActivityAt(activityAt);
         setSession(savedSession);
         setDraft(draftForSession(savedSession));
         if (savedSession.role === "Owner") {
@@ -323,6 +341,11 @@ export default function App() {
   };
 
   const handleAuthenticated = (nextSession: UserSession) => {
+    const now = Date.now();
+    lastActivityRef.current = now;
+    lastServerActivityRef.current = now;
+    setLastActivityAt(now);
+    void rememberSessionActivity(now);
     setSession(nextSession);
     setDraft(draftForSession(nextSession));
     setSubmittedOrder(null);
@@ -333,24 +356,71 @@ export default function App() {
     setScreen(firstScreen);
   };
 
-  const handleLogout = async () => {
+  const handleLogout = useCallback(async () => {
+    if (logoutInFlightRef.current) return;
+    logoutInFlightRef.current = true;
     setLoggingOut(true);
+    setSession(null);
+    setWorkspaceState(null);
+    setSubmittedOrder(null);
+    setSelectedActorId("");
+    setEditingOrderId("");
+    setDraft(emptyDraft);
+    historyRef.current = ["home"];
+    setScreen("home");
     try {
       await logout();
     } catch {
       undefined;
     } finally {
       setLoggingOut(false);
-      setSession(null);
-      setWorkspaceState(null);
-      setSubmittedOrder(null);
-      setSelectedActorId("");
-      setEditingOrderId("");
-      setDraft(emptyDraft);
-      historyRef.current = ["home"];
-      setScreen("home");
+      logoutInFlightRef.current = false;
     }
-  };
+  }, []);
+
+  const noteActivity = useCallback(() => {
+    if (!session) return;
+    const now = Date.now();
+    if (now - lastActivityRef.current < 750) return;
+    lastActivityRef.current = now;
+    setLastActivityAt(now);
+    void rememberSessionActivity(now);
+    const reportEveryMs = Math.max(2000, Math.min(30000, Number(session.idleTimeoutSeconds || 7200) * 1000 / 3));
+    if (now - lastServerActivityRef.current >= reportEveryMs) {
+      lastServerActivityRef.current = now;
+      void reportSessionActivity().catch(() => undefined);
+    }
+  }, [session]);
+
+  useEffect(() => {
+    setUserActivityHandler(noteActivity);
+    return () => setUserActivityHandler(null);
+  }, [noteActivity]);
+
+  useEffect(() => {
+    if (!session) return;
+    const idleMs = Number(session.idleTimeoutSeconds || 7200) * 1000;
+    const remainingMs = Math.max(0, idleMs - (Date.now() - lastActivityAt));
+    const timer = setTimeout(() => {
+      if (Date.now() - lastActivityRef.current < idleMs || logoutInFlightRef.current) return;
+      Alert.alert("Session timed out", "You were logged out because this account was inactive.");
+      void handleLogout();
+    }, remainingMs);
+    return () => clearTimeout(timer);
+  }, [handleLogout, lastActivityAt, session]);
+
+  useEffect(() => {
+    if (!session) return;
+    const subscription = AppState.addEventListener("change", (nextState) => {
+      if (nextState !== "active") return;
+      const idleMs = Number(session.idleTimeoutSeconds || 7200) * 1000;
+      if (Date.now() - lastActivityRef.current >= idleMs && !logoutInFlightRef.current) {
+        Alert.alert("Session timed out", "You were logged out because this account was inactive.");
+        void handleLogout();
+      }
+    });
+    return () => subscription.remove();
+  }, [handleLogout, session]);
 
   if (booting) {
     return <LoadingScreen />;
@@ -370,7 +440,7 @@ export default function App() {
   const editReturnedOrder = (order: OrderRecord) => {
     setEditingOrderId(order.id);
     setSubmittedOrder(null);
-    setDraft(draftForOrder(order));
+    setDraft(draftForOrder(order, workspaceState));
     navigate("newOrder");
   };
 
@@ -382,11 +452,17 @@ export default function App() {
     onState: setWorkspaceState,
     onNavigate: navigate,
     onRefresh: refreshWorkspace,
-    onScrollToEnd: () => contentScrollRef.current?.scrollToEnd({ animated: true })
+    onScrollToEnd: () => contentScrollRef.current?.scrollToEnd({ animated: true }),
+    onSessionTimeout: (nextSession: UserSession) => {
+      const now = Date.now();
+      lastActivityRef.current = now;
+      setLastActivityAt(now);
+      setSession(nextSession);
+    }
   } : null;
 
   return (
-    <SafeAreaView style={styles.safe}>
+    <SafeAreaView style={styles.safe} onTouchStart={noteActivity}>
       <StatusBar style="dark" />
       <KeyboardAvoidingView style={styles.app} behavior={Platform.OS === "ios" ? "padding" : undefined}>
         <ScrollView ref={contentScrollRef} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
@@ -840,6 +916,7 @@ function ArchiveScreen({
   const [expandedStatements, setExpandedStatements] = useState<string[]>([]);
   const [receivablesExpanded, setReceivablesExpanded] = useState(false);
   const [expandedReceivableMonths, setExpandedReceivableMonths] = useState<string[]>([]);
+  const [transactionSort, setTransactionSort] = useState<"Date" | "Order / Transfer No.">("Date");
   const archives = visibleArchivesFor(session, workspaceState);
   const months = Array.from(new Set(archives.map((archive) => archiveMonthKey(archive.closedAt)).filter(Boolean))).sort().reverse();
   const activeMonth = months.includes(selectedMonth) ? selectedMonth : "";
@@ -902,6 +979,12 @@ function ArchiveScreen({
             })}
           </View>
         ) : null}
+        <SelectRow
+          label="Sort transactions by"
+          options={["Date", "Order / Transfer No."]}
+          value={transactionSort}
+          onChange={setTransactionSort}
+        />
       </Panel>
 
       <Panel title="Collected receivables" badge={String(archivedReceivables.length)}>
@@ -957,9 +1040,16 @@ function ArchiveScreen({
         const balanceRows = currencies
           .map((currency) => ({ currency, netMinor: Number(archive.balances?.[currency] || 0) }))
           .filter((row) => row.netMinor !== 0);
-        const orders = archive.orders || [];
-        const transfers = archive.transfers || [];
-        const ledger = archive.ledger || [];
+        const referenceCompare = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
+        const orders = (archive.orders || []).slice().sort((a, b) => transactionSort === "Date"
+          ? new Date(b.paidAt || b.sentAt || b.createdAt || 0).getTime() - new Date(a.paidAt || a.sentAt || a.createdAt || 0).getTime()
+          : referenceCompare(orderNumber(a, session), orderNumber(b, session)));
+        const transfers = (archive.transfers || []).slice().sort((a, b) => transactionSort === "Date"
+          ? new Date(b.reversedAt || b.paidOutAt || b.approvedAt || b.sentAt || b.createdAt || 0).getTime() - new Date(a.reversedAt || a.paidOutAt || a.approvedAt || a.sentAt || a.createdAt || 0).getTime()
+          : referenceCompare(a.id || a.journal || "", b.id || b.journal || ""));
+        const ledger = (archive.ledger || []).slice().sort((a, b) => transactionSort === "Date"
+          ? new Date(b.postedAt || 0).getTime() - new Date(a.postedAt || 0).getTime()
+          : referenceCompare(String(a.journal || a.orderId || a.transferId || a.entryId || ""), String(b.journal || b.orderId || b.transferId || b.entryId || "")));
         const detailCount = orders.length + transfers.length + ledger.length;
 
         return (
@@ -1010,6 +1100,7 @@ function ArchiveScreen({
                   <View key={`order-${statementId}-${order.id}`} style={styles.archiveDetailRow}>
                     <Text style={styles.archiveDetailTitle}>Order {orderNumber(order, session)}</Text>
                     <Text style={styles.archiveDetailMeta}>{order.receiverName || order.accountNumber || order.phoneNumber || "No receiver details"}</Text>
+                    {order.receiverCity ? <Text style={styles.archiveDetailMeta}>Receiver City: {order.receiverCity}</Text> : null}
                     <Text style={styles.archiveDetailAmount}>
                       {compactAmount(order.sourceCurrency, majorFromMinor(order.sourceAmountMinor, order.sourceCurrency))} to {compactAmount(order.payoutCurrency, majorFromMinor(order.payoutAmountMinor, order.payoutCurrency))}
                     </Text>
@@ -1098,6 +1189,7 @@ function TransferScreen({
         ...current,
         broker: session.actorName,
         receiverName: customer.name,
+        receiverCity: customer.receiverCity,
         phoneNumber: customer.phoneNumber,
         accountNumber: customer.accountNumber,
         remarks: customer.remarks
@@ -1118,13 +1210,15 @@ function TransferScreen({
         <Field label="Exchange rate" value={draft.rate} onChangeText={(value) => setConversionField("rate", value)} keyboardType="decimal-pad" />
         <Field label="Total payout" value={draft.payoutAmount} onChangeText={(value) => setConversionField("payoutAmount", value)} keyboardType="decimal-pad" placeholder="Calculated from any other two fields" />
         <Field label="Commission %" value={draft.commissionPercent} onChangeText={(value) => setField("commissionPercent", value)} keyboardType="decimal-pad" />
-        <SelectRow<FundingType> label="Payment type" options={["cash", "credit"]} value={draft.fundingType} onChange={(value) => setField("fundingType", value)} />
+        <SelectRow<FundingType> label="Payment type" options={["cash", "credit"]} value={draft.fundingType} onChange={(value) => setDraft((current) => ({ ...current, broker: session.actorName, fundingType: value, creditReminder: value === "credit" ? current.creditReminder : "" }))} />
+        {draft.fundingType === "credit" ? <Field label="Credit Reminder" value={draft.creditReminder} onChangeText={(value) => setField("creditReminder", value)} multiline /> : null}
       </Panel>
       <Panel title="Receiver Details" badge="Required">
         <Field label="Sender name" value={draft.senderName} onChangeText={(value) => setCustomerName("sender", value)} onFocus={() => setActiveCustomerPicker("sender")} />
         {activeCustomerPicker === "sender" ? <SavedCustomerSuggestions customers={senderCustomers} onSelect={chooseCustomer} /> : null}
         <Field label="Receiver name" value={draft.receiverName} onChangeText={(value) => setCustomerName("receiver", value)} onFocus={() => setActiveCustomerPicker("receiver")} />
         {activeCustomerPicker === "receiver" ? <SavedCustomerSuggestions customers={receiverCustomers} onSelect={chooseCustomer} /> : null}
+        <Field label="Receiver city" value={draft.receiverCity} onChangeText={(value) => setField("receiverCity", value)} />
         <Field label="Remarks" value={draft.remarks} onChangeText={(value) => setField("remarks", value)} multiline />
         <Field label="Phone number" value={draft.phoneNumber} onChangeText={(value) => setField("phoneNumber", value)} keyboardType="phone-pad" />
         <Field label="Account number" value={draft.accountNumber} onChangeText={(value) => setField("accountNumber", value)} keyboardType="number-pad" />
@@ -1149,7 +1243,7 @@ function SavedCustomerSuggestions({
   return (
     <View style={styles.savedCustomerList}>
       {customers.map((customer) => {
-        const details = [customer.phoneNumber, customer.accountNumber].filter(Boolean).join(" | ");
+        const details = [customer.receiverCity, customer.phoneNumber, customer.accountNumber].filter(Boolean).join(" | ");
         return (
           <Pressable key={customer.id} onPress={() => onSelect(customer)} style={styles.savedCustomerRow}>
             <Text style={styles.savedCustomerName}>{customer.name || customer.phoneNumber || customer.accountNumber}</Text>
@@ -1251,6 +1345,7 @@ function ConfirmationScreen({
         <SummaryRow label="Broker" value={session.actorName} />
         <SummaryRow label="Sender" value={draft.senderName} />
         <SummaryRow label="Receiver" value={draft.receiverName} />
+        {draft.receiverCity ? <SummaryRow label="Receiver city" value={draft.receiverCity} /> : null}
         <SummaryRow label="Phone" value={draft.phoneNumber || "Not provided"} />
         <SummaryRow label="Account" value={draft.accountNumber || "Not provided"} />
         <SummaryRow label="Funding" value={draft.fundingType === "credit" ? "Credit" : "Cash"} />

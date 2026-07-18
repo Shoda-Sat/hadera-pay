@@ -12,6 +12,16 @@ import {
 } from "react-native";
 import { colors, radius, shadow, spacing } from "../theme";
 
+let userActivityHandler: (() => void) | null = null;
+
+export function setUserActivityHandler(handler: (() => void) | null): void {
+  userActivityHandler = handler;
+}
+
+function reportUserActivity(): void {
+  userActivityHandler?.();
+}
+
 type ButtonVariant = "primary" | "secondary" | "danger";
 export type PillTone = "neutral" | "good" | "warn" | "danger" | "assigned" | "returned" | "cancelled" | "voided";
 
@@ -50,7 +60,10 @@ export function Button({
     <Pressable
       accessibilityRole="button"
       disabled={disabled || loading}
-      onPress={onPress}
+      onPress={() => {
+        reportUserActivity();
+        onPress();
+      }}
       style={({ pressed }) => [
         styles.button,
         styles[variant],
@@ -101,6 +114,7 @@ export function Field({
   keyboardType,
   secureTextEntry,
   multiline,
+  onFocus,
   style,
   ...inputProps
 }: TextInputProps & {
@@ -115,7 +129,14 @@ export function Field({
       <TextInput
         ref={inputRef}
         value={value}
-        onChangeText={onChangeText}
+        onChangeText={(nextValue) => {
+          reportUserActivity();
+          onChangeText?.(nextValue);
+        }}
+        onFocus={(event) => {
+          reportUserActivity();
+          onFocus?.(event);
+        }}
         placeholder={placeholder}
         placeholderTextColor={colors.muted}
         keyboardType={keyboardType}
@@ -149,7 +170,10 @@ export function SelectRow<T extends string>({
             <Pressable
               accessibilityRole="button"
               key={option}
-              onPress={() => onChange(option)}
+              onPress={() => {
+                reportUserActivity();
+                onChange(option);
+              }}
               style={[styles.segment, active && styles.segmentActive]}
             >
               <Text style={[styles.segmentText, active && styles.segmentTextActive]}>{option}</Text>
