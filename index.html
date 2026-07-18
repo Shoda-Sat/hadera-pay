@@ -3334,6 +3334,7 @@
   <script>
     let storageKey = "haderapay.local.state.v1";
     let currentAuth = null;
+    let currentLoginStartedAt = 0;
     let remoteStateReady = false;
     let saveTimer = null;
     let suppressRemoteSave = false;
@@ -4276,6 +4277,7 @@
       await api("/api/auth/logout", { method: "POST" }).catch(() => {});
       forgetAuthActivity(session);
       currentAuth = null;
+      currentLoginStartedAt = 0;
       remoteStateReady = false;
       if (remoteRefreshTimer) clearInterval(remoteRefreshTimer);
       remoteRefreshTimer = null;
@@ -4323,6 +4325,8 @@
     async function applyAuthSession(session) {
       endingAuthSession = false;
       currentAuth = session;
+      const loginStartedAt = new Date(session?.loginStartedAt || 0).getTime();
+      currentLoginStartedAt = Number.isFinite(loginStartedAt) && loginStartedAt > 0 ? loginStartedAt : Date.now();
       lastSessionActivityPingAt = Date.now();
       rememberAuthActivity(session);
       remoteStateReady = false;
@@ -8620,8 +8624,8 @@
         : state.orders.filter((order) => order.broker === actor?.name || order.agent === actor?.name);
       const activeOrders = visibleOrders
         .filter((order) => !["Voided", "Cancelled"].includes(order.state) && order.locked !== true)
-        .sort(newestOrderFirst);
-      const orderbookOrders = (actor?.role === "Master" ? visibleOrders : activeOrders).slice().sort(newestOrderFirst);
+        .sort(orderSortForActor(actor));
+      const orderbookOrders = (actor?.role === "Master" ? visibleOrders : activeOrders).slice().sort(orderSortForActor(actor));
       const rowsForOrders = (orders) => orders.map((order) => {
         const payoutAgent = payingAgentLabel(order);
         const stateLabel = actor?.role === "Master" && order.state === "Assigned" && payoutAgent !== "Unassigned"
@@ -9343,6 +9347,30 @@
       const numberA = Number(String(a?.id || "").match(/^ORD-(\d+)$/)?.[1] || 0);
       const numberB = Number(String(b?.id || "").match(/^ORD-(\d+)$/)?.[1] || 0);
       return numberB - numberA;
+    }
+
+    function orderActionTimeForActor(order, actor) {
+      const value = actor?.role === "Master"
+        ? order?.sentAt || order?.createdAt
+        : order?.assignedAt || order?.sentAt || order?.createdAt;
+      const time = new Date(value || 0).getTime();
+      return Number.isFinite(time) ? time : 0;
+    }
+
+    function orderNeedsLoginPriority(order, actor) {
+      if (!order || !actor || currentLoginStartedAt <= 0) return false;
+      const actionTime = orderActionTimeForActor(order, actor);
+      if (actionTime <= 0 || actionTime >= currentLoginStartedAt) return false;
+      if (actor.role === "Master") return order.state === "Pending Forward";
+      if (!actorCanReceivePayouts(actor.role) || order.state !== "Assigned") return false;
+      return order.agent === actor.name || Boolean(order.agentActorId && order.agentActorId === actor.id);
+    }
+
+    function orderSortForActor(actor) {
+      return (left, right) => {
+        const priorityDifference = Number(orderNeedsLoginPriority(right, actor)) - Number(orderNeedsLoginPriority(left, actor));
+        return priorityDifference || newestOrderFirst(left, right);
+      };
     }
 
     function renderTrialBalance() {
@@ -12576,16 +12604,21 @@
         const actor = selectedActor();
         const order = state.orders.find((item) => item.id === masterReturnButton.dataset.id);
         if (!order || actor?.role !== "Master" || order.state !== "Pending Forward") return;
-        order.state = "Returned";
-        order.returnedBy = "Master";
-        order.returnedAt = new Date().toISOString();
-        order.updatedAt = order.returnedAt;
-        order.agent = "Unassigned";
-        order.agentActorId = "";
-        state.orderState = "Returned";
-        els.orderState.textContent = "Returned";
-        els.orderState.className = "state-pill warn";
-        renderAll();
+        const orderNumber = orderDisplayNumber(order, actor);
+        confirmAction(`Return order ${orderNumber} to ${order.broker}?`, () => {
+          const currentOrder = state.orders.find((item) => item.id === order.id);
+          if (!currentOrder || currentOrder.state !== "Pending Forward") return;
+          currentOrder.state = "Returned";
+          currentOrder.returnedBy = "Master";
+          currentOrder.returnedAt = new Date().toISOString();
+          currentOrder.updatedAt = currentOrder.returnedAt;
+          currentOrder.agent = "Unassigned";
+          currentOrder.agentActorId = "";
+          state.orderState = "Returned";
+          els.orderState.textContent = "Returned";
+          els.orderState.className = "state-pill warn";
+          renderAll();
+        });
         return;
       }
 
@@ -12594,15 +12627,20 @@
         const actor = selectedActor();
         const order = state.orders.find((item) => item.id === cancelButton.dataset.id);
         if (!order || actor?.role !== "Master" || order.state !== "Pending Forward") return;
-        order.state = "Cancelled";
-        order.returnedBy = "";
-        order.cancelledAt = new Date().toISOString();
-        order.updatedAt = order.cancelledAt;
-        order.agent = "Cancelled";
-        state.orderState = "Cancelled";
-        els.orderState.textContent = "Cancelled";
-        els.orderState.className = "state-pill danger";
-        renderAll();
+        const orderNumber = orderDisplayNumber(order, actor);
+        confirmAction(`Cancel order ${orderNumber}? This order will not be forwarded.`, () => {
+          const currentOrder = state.orders.find((item) => item.id === order.id);
+          if (!currentOrder || currentOrder.state !== "Pending Forward") return;
+          currentOrder.state = "Cancelled";
+          currentOrder.returnedBy = "";
+          currentOrder.cancelledAt = new Date().toISOString();
+          currentOrder.updatedAt = currentOrder.cancelledAt;
+          currentOrder.agent = "Cancelled";
+          state.orderState = "Cancelled";
+          els.orderState.textContent = "Cancelled";
+          els.orderState.className = "state-pill danger";
+          renderAll();
+        });
         return;
       }
 
@@ -12705,15 +12743,20 @@
         const actor = selectedActor();
         const order = state.orders.find((item) => item.id === returnButton.dataset.id);
         if (!order || order.state !== "Assigned" || order.agent !== actor?.name) return;
-        order.state = "Returned";
-        order.returnedBy = actor.name;
-        order.returnedAt = new Date().toISOString();
-        order.updatedAt = order.returnedAt;
-        order.agent = "Unassigned";
-        state.orderState = "Returned";
-        els.orderState.textContent = "Returned";
-        els.orderState.className = "state-pill warn";
-        renderAll();
+        const orderNumber = orderDisplayNumber(order, actor);
+        confirmAction(`Return order ${orderNumber} to Master without paying it?`, () => {
+          const currentOrder = state.orders.find((item) => item.id === order.id);
+          if (!currentOrder || currentOrder.state !== "Assigned" || currentOrder.agent !== actor.name) return;
+          currentOrder.state = "Returned";
+          currentOrder.returnedBy = actor.name;
+          currentOrder.returnedAt = new Date().toISOString();
+          currentOrder.updatedAt = currentOrder.returnedAt;
+          currentOrder.agent = "Unassigned";
+          state.orderState = "Returned";
+          els.orderState.textContent = "Returned";
+          els.orderState.className = "state-pill warn";
+          renderAll();
+        });
         return;
       }
 

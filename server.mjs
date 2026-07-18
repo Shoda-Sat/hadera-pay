@@ -388,6 +388,7 @@ function publicSessionForRecord(db, session) {
   if (!session) return null;
   if (session.userId === "__owner") {
     return {
+      loginStartedAt: session.createdAt || session.lastActivityAt || "",
       user: { id: "__owner", name: ownerUser, email: ownerUser, idleTimeoutSeconds: accountIdleTimeoutSeconds(db, "__owner") },
       workspace: { id: "__owner", name: "Owner Console" },
       subscription: { ownerUserId: "__owner", ownerName: ownerUser, active: true, inactive: false, expiresAt: "", expired: false },
@@ -407,6 +408,7 @@ function publicSessionForRecord(db, session) {
   if (!user || !membership || !workspace) return null;
   const subscription = workspaceOwnerSubscription(db, workspace);
   return {
+    loginStartedAt: session.createdAt || session.lastActivityAt || "",
     user: { id: user.id, name: user.name, email: user.email, idleTimeoutSeconds: accountIdleTimeoutSeconds(db, user.id) },
     workspace: { id: workspace.id, name: workspace.name },
     subscription,
