@@ -451,6 +451,115 @@ function mergeById(existingItems = [], incomingItems = []) {
   return Array.from(merged.values());
 }
 
+const actorResetTombstoneKeys = ["orders", "receivables", "transfers", "customers", "messages"];
+
+function normalizeActorResetTombstones(value = {}) {
+  return Object.fromEntries(actorResetTombstoneKeys.map((key) => [
+    key,
+    Array.from(new Set((Array.isArray(value?.[key]) ? value[key] : []).filter(Boolean).map(String)))
+  ]));
+}
+
+function mergeActorResetTombstones(existing = {}, incoming = {}) {
+  const current = normalizeActorResetTombstones(existing);
+  const next = normalizeActorResetTombstones(incoming);
+  return Object.fromEntries(actorResetTombstoneKeys.map((key) => [
+    key,
+    Array.from(new Set([...current[key], ...next[key]]))
+  ]));
+}
+
+function orderBelongsToResetActor(order, actor) {
+  if (!order || !actor) return false;
+  return Boolean(
+    (actor.id && (order.brokerActorId === actor.id || order.agentActorId === actor.id)) ||
+    order.broker === actor.name ||
+    order.agent === actor.name
+  );
+}
+
+function receivableBelongsToResetActor(receivable, actor) {
+  if (!receivable || !actor) return false;
+  return Boolean(
+    (actor.id && receivable.borrowerActorId === actor.id) ||
+    receivable.borrower === actor.name
+  );
+}
+
+function transferBelongsToResetActor(transfer, actor) {
+  if (!transfer || !actor) return false;
+  return Boolean(
+    (actor.id && (transfer.fromActorId === actor.id || transfer.toActorId === actor.id)) ||
+    transfer.from === actor.name ||
+    transfer.to === actor.name ||
+    transfer.initiatedBy === actor.name
+  );
+}
+
+function messageBelongsToResetActor(message, actor) {
+  if (!message || !actor) return false;
+  return message.from === actor.name || message.forwardedFrom === actor.name;
+}
+
+function applyActorResetTombstones(targetState) {
+  const tombstones = normalizeActorResetTombstones(targetState?.actorResetTombstones);
+  const orderIds = new Set(tombstones.orders);
+  const receivableIds = new Set(tombstones.receivables);
+  const transferIds = new Set(tombstones.transfers);
+  const customerIds = new Set(tombstones.customers);
+  const messageIds = new Set(tombstones.messages);
+  targetState.actorResetTombstones = tombstones;
+  targetState.orders = (targetState.orders || []).filter((item) => !orderIds.has(String(item?.id || "")));
+  targetState.receivables = (targetState.receivables || []).filter((item) => !receivableIds.has(String(item?.id || "")));
+  targetState.transfers = (targetState.transfers || []).filter((item) => !transferIds.has(String(item?.id || "")));
+  targetState.savedCustomers = (targetState.savedCustomers || []).filter((item) => !customerIds.has(String(item?.id || "")));
+  targetState.chatConversations = (targetState.chatConversations || []).map((chat) => ({
+    ...chat,
+    messages: (chat.messages || []).filter((message) => !messageIds.has(String(message?.id || "")))
+  }));
+  if (messageIds.has(String(targetState.chatReplyTo || ""))) targetState.chatReplyTo = "";
+  return targetState;
+}
+
+function resetSpecificActorData(targetState, actor) {
+  if (!targetState || !actor || actor.role === "Master") return null;
+  const removedOrders = (targetState.orders || []).filter((item) => orderBelongsToResetActor(item, actor));
+  const removedReceivables = (targetState.receivables || []).filter((item) => receivableBelongsToResetActor(item, actor));
+  const removedTransfers = (targetState.transfers || []).filter((item) => transferBelongsToResetActor(item, actor));
+  const removedCustomers = (targetState.savedCustomers || []).filter((item) => item?.actorId === actor.id);
+  const removedMessages = (targetState.chatConversations || [])
+    .flatMap((chat) => chat?.messages || [])
+    .filter((message) => messageBelongsToResetActor(message, actor));
+  targetState.actorResetTombstones = mergeActorResetTombstones(targetState.actorResetTombstones, {
+    orders: removedOrders.map((item) => item.id),
+    receivables: removedReceivables.map((item) => item.id),
+    transfers: removedTransfers.map((item) => item.id),
+    customers: removedCustomers.map((item) => item.id),
+    messages: removedMessages.map((item) => item.id)
+  });
+  targetState.chatConversations = (targetState.chatConversations || []).map((chat) => ({
+    ...chat,
+    messages: (chat.messages || []).map((message) => {
+      if (!message?.reactions || !Object.prototype.hasOwnProperty.call(message.reactions, actor.name)) return message;
+      const reactions = { ...message.reactions };
+      delete reactions[actor.name];
+      return { ...message, reactions };
+    })
+  }));
+  applyActorResetTombstones(targetState);
+  const removedOrderIds = new Set(removedOrders.map((item) => item.id));
+  const removedTransferIds = new Set(removedTransfers.map((item) => item.id));
+  if (removedOrderIds.has(targetState.editingOrderId)) targetState.editingOrderId = "";
+  if (removedTransferIds.has(targetState.editingTransferId)) targetState.editingTransferId = "";
+  return {
+    orders: removedOrders.length,
+    receivables: removedReceivables.length,
+    transfers: removedTransfers.length,
+    customers: removedCustomers.length,
+    messages: removedMessages.length
+  };
+}
+
 function recordTimestamp(item = {}) {
   return Math.max(
     new Date(item.voidRequestedAt || 0).getTime(),
@@ -636,6 +745,7 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   const activeActorIds = new Set(membershipActors.map((actor) => actor.id));
   const deletedActorIds = new Set([...(currentState.deletedActorIds || []), ...(incomingState.deletedActorIds || [])]);
   const deletedChatIds = new Set([...(currentState.deletedChatIds || []), ...(incomingState.deletedChatIds || [])]);
+  const actorResetTombstones = mergeActorResetTombstones(currentState.actorResetTombstones, incomingState.actorResetTombstones);
   const chatHistoryResetTime = Math.max(
     new Date(currentState.chatHistoryResetAt || 0).getTime() || 0,
     new Date(incomingState.chatHistoryResetAt || 0).getTime() || 0
@@ -662,6 +772,8 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
         !chatHistoryResetTime || new Date(message?.createdAt || 0).getTime() > chatHistoryResetTime
       ),
     }));
+  nextState.actorResetTombstones = actorResetTombstones;
+  applyActorResetTombstones(nextState);
   nextState.actors = mergeById(membershipActors, nextState.actors)
     .map((actor) => ({
       ...actor,
@@ -741,6 +853,7 @@ function resetWorkspaceState(db, workspaceId, scope = "data") {
     ledger: [],
     masterBankEntries: [],
     archives: [],
+    actorResetTombstones: normalizeActorResetTombstones(),
     chatConversations: scope === "wipe"
       ? []
       : (currentState.chatConversations || []).map((chat) => ({ ...chat, messages: [] })),
@@ -1254,6 +1367,28 @@ async function handleApi(request, response, url) {
     db.appStates[session.workspace.id] = nextState;
     await saveDb(db, { replace: true });
     sendJson(response, 200, { ok: true, state: stripRestrictedCreditReminders(nextState, session) });
+    return;
+  }
+
+  if (url.pathname === "/api/app-state/reset-actor" && method === "POST") {
+    if (session.membership.role !== "Master") return sendJson(response, 403, { error: "Only Master can reset Actor data." });
+    const body = await readJson(request);
+    const actorId = String(body.actorId || "");
+    const currentState = db.appStates[session.workspace.id] || {};
+    const actors = mergeById(workspaceActors(db, session.workspace.id), currentState.actors || []);
+    const actor = actors.find((item) => item?.id === actorId && item?.role !== "Master");
+    if (!actor) return sendJson(response, 400, { error: "Choose an Actor to reset." });
+    const nextState = structuredClone(currentState);
+    nextState.actors = actors;
+    const counts = resetSpecificActorData(nextState, actor);
+    db.appStates[session.workspace.id] = nextState;
+    await saveDb(db, { replace: true });
+    sendJson(response, 200, {
+      ok: true,
+      actor: { id: actor.id, name: actor.name },
+      counts,
+      state: stripRestrictedCreditReminders(nextState, session)
+    });
     return;
   }
 

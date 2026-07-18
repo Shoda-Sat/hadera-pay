@@ -437,6 +437,16 @@
       min-width: 106px;
     }
 
+    .reset-actor-section {
+      margin-top: 18px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+    }
+
+    .reset-actor-section .settings-heading {
+      margin-bottom: 12px;
+    }
+
     .panel-actions {
       display: flex;
       gap: 8px;
@@ -3134,6 +3144,28 @@
                   </button>
                 </div>
               </form>
+              <div class="reset-actor-section">
+                <div class="settings-heading">
+                  <strong>Reset Specific Actor</strong>
+                  <small>Erase this Actor's active orders, receivables, transfers, saved customers, and authored chat messages. Ledger, Master Bank, Archive, login, and Actor settings remain unchanged.</small>
+                </div>
+                <form id="actorResetForm">
+                  <div class="form-grid">
+                    <div class="field">
+                      <label for="actorResetActor">Actor</label>
+                      <select id="actorResetActor"></select>
+                    </div>
+                    <div class="field">
+                      <label for="actorResetPermit">Permit phrase</label>
+                      <input id="actorResetPermit" placeholder="ACTOR-RESET" autocomplete="off">
+                      <span class="field-error" id="actorResetError">Choose an Actor and enter ACTOR-RESET.</span>
+                    </div>
+                  </div>
+                  <div class="actions">
+                    <button class="btn danger" id="actorResetButton" type="submit">Reset Selected Actor</button>
+                  </div>
+                </form>
+              </div>
             </div>
             </div>
             <div class="panel span-7 settings-category" data-settings-panel="inviteCodes" data-master-settings>
@@ -3348,6 +3380,24 @@
       fixedOrderRates: true
     };
 
+    const actorResetTombstoneKeys = ["orders", "receivables", "transfers", "customers", "messages"];
+
+    function normalizeActorResetTombstones(value = {}) {
+      return Object.fromEntries(actorResetTombstoneKeys.map((key) => [
+        key,
+        Array.from(new Set((Array.isArray(value?.[key]) ? value[key] : []).filter(Boolean).map(String)))
+      ]));
+    }
+
+    function mergeActorResetTombstones(existing = {}, incoming = {}) {
+      const current = normalizeActorResetTombstones(existing);
+      const next = normalizeActorResetTombstones(incoming);
+      return Object.fromEntries(actorResetTombstoneKeys.map((key) => [
+        key,
+        Array.from(new Set([...current[key], ...next[key]]))
+      ]));
+    }
+
     function normalizeSettingsPanels(settings = {}, legacySettings = {}) {
       const normalized = {};
       Object.keys(settingsPanelDefaults).forEach((key) => {
@@ -3401,6 +3451,7 @@
       chatConversations: [],
       deletedChatIds: [],
       chatHistoryResetAt: "",
+      actorResetTombstones: normalizeActorResetTombstones(),
       actors: [
         { id: "ACT-0", name: "Master", role: "Master", currency: "USD", active: true, transferEnabled: true },
         { id: "ACT-1", name: "Eastline Broker", role: "Broker", currency: "USD", active: true, transferEnabled: true },
@@ -3440,7 +3491,8 @@
           settingsPanels: normalizeSettingsPanels(saved.settingsPanels, saved),
           archives: Array.isArray(saved.archives) ? saved.archives : [],
           chatConversations: Array.isArray(saved.chatConversations) ? saved.chatConversations : [],
-          deletedChatIds: Array.isArray(saved.deletedChatIds) ? saved.deletedChatIds : []
+          deletedChatIds: Array.isArray(saved.deletedChatIds) ? saved.deletedChatIds : [],
+          actorResetTombstones: normalizeActorResetTombstones(saved.actorResetTombstones)
         };
       } catch {
         return structuredClone(defaultState);
@@ -3626,7 +3678,8 @@
       const preparedState = {
         ...nextState,
         savedCustomers: normalizeSavedCustomers(nextState?.savedCustomers),
-        settingsPanels: normalizeSettingsPanels(nextState?.settingsPanels, nextState)
+        settingsPanels: normalizeSettingsPanels(nextState?.settingsPanels, nextState),
+        actorResetTombstones: normalizeActorResetTombstones(nextState?.actorResetTombstones)
       };
       Object.keys(state).forEach((key) => delete state[key]);
       Object.assign(state, preparedState);
@@ -3792,6 +3845,98 @@
       });
     }
 
+    function orderBelongsToResetActor(order, actor) {
+      if (!order || !actor) return false;
+      return Boolean(
+        (actor.id && (order.brokerActorId === actor.id || order.agentActorId === actor.id)) ||
+        order.broker === actor.name ||
+        order.agent === actor.name
+      );
+    }
+
+    function receivableBelongsToResetActor(receivable, actor) {
+      if (!receivable || !actor) return false;
+      return Boolean(
+        (actor.id && receivable.borrowerActorId === actor.id) ||
+        receivable.borrower === actor.name
+      );
+    }
+
+    function transferBelongsToResetActor(transfer, actor) {
+      if (!transfer || !actor) return false;
+      return Boolean(
+        (actor.id && (transfer.fromActorId === actor.id || transfer.toActorId === actor.id)) ||
+        transfer.from === actor.name ||
+        transfer.to === actor.name ||
+        transfer.initiatedBy === actor.name
+      );
+    }
+
+    function messageBelongsToResetActor(message, actor) {
+      if (!message || !actor) return false;
+      return message.from === actor.name || message.forwardedFrom === actor.name;
+    }
+
+    function applyActorResetTombstones(targetState) {
+      const tombstones = normalizeActorResetTombstones(targetState?.actorResetTombstones);
+      const orderIds = new Set(tombstones.orders);
+      const receivableIds = new Set(tombstones.receivables);
+      const transferIds = new Set(tombstones.transfers);
+      const customerIds = new Set(tombstones.customers);
+      const messageIds = new Set(tombstones.messages);
+      targetState.actorResetTombstones = tombstones;
+      targetState.orders = (targetState.orders || []).filter((item) => !orderIds.has(String(item?.id || "")));
+      targetState.receivables = (targetState.receivables || []).filter((item) => !receivableIds.has(String(item?.id || "")));
+      targetState.transfers = (targetState.transfers || []).filter((item) => !transferIds.has(String(item?.id || "")));
+      targetState.savedCustomers = normalizeSavedCustomers(targetState.savedCustomers)
+        .filter((item) => !customerIds.has(String(item?.id || "")));
+      targetState.chatConversations = (targetState.chatConversations || []).map((chat) => ({
+        ...chat,
+        messages: (chat.messages || []).filter((message) => !messageIds.has(String(message?.id || "")))
+      }));
+      if (messageIds.has(String(targetState.chatReplyTo || ""))) targetState.chatReplyTo = "";
+      return targetState;
+    }
+
+    function resetSpecificActorData(targetState, actor) {
+      if (!targetState || !actor || actor.role === "Master") return null;
+      const removedOrders = (targetState.orders || []).filter((item) => orderBelongsToResetActor(item, actor));
+      const removedReceivables = (targetState.receivables || []).filter((item) => receivableBelongsToResetActor(item, actor));
+      const removedTransfers = (targetState.transfers || []).filter((item) => transferBelongsToResetActor(item, actor));
+      const removedCustomers = normalizeSavedCustomers(targetState.savedCustomers).filter((item) => item.actorId === actor.id);
+      const removedMessages = (targetState.chatConversations || [])
+        .flatMap((chat) => chat.messages || [])
+        .filter((message) => messageBelongsToResetActor(message, actor));
+      targetState.actorResetTombstones = mergeActorResetTombstones(targetState.actorResetTombstones, {
+        orders: removedOrders.map((item) => item.id),
+        receivables: removedReceivables.map((item) => item.id),
+        transfers: removedTransfers.map((item) => item.id),
+        customers: removedCustomers.map((item) => item.id),
+        messages: removedMessages.map((item) => item.id)
+      });
+      targetState.chatConversations = (targetState.chatConversations || []).map((chat) => ({
+        ...chat,
+        messages: (chat.messages || []).map((message) => {
+          if (!message?.reactions || !Object.prototype.hasOwnProperty.call(message.reactions, actor.name)) return message;
+          const reactions = { ...message.reactions };
+          delete reactions[actor.name];
+          return { ...message, reactions };
+        })
+      }));
+      applyActorResetTombstones(targetState);
+      const removedOrderIds = new Set(removedOrders.map((item) => item.id));
+      const removedTransferIds = new Set(removedTransfers.map((item) => item.id));
+      if (removedOrderIds.has(targetState.editingOrderId)) targetState.editingOrderId = "";
+      if (removedTransferIds.has(targetState.editingTransferId)) targetState.editingTransferId = "";
+      return {
+        orders: removedOrders.length,
+        receivables: removedReceivables.length,
+        transfers: removedTransfers.length,
+        customers: removedCustomers.length,
+        messages: removedMessages.length
+      };
+    }
+
     function mergeSharedState(remoteState) {
       if (!remoteState || typeof remoteState !== "object") return false;
       const deletedActorIds = new Set(remoteState.deletedActorIds || []);
@@ -3819,6 +3964,8 @@
             !chatHistoryResetTime || new Date(message.createdAt || 0).getTime() > chatHistoryResetTime
           )
         }));
+      state.actorResetTombstones = mergeActorResetTombstones(state.actorResetTombstones, remoteState.actorResetTombstones);
+      applyActorResetTombstones(state);
       state.deletedActorIds = Array.from(deletedActorIds);
       state.deletedActorNames = [];
       state.deletedChatIds = Array.from(deletedChatIds);
@@ -3834,7 +3981,7 @@
 
     function settingsRateInputIsFocused() {
       return Boolean(document.activeElement?.closest?.(
-        ".fixed-order-rate, .special-agent-divider, .special-agent-percent, .usd-agent-income-divider, .usd-agent-income-percent, .master-rate-divider, .master-rate-percent, .buying-rate-input, .forward-agent, .forward-payout-divider, .forward-payout-percent, .receivable-payment, .ledger-tool-input, .actor-name-input, .actor-currency-input, .actor-currency-rate"
+        ".fixed-order-rate, .special-agent-divider, .special-agent-percent, .usd-agent-income-divider, .usd-agent-income-percent, .master-rate-divider, .master-rate-percent, .buying-rate-input, .forward-agent, .forward-payout-divider, .forward-payout-percent, .receivable-payment, .ledger-tool-input, .actor-name-input, .actor-currency-input, .actor-currency-rate, #actorResetActor, #actorResetPermit"
       ));
     }
 
@@ -4198,6 +4345,11 @@
       permissionRows: document.getElementById("permissionRows"),
       visibilityPermissionRows: document.getElementById("visibilityPermissionRows"),
       resetScope: document.getElementById("resetScope"),
+      actorResetForm: document.getElementById("actorResetForm"),
+      actorResetActor: document.getElementById("actorResetActor"),
+      actorResetPermit: document.getElementById("actorResetPermit"),
+      actorResetError: document.getElementById("actorResetError"),
+      actorResetButton: document.getElementById("actorResetButton"),
       subscriptionRows: document.getElementById("subscriptionRows"),
       subscriptionError: document.getElementById("subscriptionError"),
       inviteRows: document.getElementById("inviteRows"),
@@ -6240,6 +6392,22 @@
       els.actorCount.textContent = `${activeActors().length} active`;
     }
 
+    function renderActorResetOptions() {
+      if (!els.actorResetActor) return;
+      const actors = state.actors.filter((actor) => actor.role !== "Master");
+      const previousValue = els.actorResetActor.value;
+      if (document.activeElement === els.actorResetActor) return;
+      els.actorResetActor.innerHTML = actors.length
+        ? actors.map((actor) => `<option value="${escapeHtml(actor.id)}">${escapeHtml(actor.name)} - ${escapeHtml(actor.role)}</option>`).join("")
+        : '<option value="">No Actors available</option>';
+      els.actorResetActor.value = actors.some((actor) => actor.id === previousValue)
+        ? previousValue
+        : actors[0]?.id || "";
+      els.actorResetActor.disabled = actors.length === 0;
+      els.actorResetPermit.disabled = actors.length === 0;
+      els.actorResetButton.disabled = actors.length === 0;
+    }
+
     function renameActor(actorId, nextName) {
       const actor = state.actors.find((item) => item.id === actorId);
       const name = nextName.trim();
@@ -6750,6 +6918,7 @@
       state.ledger = [];
       state.masterBankEntries = [];
       state.archives = [];
+      state.actorResetTombstones = normalizeActorResetTombstones();
       state.journalCounter = 0;
       state.orderCounter = 0;
       state.receivableCounter = 0;
@@ -11272,6 +11441,73 @@
       notifyEvent("Actor created", `${name} is active and managed by Master.`);
     });
 
+    els.actorResetForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (selectedActor()?.role !== "Master") return;
+      const actor = state.actors.find((item) => item.id === els.actorResetActor.value && item.role !== "Master");
+      const allowed = els.actorResetPermit.value.trim() === "ACTOR-RESET";
+      els.actorResetError.textContent = !actor
+        ? "Choose an Actor to reset."
+        : "Enter ACTOR-RESET to continue.";
+      els.actorResetError.classList.toggle("visible", !actor || !allowed);
+      if (!actor || !allowed) return;
+      confirmAction(
+        `Reset ${actor.name}? Active records will be erased, but Ledger, Master Bank, Archive, login, and Actor settings will remain.`,
+        async () => {
+          const affectedOrderIds = state.orders
+            .filter((item) => orderBelongsToResetActor(item, actor))
+            .map((item) => item.id);
+          const affectedReceivableIds = state.receivables
+            .filter((item) => receivableBelongsToResetActor(item, actor))
+            .map((item) => item.id);
+          const affectedTransferIds = state.transfers
+            .filter((item) => transferBelongsToResetActor(item, actor))
+            .map((item) => item.id);
+          els.actorResetButton.disabled = true;
+          try {
+            let counts = null;
+            if (currentAuth && remoteStateReady) {
+              const result = await api("/api/app-state/reset-actor", {
+                method: "POST",
+                body: { actorId: actor.id }
+              });
+              const nextState = result.state || {};
+              replaceState({
+                ...structuredClone(defaultState),
+                ...nextState,
+                actors: normalizeActors(Array.isArray(nextState.actors) ? nextState.actors : structuredClone(defaultState.actors)),
+                receivables: Array.isArray(nextState.receivables) ? nextState.receivables : [],
+                transfers: normalizeTransfers(Array.isArray(nextState.transfers) ? nextState.transfers : []),
+                masterBankEntries: normalizeMasterBankEntries(nextState.masterBankEntries)
+              });
+              counts = result.counts || null;
+              ensureSessionActor();
+            } else {
+              counts = resetSpecificActorData(state, actor);
+            }
+            affectedOrderIds.forEach((orderId) => {
+              pendingProofFiles.delete(orderId);
+              pendingProofUploads.delete(orderId);
+              processingOrderIds.delete(orderId);
+              expandedCompactOrderIds.delete(orderId);
+            });
+            affectedReceivableIds.forEach((receivableId) => receivablePaymentDrafts.delete(receivableId));
+            affectedTransferIds.forEach((transferId) => processingTransferIds.delete(transferId));
+            els.actorResetPermit.value = "";
+            els.actorResetError.classList.remove("visible");
+            const erasedCount = Object.values(counts || {}).reduce((sum, value) => sum + Number(value || 0), 0);
+            notifyEvent("Actor reset", `${actor.name}: ${erasedCount} active records erased. Ledger and Archive were preserved.`);
+            renderAll();
+          } catch (error) {
+            els.actorResetError.textContent = error.message;
+            els.actorResetError.classList.add("visible");
+          } finally {
+            els.actorResetButton.disabled = false;
+          }
+        }
+      );
+    });
+
     document.getElementById("resetForm").addEventListener("submit", async (event) => {
       event.preventDefault();
       els.resetError.textContent = "Enter MASTER-RESET to continue.";
@@ -12280,6 +12516,7 @@
       renderLedgerActorSelector();
       renderProfiles();
       renderActors();
+      renderActorResetOptions();
       renderPermissionSettings();
       renderVisibilityPermissions();
       renderAccountTimeoutSettings();
