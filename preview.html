@@ -797,6 +797,69 @@
       flex-wrap: wrap;
     }
 
+    .archive-balance-summary {
+      border-top: 1px solid var(--line);
+      display: grid;
+      gap: 16px;
+    }
+
+    .archive-balance-summary-head,
+    .archive-balance-group-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .archive-balance-groups {
+      display: grid;
+      gap: 18px;
+    }
+
+    .archive-balance-group {
+      display: grid;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .archive-balance-group + .archive-balance-group {
+      border-top: 1px solid var(--line);
+      padding-top: 18px;
+    }
+
+    .archive-primary-currency,
+    .archive-balance-base-cell {
+      background: var(--accent-soft);
+    }
+
+    .archive-balance-base-cell {
+      box-shadow: inset 3px 0 0 var(--accent);
+    }
+
+    .archive-balance-cell {
+      min-width: 126px;
+    }
+
+    .archive-balance-cell small {
+      display: block;
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.25;
+    }
+
+    .archive-balance-table td:first-child small {
+      display: block;
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 10px;
+    }
+
+    .archive-balance-table {
+      min-width: 860px;
+    }
+
     .master-bank-toolbar {
       display: flex;
       align-items: end;
@@ -2905,6 +2968,7 @@
                 </div>
               </div>
             </div>
+            <div class="panel-body archive-balance-summary" id="archiveBalanceSummary"></div>
             <div class="panel-body table-wrap">
               <table>
                 <thead>
@@ -3475,11 +3539,12 @@
       try {
         const saved = JSON.parse(localStorage.getItem(storageKey) || "null");
         if (!saved || typeof saved !== "object") return structuredClone(defaultState);
+        const archives = normalizeArchiveSnapshots(saved.archives);
         return {
           ...structuredClone(defaultState),
           ...saved,
           actors: normalizeActors(Array.isArray(saved.actors) ? saved.actors : structuredClone(defaultState.actors)),
-          orders: Array.isArray(saved.orders) ? saved.orders : [],
+          orders: removeOrdersAlreadyArchived(saved.orders, archives),
           savedCustomers: normalizeSavedCustomers(saved.savedCustomers),
           receivables: Array.isArray(saved.receivables) ? saved.receivables : [],
           transfers: normalizeTransfers(Array.isArray(saved.transfers) ? saved.transfers : []),
@@ -3489,7 +3554,7 @@
           masterRateDivisorSettings: normalizeCurrencyRateSettings(saved.masterRateDivisorSettings || {}),
           buyingRates: normalizeBuyingRates(saved.buyingRates || { eurToUsdDivider: saved.eurToUsdDivider }),
           settingsPanels: normalizeSettingsPanels(saved.settingsPanels, saved),
-          archives: Array.isArray(saved.archives) ? saved.archives : [],
+          archives,
           chatConversations: Array.isArray(saved.chatConversations) ? saved.chatConversations : [],
           deletedChatIds: Array.isArray(saved.deletedChatIds) ? saved.deletedChatIds : [],
           actorResetTombstones: normalizeActorResetTombstones(saved.actorResetTombstones)
@@ -3604,6 +3669,69 @@
         .map((entry) => ({ ...entry, amountMinor: Number(entry.amountMinor) }));
     }
 
+    function archiveSnapshotItemKey(type, item = {}) {
+      if (type === "orders") {
+        return String(item.id || item.brokerOrderNumber || [item.broker, item.agent, item.createdAt, item.sourceCurrency, item.sourceAmountMinor].join(":"));
+      }
+      if (type === "receivables") return String(item.id || item.orderId || "");
+      if (type === "transfers") return String(item.id || item.journal || "");
+      if (type === "ledger") {
+        return String(item.entryId || [item.journal, item.source, item.account, item.direction, item.currency, item.amountMinor, item.postedAt].join(":"));
+      }
+      return "";
+    }
+
+    function normalizeArchiveSnapshots(archives = []) {
+      const normalized = (Array.isArray(archives) ? archives : [])
+        .filter((archive) => archive && typeof archive === "object")
+        .map((archive) => ({
+          ...archive,
+          orders: Array.isArray(archive.orders) ? archive.orders : [],
+          receivables: Array.isArray(archive.receivables) ? archive.receivables : [],
+          transfers: Array.isArray(archive.transfers) ? archive.transfers : [],
+          ledger: Array.isArray(archive.ledger) ? archive.ledger : []
+        }));
+      const seenByActor = new Map();
+      normalized
+        .map((archive, index) => ({ archive, index }))
+        .sort((left, right) => {
+          const timeDifference = new Date(left.archive.closedAt || 0).getTime() - new Date(right.archive.closedAt || 0).getTime();
+          return timeDifference || left.index - right.index;
+        })
+        .forEach(({ archive }) => {
+          const actorKey = String(archive.actorId || archive.actor || "Unknown Actor");
+          if (!seenByActor.has(actorKey)) {
+            seenByActor.set(actorKey, {
+              orders: new Set(),
+              receivables: new Set(),
+              transfers: new Set(),
+              ledger: new Set()
+            });
+          }
+          const actorSeen = seenByActor.get(actorKey);
+          ["orders", "receivables", "transfers", "ledger"].forEach((type) => {
+            archive[type] = archive[type].filter((item) => {
+              const key = archiveSnapshotItemKey(type, item);
+              if (!key || actorSeen[type].has(key)) return false;
+              actorSeen[type].add(key);
+              return true;
+            });
+          });
+        });
+      return normalized;
+    }
+
+    function removeOrdersAlreadyArchived(orders = [], archives = []) {
+      const archivedOrderIds = new Set(
+        normalizeArchiveSnapshots(archives)
+          .flatMap((archive) => archive.orders)
+          .map((order) => String(order?.id || ""))
+          .filter(Boolean)
+      );
+      return (Array.isArray(orders) ? orders : [])
+        .filter((order) => !archivedOrderIds.has(String(order?.id || "")));
+    }
+
     function normalizeSavedCustomers(customers) {
       const clean = (value) => String(value ?? "").trim();
       return (Array.isArray(customers) ? customers : [])
@@ -3675,8 +3803,11 @@
     }
 
     function replaceState(nextState) {
+      const archives = normalizeArchiveSnapshots(nextState?.archives);
       const preparedState = {
         ...nextState,
+        orders: removeOrdersAlreadyArchived(nextState?.orders, archives),
+        archives,
         savedCustomers: normalizeSavedCustomers(nextState?.savedCustomers),
         settingsPanels: normalizeSettingsPanels(nextState?.settingsPanels, nextState),
         actorResetTombstones: normalizeActorResetTombstones(nextState?.actorResetTombstones)
@@ -3955,7 +4086,8 @@
       state.ledger = mergeLedgerLines(state.ledger, remoteState.ledger || []);
       state.masterBankEntries = normalizeMasterBankEntries(mergeById(state.masterBankEntries, remoteState.masterBankEntries || []));
       state.settlements = Array.isArray(remoteState.settlements) ? remoteState.settlements : state.settlements;
-      state.archives = mergeById(state.archives, remoteState.archives || []);
+      state.archives = normalizeArchiveSnapshots(mergeById(state.archives, remoteState.archives || []));
+      state.orders = removeOrdersAlreadyArchived(state.orders, state.archives);
       state.chatConversations = mergeChatConversations(state.chatConversations, remoteState.chatConversations || [])
         .filter((chat) => !deletedChatIds.has(chat.id))
         .map((chat) => ({
@@ -4329,6 +4461,7 @@
       archivePdfTime: document.getElementById("archivePdfTime"),
       transferList: document.getElementById("transferList"),
       archiveRows: document.getElementById("archiveRows"),
+      archiveBalanceSummary: document.getElementById("archiveBalanceSummary"),
       journalPreview: document.getElementById("journalPreview"),
       journalStatus: document.getElementById("journalStatus"),
       orderState: document.getElementById("orderState"),
@@ -8262,12 +8395,20 @@
       const includeActor = !pdfMode || options.includeActor !== false;
       const includeTime = pdfMode && options.includeTime !== false;
       const presentCurrencies = Array.from(new Set(records.map((record) => record.currency).filter(Boolean)));
+      const recordActors = Array.from(new Set(records.map((record) => record.actor).filter(Boolean)));
+      const primaryBaseCurrency = recordActors.length === 1
+        ? records.find((record) => record.actor === recordActors[0])?.baseCurrency || ""
+        : "";
+      if (primaryBaseCurrency && !presentCurrencies.includes(primaryBaseCurrency)) {
+        presentCurrencies.unshift(primaryBaseCurrency);
+      }
       const currencies = [
-        ...supportedCurrencies.filter((currency) => presentCurrencies.includes(currency)),
-        ...presentCurrencies.filter((currency) => !supportedCurrencies.includes(currency)).sort()
+        ...(primaryBaseCurrency && presentCurrencies.includes(primaryBaseCurrency) ? [primaryBaseCurrency] : []),
+        ...supportedCurrencies.filter((currency) => currency !== primaryBaseCurrency && presentCurrencies.includes(currency)),
+        ...presentCurrencies.filter((currency) => currency !== primaryBaseCurrency && !supportedCurrencies.includes(currency)).sort()
       ];
       const showCurrencyColumns = currencies.length > 1;
-      return records.map((record) => {
+      const buildRow = (record) => {
         const row = {
           Date: pdfMode ? displayDateOnly(record.date) : displayDate(record.date)
         };
@@ -8287,7 +8428,44 @@
         }
         row.Status = record.status;
         return row;
-      });
+      };
+      const rows = records.map(buildRow);
+      const closedBalances = records.filter((record) => record.type === "Closed Balance");
+      if (!closedBalances.length) return rows;
+      const totals = Object.fromEntries(currencies.map((currency) => [
+        currency,
+        closedBalances
+          .filter((record) => record.currency === currency)
+          .reduce((sum, record) => {
+            const sign = record.direction === "Master owes" ? -1 : 1;
+            return sum + sign * Number(record.amountMinor || 0);
+          }, 0)
+      ]));
+      const totalRow = {
+        Date: ""
+      };
+      if (includeTime) totalRow.Time = "";
+      if (includeActor) totalRow.Actor = recordActors.length === 1 ? recordActors[0] : "All selected actors";
+      totalRow["Closed Statement"] = "All selected statements";
+      totalRow.Type = "Closed Balance Total";
+      totalRow.Reference = "";
+      if (includeDirection) totalRow.Direction = "Net by currency";
+      totalRow.Details = primaryBaseCurrency ? `Base focus: ${primaryBaseCurrency}` : "Totals kept separately by currency";
+      totalRow.Amount = showCurrencyColumns
+        ? "See currency totals"
+        : currencies.length === 1
+          ? signedMoney(currencies[0], totals[currencies[0]] || 0)
+          : "";
+      if (showCurrencyColumns) {
+        currencies.forEach((currency) => {
+          if (pdfMode && currency === "EUR" && !includeEur) return;
+          const amountMinor = Number(totals[currency] || 0);
+          totalRow[currency] = `${amountMinor < 0 ? "-" : ""}${formatMinor(Math.abs(amountMinor), currency)}`;
+        });
+      }
+      totalRow.Status = "Locked";
+      rows.push(totalRow);
+      return rows;
     }
 
     function buildLandscapeExcelHtml(title, rows) {
@@ -8500,7 +8678,9 @@
     }
 
     function actorCanSeeCreditReminder(receivable, actor = selectedActor()) {
-      if (!actor || signedInAsMaster() || !actorCanInitiateOrders(actor.role)) return false;
+      if (!actor) return false;
+      if (signedInAsMaster()) return true;
+      if (!actorCanInitiateOrders(actor.role)) return false;
       return receivable?.borrower === actor.name || receivable?.borrowerActorId === actor.id;
     }
 
@@ -9608,6 +9788,135 @@
       return source;
     }
 
+    function archiveStatementBalances(archive) {
+      const storedBalances = archive?.balances && typeof archive.balances === "object"
+        ? archive.balances
+        : archivedBalances(archive?.actor, archive?.ledger || []);
+      return Object.fromEntries([
+        ...supportedCurrencies,
+        ...Object.keys(storedBalances || {}).filter((currency) => !supportedCurrencies.includes(currency)).sort()
+      ].map((currency) => [currency, Number(storedBalances?.[currency] || 0)]));
+    }
+
+    function archiveStatementBaseCurrency(archive) {
+      const archivedActor = state.actors.find((item) => item.id === archive?.actorId || item.name === archive?.actor);
+      return archive?.actorCurrency || archivedActor?.currency || "USD";
+    }
+
+    function archiveBalanceStatementVisible(archive, filters) {
+      const balances = archiveStatementBalances(archive);
+      const amounts = Object.values(balances).map((amount) => Math.abs(Number(amount || 0)));
+      const amountVisible = (amounts.length ? amounts : [0])
+        .some((amountMinor) => archiveRowVisible(archive.closedAt, amountMinor, filters));
+      if (!amountVisible) return false;
+      return archiveSearchVisible([
+        archive.actor,
+        archive.id,
+        archiveMonthLabel(archiveMonthKey(archive.closedAt)),
+        archiveStatementBaseCurrency(archive),
+        ...Object.entries(balances).flatMap(([currency, amountMinor]) => [
+          currency,
+          formatMinor(Math.abs(amountMinor), currency),
+          amountMinor > 0 ? "Actor owes Master" : amountMinor < 0 ? "Master owes Actor" : "Zero"
+        ])
+      ], filters);
+    }
+
+    function archiveBalanceAmountCell(currency, netMinor, baseCurrency, primaryCurrency = "") {
+      const amount = Number(netMinor || 0);
+      const isBase = currency === baseCurrency;
+      const classNames = [
+        "archive-balance-cell",
+        isBase ? "archive-balance-base-cell" : "",
+        currency === primaryCurrency ? "archive-primary-currency" : "",
+        amount > 0 ? toneClass("debit") : amount < 0 ? toneClass("credit") : ""
+      ].filter(Boolean).join(" ");
+      const position = amount > 0 ? "Actor owes Master" : amount < 0 ? "Master owes Actor" : "Zero";
+      return `
+        <td class="${classNames}">
+          <strong>${signedMoney(currency, amount)}</strong>
+          <small>${isBase ? "Base - " : ""}${position}</small>
+        </td>
+      `;
+    }
+
+    function renderArchiveBalanceSummary(byActor, filters) {
+      if (!els.archiveBalanceSummary) return;
+      const groups = Object.entries(byActor).map(([actorName, archives]) => {
+        const visibleArchives = sortedArchiveStatements(archives)
+          .filter((archive) => archiveBalanceStatementVisible(archive, filters));
+        if (!visibleArchives.length) return "";
+        const primaryCurrency = archiveStatementBaseCurrency(visibleArchives[0]);
+        const statementBaseCurrencies = visibleArchives.map(archiveStatementBaseCurrency);
+        const nonZeroCurrencies = visibleArchives.flatMap((archive) =>
+          Object.entries(archiveStatementBalances(archive))
+            .filter(([, amountMinor]) => Number(amountMinor || 0) !== 0)
+            .map(([currency]) => currency)
+        );
+        const allCurrencies = Array.from(new Set([primaryCurrency, ...statementBaseCurrencies, ...nonZeroCurrencies]));
+        const currencyOrder = [
+          primaryCurrency,
+          ...statementBaseCurrencies.filter((currency) => currency !== primaryCurrency),
+          ...supportedCurrencies.filter((currency) => currency !== primaryCurrency && allCurrencies.includes(currency)),
+          ...allCurrencies.filter((currency) => currency !== primaryCurrency && !supportedCurrencies.includes(currency)).sort()
+        ].filter((currency, index, items) => items.indexOf(currency) === index);
+        const totals = Object.fromEntries(currencyOrder.map((currency) => [
+          currency,
+          visibleArchives.reduce((sum, archive) => sum + Number(archiveStatementBalances(archive)[currency] || 0), 0)
+        ]));
+        const statementRows = visibleArchives.map((archive) => {
+          const balances = archiveStatementBalances(archive);
+          const baseCurrency = archiveStatementBaseCurrency(archive);
+          const values = currencyOrder.map((currency) => balances[currency] || 0);
+          const position = trialBalancePosition(values);
+          return `
+            <tr>
+              <td><strong>${escapeHtml(archiveMonthLabel(archiveMonthKey(archive.closedAt)))}</strong><small>${escapeHtml(archive.id || "")}</small></td>
+              <td>${escapeHtml(displayDateOnly(archive.closedAt))}</td>
+              <td><span class="state-pill good">${escapeHtml(baseCurrency)}</span></td>
+              ${currencyOrder.map((currency) => archiveBalanceAmountCell(currency, balances[currency] || 0, baseCurrency, primaryCurrency)).join("")}
+              <td class="${position.className}"><strong>${escapeHtml(position.text)}</strong></td>
+            </tr>
+          `;
+        }).join("");
+        const totalValues = currencyOrder.map((currency) => totals[currency] || 0);
+        const totalPosition = trialBalancePosition(totalValues);
+        return `
+          <section class="archive-balance-group">
+            <div class="archive-balance-group-head">
+              <strong>${escapeHtml(actorName)}</strong>
+              <span class="state-pill good">Base focus: ${escapeHtml(primaryCurrency)}</span>
+            </div>
+            <div class="table-wrap">
+              <table class="archive-balance-table">
+                <thead>
+                  <tr>
+                    <th>Closed Statement</th>
+                    <th>Closed Date</th>
+                    <th>Base at Close</th>
+                    ${currencyOrder.map((currency) => `<th class="${currency === primaryCurrency ? "archive-primary-currency" : ""}">${escapeHtml(currency)}${currency === primaryCurrency ? " - Base Focus" : ""}</th>`).join("")}
+                    <th>Position</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${statementRows}
+                  <tr class="trial-balance-total">
+                    <td colspan="3"><strong>Total Closed Balances</strong></td>
+                    ${currencyOrder.map((currency) => archiveBalanceAmountCell(currency, totals[currency] || 0, primaryCurrency, primaryCurrency)).join("")}
+                    <td class="${totalPosition.className}"><strong>${escapeHtml(totalPosition.text === "Zero" ? "All Zero" : totalPosition.text)}</strong></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        `;
+      }).filter(Boolean);
+      els.archiveBalanceSummary.classList.toggle("hidden", groups.length === 0);
+      els.archiveBalanceSummary.innerHTML = groups.length
+        ? `<div class="archive-balance-summary-head"><strong>Closed Balance Summary</strong><span class="state-pill">${groups.length} Actor${groups.length === 1 ? "" : "s"}</span></div><div class="archive-balance-groups">${groups.join("")}</div>`
+        : "";
+    }
+
     function archiveRecordRows(archive, viewer, filters) {
       const rows = [];
       const addRow = (row, searchValues) => {
@@ -9616,14 +9925,13 @@
         rows.push({
           archiveId: archive.id || "",
           actor: archive.actor,
+          baseCurrency: archiveStatementBaseCurrency(archive),
           closedAt: archive.closedAt,
           status: "Locked",
           ...row
         });
       };
-      const balances = archive.balances && typeof archive.balances === "object"
-        ? archive.balances
-        : archivedBalances(archive.actor, archive.ledger || []);
+      const balances = archiveStatementBalances(archive);
       supportedCurrencies.forEach((currency) => {
         const netMinor = Number(balances[currency] || 0);
         const direction = netMinor > 0 ? "Owes Master" : "Master owes";
@@ -9826,6 +10134,7 @@
         acc[archive.actor].push(archive);
         return acc;
       }, {});
+      renderArchiveBalanceSummary(byActor, filters);
       let recordCount = 0;
       const rows = Object.entries(byActor).flatMap(([actorName, archives]) => {
         const actorRows = [`<tr><td colspan="6"><strong>${escapeHtml(actorName)}</strong></td></tr>`];

@@ -708,6 +708,69 @@ function mergeByKey(existingItems = [], incomingItems = [], keyForItem) {
   return Array.from(merged.values());
 }
 
+function archiveSnapshotItemKey(type, item = {}) {
+  if (type === "orders") {
+    return String(item.id || item.brokerOrderNumber || [item.broker, item.agent, item.createdAt, item.sourceCurrency, item.sourceAmountMinor].join(":"));
+  }
+  if (type === "receivables") return String(item.id || item.orderId || "");
+  if (type === "transfers") return String(item.id || item.journal || "");
+  if (type === "ledger") {
+    return String(item.entryId || [item.journal, item.source, item.account, item.direction, item.currency, item.amountMinor, item.postedAt].join(":"));
+  }
+  return "";
+}
+
+function normalizeArchiveSnapshots(archives = []) {
+  const normalized = (Array.isArray(archives) ? archives : [])
+    .filter((archive) => archive && typeof archive === "object")
+    .map((archive) => ({
+      ...archive,
+      orders: Array.isArray(archive.orders) ? archive.orders : [],
+      receivables: Array.isArray(archive.receivables) ? archive.receivables : [],
+      transfers: Array.isArray(archive.transfers) ? archive.transfers : [],
+      ledger: Array.isArray(archive.ledger) ? archive.ledger : [],
+    }));
+  const seenByActor = new Map();
+  normalized
+    .map((archive, index) => ({ archive, index }))
+    .sort((left, right) => {
+      const timeDifference = new Date(left.archive.closedAt || 0).getTime() - new Date(right.archive.closedAt || 0).getTime();
+      return timeDifference || left.index - right.index;
+    })
+    .forEach(({ archive }) => {
+      const actorKey = String(archive.actorId || archive.actor || "Unknown Actor");
+      if (!seenByActor.has(actorKey)) {
+        seenByActor.set(actorKey, {
+          orders: new Set(),
+          receivables: new Set(),
+          transfers: new Set(),
+          ledger: new Set(),
+        });
+      }
+      const actorSeen = seenByActor.get(actorKey);
+      ["orders", "receivables", "transfers", "ledger"].forEach((type) => {
+        archive[type] = archive[type].filter((item) => {
+          const key = archiveSnapshotItemKey(type, item);
+          if (!key || actorSeen[type].has(key)) return false;
+          actorSeen[type].add(key);
+          return true;
+        });
+      });
+    });
+  return normalized;
+}
+
+function removeOrdersAlreadyArchived(orders = [], archives = []) {
+  const archivedOrderIds = new Set(
+    normalizeArchiveSnapshots(archives)
+      .flatMap((archive) => archive.orders)
+      .map((order) => String(order?.id || ""))
+      .filter(Boolean)
+  );
+  return (Array.isArray(orders) ? orders : [])
+    .filter((order) => !archivedOrderIds.has(String(order?.id || "")));
+}
+
 function mergeChatConversations(existingItems = [], incomingItems = []) {
   const merged = mergeById(existingItems, incomingItems);
   return merged.map((chat) => {
@@ -761,9 +824,10 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
     [line.journal, line.source, line.account, line.direction, line.currency, line.amountMinor, line.postedAt].join(":")
   );
   nextState.masterBankEntries = mergeById(currentState.masterBankEntries, incomingState.masterBankEntries);
-  nextState.archives = mergeByKey(currentState.archives, incomingState.archives, (archive) =>
+  nextState.archives = normalizeArchiveSnapshots(mergeByKey(currentState.archives, incomingState.archives, (archive) =>
     archive.id || [archive.actor, archive.closedAt, archive.closedBy].join(":")
-  );
+  ));
+  nextState.orders = removeOrdersAlreadyArchived(nextState.orders, nextState.archives);
   nextState.chatConversations = mergeChatConversations(currentState.chatConversations, incomingState.chatConversations)
     .filter((chat) => !deletedChatIds.has(chat?.id))
     .map((chat) => ({
@@ -793,6 +857,7 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
 }
 
 function sessionCanAccessCreditReminder(session, receivable) {
+  if (session?.membership?.role === "Master") return true;
   if (session?.membership?.role !== "Actor") return false;
   if (!["Broker", "Special Broker"].includes(session.membership.actorRole)) return false;
   const actorIdMatches = receivable?.borrowerActorId && receivable.borrowerActorId === session.membership.actorId;
