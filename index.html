@@ -8429,43 +8429,7 @@
         row.Status = record.status;
         return row;
       };
-      const rows = records.map(buildRow);
-      const closedBalances = records.filter((record) => record.type === "Closed Balance");
-      if (!closedBalances.length) return rows;
-      const totals = Object.fromEntries(currencies.map((currency) => [
-        currency,
-        closedBalances
-          .filter((record) => record.currency === currency)
-          .reduce((sum, record) => {
-            const sign = record.direction === "Master owes" ? -1 : 1;
-            return sum + sign * Number(record.amountMinor || 0);
-          }, 0)
-      ]));
-      const totalRow = {
-        Date: ""
-      };
-      if (includeTime) totalRow.Time = "";
-      if (includeActor) totalRow.Actor = recordActors.length === 1 ? recordActors[0] : "All selected actors";
-      totalRow["Closed Statement"] = "All selected statements";
-      totalRow.Type = "Closed Balance Total";
-      totalRow.Reference = "";
-      if (includeDirection) totalRow.Direction = "Net by currency";
-      totalRow.Details = primaryBaseCurrency ? `Base focus: ${primaryBaseCurrency}` : "Totals kept separately by currency";
-      totalRow.Amount = showCurrencyColumns
-        ? "See currency totals"
-        : currencies.length === 1
-          ? signedMoney(currencies[0], totals[currencies[0]] || 0)
-          : "";
-      if (showCurrencyColumns) {
-        currencies.forEach((currency) => {
-          if (pdfMode && currency === "EUR" && !includeEur) return;
-          const amountMinor = Number(totals[currency] || 0);
-          totalRow[currency] = `${amountMinor < 0 ? "-" : ""}${formatMinor(Math.abs(amountMinor), currency)}`;
-        });
-      }
-      totalRow.Status = "Locked";
-      rows.push(totalRow);
-      return rows;
+      return records.map(buildRow);
     }
 
     function buildLandscapeExcelHtml(title, rows) {
@@ -9860,10 +9824,6 @@
           ...supportedCurrencies.filter((currency) => currency !== primaryCurrency && allCurrencies.includes(currency)),
           ...allCurrencies.filter((currency) => currency !== primaryCurrency && !supportedCurrencies.includes(currency)).sort()
         ].filter((currency, index, items) => items.indexOf(currency) === index);
-        const totals = Object.fromEntries(currencyOrder.map((currency) => [
-          currency,
-          visibleArchives.reduce((sum, archive) => sum + Number(archiveStatementBalances(archive)[currency] || 0), 0)
-        ]));
         const statementRows = visibleArchives.map((archive) => {
           const balances = archiveStatementBalances(archive);
           const baseCurrency = archiveStatementBaseCurrency(archive);
@@ -9879,8 +9839,6 @@
             </tr>
           `;
         }).join("");
-        const totalValues = currencyOrder.map((currency) => totals[currency] || 0);
-        const totalPosition = trialBalancePosition(totalValues);
         return `
           <section class="archive-balance-group">
             <div class="archive-balance-group-head">
@@ -9900,11 +9858,6 @@
                 </thead>
                 <tbody>
                   ${statementRows}
-                  <tr class="trial-balance-total">
-                    <td colspan="3"><strong>Total Closed Balances</strong></td>
-                    ${currencyOrder.map((currency) => archiveBalanceAmountCell(currency, totals[currency] || 0, primaryCurrency, primaryCurrency)).join("")}
-                    <td class="${totalPosition.className}"><strong>${escapeHtml(totalPosition.text === "Zero" ? "All Zero" : totalPosition.text)}</strong></td>
-                  </tr>
                 </tbody>
               </table>
             </div>
