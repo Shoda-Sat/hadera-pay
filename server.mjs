@@ -37,6 +37,7 @@ const contentTypes = new Map([
   [".md", "text/markdown; charset=utf-8"],
   [".zip", "application/zip"],
   [".apk", "application/vnd.android.package-archive"],
+  [".ttf", "font/ttf"],
 ]);
 
 const blankDb = () => ({

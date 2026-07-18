@@ -2610,7 +2610,7 @@
             <div class="panel-body table-wrap">
               <table>
                 <thead>
-                  <tr><th>Date</th><th>Reference</th><th>Borrower</th><th>Details</th><th>Principal</th><th>Collected</th><th>Balance</th><th>Collection</th></tr>
+                  <tr><th>Date</th><th>Reference</th><th>Borrower</th><th>Details</th><th>Credit Reminder</th><th>Principal</th><th>Collected</th><th>Balance</th><th>Collection</th></tr>
                 </thead>
                 <tbody id="receivableRows"></tbody>
               </table>
@@ -3234,6 +3234,7 @@
     </div>
   </div>
 
+  <script src="vendor/jspdf.umd.min.js"></script>
   <script>
     let storageKey = "haderapay.local.state.v1";
     let currentAuth = null;
@@ -3833,7 +3834,7 @@
 
     function settingsRateInputIsFocused() {
       return Boolean(document.activeElement?.closest?.(
-        ".fixed-order-rate, .special-agent-divider, .special-agent-percent, .usd-agent-income-divider, .usd-agent-income-percent, .master-rate-divider, .master-rate-percent, .buying-rate-input, .forward-agent, .forward-payout-divider, .forward-payout-percent, .receivable-payment, .ledger-tool-input"
+        ".fixed-order-rate, .special-agent-divider, .special-agent-percent, .usd-agent-income-divider, .usd-agent-income-percent, .master-rate-divider, .master-rate-percent, .buying-rate-input, .forward-agent, .forward-payout-divider, .forward-payout-percent, .receivable-payment, .ledger-tool-input, .actor-name-input, .actor-currency-input, .actor-currency-rate"
       ));
     }
 
@@ -6191,6 +6192,13 @@
     }
 
     function renderActors() {
+      const activeEditor = document.activeElement?.closest?.(
+        ".actor-name-input, .actor-currency-input, .actor-currency-rate"
+      );
+      if (activeEditor && els.actorRows.contains(activeEditor)) {
+        els.actorCount.textContent = `${activeActors().length} active`;
+        return;
+      }
       els.actorRows.innerHTML = state.actors.map((actor) => {
         const removable = actor.role !== "Master";
         const nameCell = actor.role === "Master"
@@ -7889,35 +7897,38 @@
       downloadBlob(new Blob([html], { type: "application/vnd.ms-excel;charset=utf-8" }), `${safeFilename(context.title)}.xls`);
     }
 
-    function fixedCell(value, width) {
-      const clean = String(value ?? "").replace(/\s+/g, " ").trim();
-      return clean.length > width ? `${clean.slice(0, Math.max(0, width - 1))}.` : clean.padEnd(width, " ");
+    let pdfUnicodeFontPromise = null;
+
+    function loadPdfUnicodeFont() {
+      if (pdfUnicodeFontPromise) return pdfUnicodeFontPromise;
+      pdfUnicodeFontPromise = fetch("assets/fonts/NotoSansEthiopic-Regular.ttf")
+        .then((response) => {
+          if (!response.ok) throw new Error("The Unicode PDF font could not be loaded.");
+          return response.arrayBuffer();
+        })
+        .then((buffer) => {
+          const bytes = new Uint8Array(buffer);
+          let binary = "";
+          for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+            binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+          }
+          return btoa(binary);
+        })
+        .catch((error) => {
+          pdfUnicodeFontPromise = null;
+          throw error;
+        });
+      return pdfUnicodeFontPromise;
     }
 
-    function wrappedFixedCell(value, width) {
-      let remaining = String(value ?? "").replace(/\s+/g, " ").trim();
-      if (!remaining) return ["".padEnd(width, " ")];
-      const lines = [];
-      while (remaining.length > width) {
-        let breakAt = remaining.lastIndexOf(" ", width);
-        if (breakAt <= 0) breakAt = width;
-        lines.push(remaining.slice(0, breakAt).trimEnd().padEnd(width, " "));
-        remaining = remaining.slice(breakAt).trimStart();
-      }
-      lines.push(remaining.padEnd(width, " "));
-      return lines;
+    function pdfCellText(value) {
+      return String(value ?? "").replace(/\s+/gu, " ").trim();
     }
 
-    function pdfSafe(value) {
-      return String(value ?? "")
-        .normalize("NFKD")
-        .replace(/[^\x20-\x7E]/g, "?")
-        .replace(/\\/g, "\\\\")
-        .replace(/\(/g, "\\(")
-        .replace(/\)/g, "\\)");
-    }
-
-    function buildLandscapeTablePdf(title, rows, customWidths = {}) {
+    async function buildLandscapeTablePdf(title, rows, customWidths = {}) {
+      const JsPdf = window.jspdf?.jsPDF;
+      if (!JsPdf) throw new Error("The PDF exporter could not be loaded.");
+      const fontData = await loadPdfUnicodeFont();
       const headers = Object.keys(rows[0]);
       const widthByHeader = {
         Date: 18,
@@ -7943,82 +7954,128 @@
         Amount: 16,
         ...customWidths
       };
-      const widths = headers.map((header) => widthByHeader[header] || 12);
-      const textRows = [
-        title,
-        `Exported ${displayDateOnly(new Date().toISOString())}`,
-        "",
-        headers.map((header, index) => fixedCell(header, widths[index])).join(" "),
-        widths.map((width) => "-".repeat(width)).join(" ")
-      ];
+      const doc = new JsPdf({ orientation: "landscape", unit: "pt", format: "a4", compress: true, putOnlyUsedFonts: true });
+      doc.addFileToVFS("NotoSansEthiopic-Regular.ttf", fontData);
+      doc.addFont("NotoSansEthiopic-Regular.ttf", "NotoSansEthiopic", "normal");
+      doc.setFont("NotoSansEthiopic", "normal");
+
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const pageHeight = doc.internal.pageSize.getHeight();
+      const margin = 24;
+      const footerHeight = 18;
+      const bodyBottom = pageHeight - margin - footerHeight;
+      const cellPadding = 3;
+      const bodyFontSize = 6.5;
+      const headerFontSize = 6.8;
+      const lineHeight = 8.5;
+      const widthWeights = headers.map((header) => widthByHeader[header] || 12);
+      const totalWeight = widthWeights.reduce((sum, width) => sum + width, 0);
+      const availableWidth = pageWidth - margin * 2;
+      const widths = widthWeights.map((weight) => availableWidth * weight / totalWeight);
+
+      const wrapCell = (value, width) => {
+        const clean = pdfCellText(value);
+        return clean ? doc.splitTextToSize(clean, Math.max(4, width - cellPadding * 2)) : [""];
+      };
+
+      const drawCells = (cellLines, y, height, options = {}) => {
+        let x = margin;
+        widths.forEach((width, index) => {
+          if (options.fill) {
+            doc.setFillColor(...options.fill);
+            doc.rect(x, y, width, height, "F");
+          }
+          doc.setDrawColor(148, 160, 154);
+          doc.setLineWidth(0.35);
+          doc.rect(x, y, width, height, "S");
+          const lines = cellLines[index] || [""];
+          lines.forEach((line, lineIndex) => {
+            doc.text(line, x + cellPadding, y + cellPadding + options.fontSize + lineIndex * lineHeight);
+          });
+          x += width;
+        });
+      };
+
+      const drawPageHeading = () => {
+        doc.setFont("NotoSansEthiopic", "normal");
+        doc.setTextColor(16, 76, 54);
+        doc.setFontSize(11);
+        doc.text(pdfCellText(title), margin, margin + 8);
+        doc.setTextColor(74, 86, 80);
+        doc.setFontSize(7.5);
+        doc.text(`Exported ${displayDateOnly(new Date().toISOString())}`, margin, margin + 20);
+
+        doc.setTextColor(24, 36, 30);
+        doc.setFontSize(headerFontSize);
+        const headerLines = headers.map((header, index) => wrapCell(header, widths[index]));
+        const headerLineCount = Math.max(...headerLines.map((lines) => lines.length), 1);
+        const headerY = margin + 28;
+        const headerHeight = headerLineCount * lineHeight + cellPadding * 2;
+        drawCells(headerLines, headerY, headerHeight, { fill: [232, 242, 237], fontSize: headerFontSize });
+        doc.setFontSize(bodyFontSize);
+        return headerY + headerHeight;
+      };
+
+      let y = drawPageHeading();
       rows.forEach((row) => {
-        const wrappedCells = headers.map((header, index) => wrappedFixedCell(row[header], widths[index]));
-        const rowHeight = wrappedCells.reduce((height, cellLines) => Math.max(height, cellLines.length), 1);
-        for (let lineIndex = 0; lineIndex < rowHeight; lineIndex += 1) {
-          textRows.push(wrappedCells
-            .map((cellLines, index) => cellLines[lineIndex] || "".padEnd(widths[index], " "))
-            .join(" "));
+        const cellLines = headers.map((header, index) => wrapCell(row[header], widths[index]));
+        const rowLineCount = Math.max(...cellLines.map((lines) => lines.length), 1);
+        let lineOffset = 0;
+
+        while (lineOffset < rowLineCount) {
+          let availableLines = Math.floor((bodyBottom - y - cellPadding * 2) / lineHeight);
+          if (availableLines < 1) {
+            doc.addPage();
+            y = drawPageHeading();
+            availableLines = Math.max(1, Math.floor((bodyBottom - y - cellPadding * 2) / lineHeight));
+          }
+          const segmentLineCount = Math.min(rowLineCount - lineOffset, availableLines);
+          const segmentLines = cellLines.map((lines) => lines.slice(lineOffset, lineOffset + segmentLineCount));
+          const segmentHeight = segmentLineCount * lineHeight + cellPadding * 2;
+          doc.setTextColor(24, 36, 30);
+          doc.setFontSize(bodyFontSize);
+          drawCells(segmentLines, y, segmentHeight, { fontSize: bodyFontSize });
+          y += segmentHeight;
+          lineOffset += segmentLineCount;
         }
       });
 
-      const pageWidth = 842;
-      const pageHeight = 595;
-      const margin = 24;
-      const longestLine = textRows.reduce((max, line) => Math.max(max, line.length), 1);
-      const fontSize = Math.max(4.5, Math.min(7, (pageWidth - margin * 2) / (longestLine * 0.6)));
-      const lineHeight = fontSize + 3;
-      const linesPerPage = Math.floor((pageHeight - margin * 2) / lineHeight);
-      const pages = [];
-      for (let index = 0; index < textRows.length; index += linesPerPage) {
-        pages.push(textRows.slice(index, index + linesPerPage));
+      const pageCount = doc.getNumberOfPages();
+      for (let page = 1; page <= pageCount; page += 1) {
+        doc.setPage(page);
+        doc.setTextColor(84, 94, 89);
+        doc.setFontSize(7);
+        doc.text(`Page ${page} of ${pageCount}`, pageWidth - margin, pageHeight - margin + 4, { align: "right" });
       }
-
-      const objects = [];
-      const addObject = (body) => {
-        objects.push(body);
-        return objects.length;
-      };
-      const fontObject = addObject("<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>");
-      const pageObjectIds = [];
-      pages.forEach((pageLines) => {
-        const body = [
-          "BT",
-          `/F1 ${fontSize.toFixed(2)} Tf`,
-          `${margin} ${pageHeight - margin} Td`
-        ];
-        pageLines.forEach((line, index) => {
-          if (index > 0) body.push(`0 -${lineHeight} Td`);
-          body.push(`(${pdfSafe(line)}) Tj`);
-        });
-        body.push("ET");
-        const stream = body.join("\n");
-        const contentObject = addObject(`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`);
-        const pageObject = addObject(`<< /Type /Page /Parent PAGES_REF /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Rotate 0 /Resources << /Font << /F1 ${fontObject} 0 R >> >> /Contents ${contentObject} 0 R >>`);
-        pageObjectIds.push(pageObject);
-      });
-      const pagesObject = addObject(`<< /Type /Pages /Kids [${pageObjectIds.map((id) => `${id} 0 R`).join(" ")}] /Count ${pageObjectIds.length} >>`);
-      const catalogObject = addObject(`<< /Type /Catalog /Pages ${pagesObject} 0 R >>`);
-      const preparedObjects = objects.map((body) => body.replace(/PAGES_REF/g, `${pagesObject} 0 R`));
-      let pdf = "%PDF-1.4\n";
-      const offsets = [0];
-      preparedObjects.forEach((body, index) => {
-        offsets[index + 1] = pdf.length;
-        pdf += `${index + 1} 0 obj\n${body}\nendobj\n`;
-      });
-      const xrefOffset = pdf.length;
-      pdf += `xref\n0 ${preparedObjects.length + 1}\n0000000000 65535 f \n`;
-      offsets.slice(1).forEach((offset) => {
-        pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
-      });
-      pdf += `trailer\n<< /Size ${preparedObjects.length + 1} /Root ${catalogObject} 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
-      return new Blob([pdf], { type: "application/pdf" });
+      return doc.output("blob");
     }
 
-    function exportLedgerPdf() {
+    async function runPdfExport(button, title, rows, filename, customWidths = {}) {
+      const previousLabel = button.textContent;
+      button.disabled = true;
+      button.textContent = "Preparing PDF...";
+      try {
+        const blob = await buildLandscapeTablePdf(title, rows, customWidths);
+        downloadBlob(blob, filename);
+      } catch (error) {
+        console.error("PDF export failed", error);
+        notifyEvent("PDF export failed", error?.message || "Please try again.");
+      } finally {
+        button.textContent = previousLabel;
+        button.disabled = false;
+      }
+    }
+
+    async function exportLedgerPdf() {
       const context = currentLedgerContext();
       const rows = ledgerExportRows(context.lines, context.ledgerActor, { dateOnly: true });
       if (rows.length === 0) return;
-      downloadBlob(buildLandscapeTablePdf(context.title, rows), `${safeFilename(context.title)}.pdf`);
+      await runPdfExport(
+        els.exportLedgerPdfButton,
+        context.title,
+        rows,
+        `${safeFilename(context.title)}.pdf`
+      );
     }
 
     function archiveExportTitle() {
@@ -8106,7 +8163,7 @@
       downloadBlob(new Blob([html], { type: "application/vnd.ms-excel;charset=utf-8" }), `${safeFilename(title)}.xls`);
     }
 
-    function exportArchivePdf() {
+    async function exportArchivePdf() {
       const records = archiveRecordsForExport();
       if (!records.length) return;
       const title = archiveExportTitle();
@@ -8125,9 +8182,12 @@
         + (omittedEurColumn ? 11 : 0)
         + (!options.includeActor ? 16 : 0)
         + (!options.includeTime ? 10 : 0);
-      downloadBlob(
-        buildLandscapeTablePdf(title, rows, { Date: 12, Time: 10, Details: detailsWidth, Direction: 18 }),
-        `${safeFilename(title)}.pdf`
+      await runPdfExport(
+        els.exportArchivePdfButton,
+        title,
+        rows,
+        `${safeFilename(title)}.pdf`,
+        { Date: 12, Time: 10, Details: detailsWidth, Direction: 18 }
       );
     }
 
@@ -8287,7 +8347,7 @@
         .slice()
         .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
       if (rows.length === 0) {
-        els.receivableRows.innerHTML = '<tr><td colspan="8">No credit receivables yet.</td></tr>';
+        els.receivableRows.innerHTML = '<tr><td colspan="9">No credit receivables yet.</td></tr>';
         return;
       }
       const bodyRows = rows.map((item) => {
@@ -8296,7 +8356,7 @@
         const balanceMinor = Math.max(0, Number(item.principalMinor || 0) - paidMinor);
         const canCollect = !isVoided && balanceMinor > 0 && (actor?.role === "Master" || item.borrower === actor?.name || item.borrowerActorId === actor?.id);
         const paymentHistory = (item.payments || [])
-          .map((payment) => `${displayDate(payment.paidAt)} ${money(item.currency, payment.amountMinor)}`)
+          .map((payment) => `${displayDateOnly(payment.paidAt)} ${money(item.currency, payment.amountMinor)}`)
           .join(" / ");
         const details = [
           item.senderName ? `Sender: ${item.senderName}` : "",
@@ -8305,17 +8365,18 @@
           item.phoneNumber ? `Phone: ${item.phoneNumber}` : "",
           item.accountNumber ? `Account: ${item.accountNumber}` : "",
           item.remarks ? `Remarks: ${item.remarks}` : "",
-          actorCanSeeCreditReminder(item, actor) && item.creditReminder ? `Credit Reminder: ${item.creditReminder}` : "",
-          isVoided ? `Voided: ${displayDate(item.voidedAt)}` : "",
+          isVoided ? `Voided: ${displayDateOnly(item.voidedAt)}` : "",
           paymentHistory ? `Payments: ${paymentHistory}` : ""
         ].filter(Boolean).join(" - ");
+        const creditReminder = actorCanSeeCreditReminder(item, actor) ? item.creditReminder || "" : "";
         const draftValue = receivablePaymentDrafts.get(item.id) ?? "";
         return `
           <tr class="${isVoided ? "void-row" : ""}">
-            <td>${escapeHtml(displayDate(item.createdAt))}</td>
+            <td>${escapeHtml(displayDateOnly(item.createdAt))}</td>
             <td><strong>${escapeHtml(item.id)}</strong></td>
             <td>${escapeHtml(item.borrower)}</td>
             <td>${escapeHtml(details || "Credit order")}</td>
+            <td>${escapeHtml(creditReminder)}</td>
             <td>${money(item.currency, item.principalMinor || 0)}</td>
             <td>${money(item.currency, paidMinor)}</td>
             <td><strong>${money(item.currency, balanceMinor)}</strong></td>
@@ -8342,7 +8403,7 @@
         const balance = Math.max(0, total.principal - total.paid);
         return `
           <tr>
-            <td colspan="4"><strong>Total ${escapeHtml(currency)}</strong></td>
+            <td colspan="5"><strong>Total ${escapeHtml(currency)}</strong></td>
             <td><strong>${money(currency, total.principal)}</strong></td>
             <td><strong>${money(currency, total.paid)}</strong></td>
             <td><strong>${money(currency, balance)}</strong></td>
