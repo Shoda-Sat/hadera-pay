@@ -3885,8 +3885,10 @@
         if (item.voidedBy && !next.voidedBy) next.voidedBy = item.voidedBy;
         const latestVoidRequest = Math.max(new Date(next.voidRequestedAt || 0).getTime(), 0);
         const latestVoidReject = Math.max(new Date(next.voidRejectedAt || 0).getTime(), 0);
-        const hasOpenVoidRequest = (previous.state === "Void Requested" || item.state === "Void Requested" || previous.voidRequested || item.voidRequested) &&
-          latestVoidRequest >= latestVoidReject;
+        const requestIsCurrent = latestVoidRequest > latestVoidReject || (latestVoidRequest === 0 && latestVoidReject === 0);
+        const hasOpenVoidRequest = !next.voidJournal &&
+          (previous.state === "Void Requested" || item.state === "Void Requested" || previous.voidRequested || item.voidRequested) &&
+          requestIsCurrent;
         if (!hasOpenVoidRequest && (previous.state === "Paid" || item.state === "Paid" || next.paidAt || next.journal)) {
           next.state = "Paid";
           next.returnedBy = "";
@@ -3896,8 +3898,14 @@
         if (hasOpenVoidRequest) {
           next.state = "Void Requested";
           next.voidRequested = true;
+        } else {
+          next.voidRequested = false;
         }
-        if (previous.state === "Voided" || item.state === "Voided") next.state = "Voided";
+        if (previous.state === "Voided" || item.state === "Voided" || next.voidJournal) {
+          next.state = "Voided";
+          next.voidRequested = false;
+          next.excludedFromCalculations = true;
+        }
         merged.set(item.id, next);
       });
       return Array.from(merged.values());
@@ -6407,7 +6415,7 @@
     }
 
     async function sendOrderPaymentReminder(order) {
-      if (selectedActor()?.role !== "Master" || !pendingCancelledOrderStates.has(order?.state)) return;
+      if (selectedActor()?.role !== "Master" || order?.state !== "Assigned") return;
       const payer = reminderActorForOrder(order);
       if (!payer) return;
       const chat = directChatWithMaster(payer.name);
@@ -7354,12 +7362,21 @@
       return (lines || []).filter((line) => line?.archived !== true);
     }
 
+    function ledgerLineIsForVoidedOrder(line) {
+      const order = orderForLedgerLine(line);
+      return Boolean(order && orderRecordIsVoided(order));
+    }
+
+    function calculableLedgerLines(lines = state.ledger) {
+      return activeLedgerLines(lines).filter((line) => !ledgerLineIsForVoidedOrder(line));
+    }
+
     function actorBalancesFromLedger(lines = state.ledger) {
       const balances = {};
       activeActors().forEach((actor) => {
         if (actor.role !== "Master") balances[actor.name] = {};
       });
-      activeLedgerLines(lines).forEach((line) => {
+      calculableLedgerLines(lines).forEach((line) => {
         const actorName = actorNameFromAccount(line.account);
         if (!actorName) return;
         const sign = line.direction === "Debit" ? 1 : -1;
@@ -7545,7 +7562,7 @@
     }
 
     function archivedBalances(actorName, lines = []) {
-      return lines.reduce((acc, line) => {
+      return calculableLedgerLines(lines).reduce((acc, line) => {
         if (line.account !== actorName && line.account !== `${actorName} ACTOR_CLEARING`) return acc;
         const sign = line.direction === "Debit" ? 1 : -1;
         acc[line.currency] = (acc[line.currency] || 0) + sign * Number(line.amountMinor || 0);
@@ -7557,7 +7574,7 @@
       if (!actor || actor.role === "Master") return "";
       const orderInfoColumnCount = showOrderInfo ? 5 + (showPaidOutInfo ? 1 : 0) : 0;
       const orderInfoSpacer = orderInfoColumnCount ? `<td colspan="${orderInfoColumnCount}"></td>` : "";
-      const totals = lines.reduce((acc, line) => {
+      const totals = calculableLedgerLines(lines).reduce((acc, line) => {
         const sign = line.direction === "Debit" ? 1 : -1;
         acc[line.currency] = (acc[line.currency] || 0) + sign * line.amountMinor;
         return acc;
@@ -8063,7 +8080,8 @@
         order.receiverCity ? `Receiver City: ${order.receiverCity}` : "",
         order.accountNumber ? `Account: ${order.accountNumber}` : "",
         order.phoneNumber ? `Phone: ${order.phoneNumber}` : "",
-        order.remarks ? `Remarks: ${order.remarks}` : ""
+        order.remarks ? `Remarks: ${order.remarks}` : "",
+        orderRecordIsVoided(order) ? "VOIDED - Excluded from all calculations" : ""
       ];
       return bits.filter(Boolean).join(" - ");
     }
@@ -8122,7 +8140,7 @@
         };
       });
       if (!actor || actor.role === "Master") return rows;
-      const totals = lines.reduce((acc, line) => {
+      const totals = calculableLedgerLines(lines).reduce((acc, line) => {
         const sign = line.direction === "Debit" ? 1 : -1;
         acc[line.currency] = (acc[line.currency] || 0) + sign * Number(line.amountMinor || 0);
         return acc;
@@ -8459,6 +8477,9 @@
       ];
       const showCurrencyColumns = currencies.length > 1;
       const buildRow = (record) => {
+        const exportedAmountMinor = pdfMode && Number.isFinite(Number(record.signedAmountMinor))
+          ? Number(record.signedAmountMinor)
+          : Number(record.amountMinor || 0);
         const row = {
           Date: pdfMode ? displayDateOnly(record.date) : displayDate(record.date)
         };
@@ -8468,12 +8489,13 @@
         row.Type = record.exportType || record.type;
         row.Reference = record.reference;
         if (includeDirection) row.Direction = record.direction;
+        if (pdfMode) row.Position = record.position || "";
         row.Details = record.details;
-        row.Amount = `${formatMinor(record.amountMinor, record.currency)} ${record.currency}`;
+        row.Amount = `${formatMinor(exportedAmountMinor, record.currency)} ${record.currency}`;
         if (showCurrencyColumns) {
           currencies.forEach((currency) => {
             if (pdfMode && currency === "EUR" && !includeEur) return;
-            row[currency] = record.currency === currency ? formatMinor(record.amountMinor, currency) : "";
+            row[currency] = record.currency === currency ? formatMinor(exportedAmountMinor, currency) : "";
           });
         }
         row.Status = record.status;
@@ -8548,7 +8570,7 @@
         title,
         rows,
         `${safeFilename(title)}.pdf`,
-        { Date: 12, Time: 10, Details: detailsWidth, Direction: 18 }
+        { Date: 12, Time: 10, Details: detailsWidth, Direction: 18, Position: 20 }
       );
     }
 
@@ -8590,6 +8612,7 @@
         .sort(newestPendingCancelledFirst);
       els.pendingCancelledRows.innerHTML = orders.length ? orders.map((order) => {
         const payer = reminderActorForOrder(order);
+        const canRemind = order.state === "Assigned" && Boolean(payer);
         const payoutActor = payingAgentLabel(order);
         const stateLabel = order.state === "Assigned" && payoutActor !== "Unassigned"
           ? `Assigned to '${escapeHtml(payoutActor)}'`
@@ -8599,7 +8622,7 @@
           ? `<small class="muted">Last sent ${escapeHtml(displayDate(order.lastReminderAt))}</small>`
           : "";
         return `
-          <tr>
+          <tr class="${orderRecordIsVoided(order) ? "void-row" : ""}">
             <td>${orderNumberHtml(order, actor)}${orderDetailsHtml(order, actor)}</td>
             <td>${escapeHtml(order.broker)}</td>
             <td>${escapeHtml(payoutActor)}</td>
@@ -8607,8 +8630,8 @@
             <td><span class="state-pill ${className}">${stateLabel}</span></td>
             <td>
               <div class="order-actions">
-                <button class="btn secondary remind-order-actor" data-id="${escapeHtml(order.id)}" type="button" ${payer ? "" : "disabled"}>Remind Actor</button>
-                ${payer ? reminderStatus : '<small class="muted">No payout actor available</small>'}
+                <button class="btn secondary remind-order-actor" data-id="${escapeHtml(order.id)}" type="button" ${canRemind ? "" : "disabled"}>Remind Actor</button>
+                ${canRemind ? reminderStatus : `<small class="muted">${orderRecordIsVoided(order) ? "Voided and excluded" : "No payable assignment"}</small>`}
               </div>
             </td>
           </tr>
@@ -8622,6 +8645,9 @@
       const visibleOrders = actor?.role === "Master"
         ? state.orders
         : state.orders.filter((order) => order.broker === actor?.name || order.agent === actor?.name);
+      if (els.voidButton) {
+        els.voidButton.disabled = !visibleOrders.some((order) => actorCanRequestVoidOrder(order, actor));
+      }
       const activeOrders = visibleOrders
         .filter((order) => !["Voided", "Cancelled"].includes(order.state) && order.locked !== true)
         .sort(orderSortForActor(actor));
@@ -8639,7 +8665,7 @@
               ? "warn"
               : "";
         return `
-          <tr>
+          <tr class="${orderRecordIsVoided(order) ? "void-row" : ""}">
             <td>${orderNumberHtml(order, actor)}${orderDetailsHtml(order, actor)}</td>
             <td>${actor?.role === "Master" || order.broker === actor?.name ? escapeHtml(order.broker) : '<span class="muted">Master assigned</span>'}</td>
             <td>${escapeHtml(payoutAgent)}</td>
@@ -9261,7 +9287,12 @@
             .filter((currency) => (balances[currency] || 0) !== 0)
             .map((currency) => archiveBalanceSearchResult(archive, currency, balances[currency] || 0));
           const orderRows = (archive.orders || []).map((order) =>
-            orderSearchResult(archivedOrderForSearch(order, archive), actor, "Archived Order", "Locked")
+            orderSearchResult(
+              archivedOrderForSearch(order, archive),
+              actor,
+              "Archived Order",
+              orderRecordIsVoided(order) ? "Voided - Excluded" : "Locked"
+            )
           );
           const receivableRows = (archive.receivables || []).map((receivable) => {
             const result = receivableSearchResult({ ...receivable, archivedAt: receivable.archivedAt || archive.closedAt });
@@ -9532,7 +9563,7 @@
         return;
       }
       const lineRows = visibleLines.map((line) => `
-        <tr class="${line.source === "ORDER_VOID" ? "void-row" : ""}">
+        <tr class="${ledgerLineIsForVoidedOrder(line) ? "void-row" : ""}">
           <td class="ledger-date-cell">${escapeHtml(displayDate(line.postedAt))}</td>
           <td class="ledger-journal-cell"><strong>${escapeHtml(line.journal)}</strong></td>
           <td class="ledger-reference-cell">${escapeHtml(ledgerReferenceNumber(line, actor, ledgerActor))}</td>
@@ -9962,20 +9993,24 @@
       supportedCurrencies.forEach((currency) => {
         const netMinor = Number(balances[currency] || 0);
         const direction = netMinor > 0 ? "Owes Master" : "Master owes";
+        const position = netMinor > 0 ? `${archive.actor} owes Master` : `Master owes ${archive.actor}`;
         if (netMinor === 0) return;
         addRow({
           date: archive.closedAt,
           type: "Closed Balance",
           reference: archive.id,
           direction,
+          position,
           details: "",
           currency,
-          amountMinor: Math.abs(netMinor)
-        }, ["Closed Balance", currency, direction]);
+          amountMinor: Math.abs(netMinor),
+          signedAmountMinor: netMinor
+        }, ["Closed Balance", currency, direction, position, formatMinor(netMinor, currency)]);
       });
       (archive.orders || []).forEach((order) => {
         const date = order.sentAt || order.createdAt || order.postedAt || archive.closedAt;
         const amount = archivedOrderAmount(archive, order);
+        const voided = orderRecordIsVoided(order) || order.excludedFromCalculations === true;
         const archiveOrderViewer = viewer?.role === "Master" && archive.actor === order.agent
           ? { name: archive.actor, role: archive.actorRole || "Agent" }
           : viewer;
@@ -9989,9 +10024,19 @@
           order.accountNumber ? `Account: ${order.accountNumber}` : "",
           order.remarks ? `Remarks: ${order.remarks}` : "",
           order.paidAt ? `Paid ${displayDate(order.paidAt)}` : "",
-          order.voidedAt ? `Voided ${displayDate(order.voidedAt)}` : ""
+          order.voidedAt ? `Voided ${displayDate(order.voidedAt)}` : "",
+          voided ? "Excluded from all calculations" : ""
         ].filter(Boolean).join(" - ");
-        addRow({ date, type: "Order", reference, direction, details, ...amount }, [
+        addRow({
+          date,
+          type: "Order",
+          reference,
+          direction,
+          details,
+          voided,
+          status: voided ? "Voided - Excluded" : "Locked",
+          ...amount
+        }, [
           order.id,
           order.internalOrderId,
           order.brokerOrderNumber,
@@ -10185,13 +10230,13 @@
                 ? record.details
                 : [record.direction, record.details].filter(Boolean).join(" - ");
               actorRows.push(`
-                <tr>
+                <tr class="${record.voided ? "void-row" : ""}">
                   <td>${escapeHtml(displayDate(record.date))}</td>
                   <td>${escapeHtml(record.type)}</td>
                   <td><strong>${escapeHtml(record.reference)}</strong></td>
                   <td>${escapeHtml(description)}</td>
                   <td>${lockedAmount(record.currency, record.amountMinor)}</td>
-                  <td><span class="state-pill danger">Locked</span></td>
+                  <td><span class="state-pill ${record.voided ? "danger" : ""}">${escapeHtml(record.status || "Locked")}</span></td>
                 </tr>
               `);
             });
@@ -10536,6 +10581,8 @@
         fundingType: order.fundingType || "cash",
         journal: order.journal || "",
         voidJournal: order.voidJournal || "",
+        excludedFromCalculations: orderRecordIsVoided(order),
+        locked: true,
         createdAt: order.createdAt || "",
         sentAt: order.sentAt || "",
         paidAt: order.paidAt || "",
@@ -10639,35 +10686,48 @@
     }
 
     function approveOrderVoid(order, actorName = "Master") {
-      if (!order?.journal || order.voidJournal) return;
-      const paidLines = state.ledger.filter((line) => line.source === "ORDER_PAYMENT" && line.journal === order.journal);
-      if (paidLines.length === 0) return;
+      if (!order?.journal || order.state !== "Void Requested" || order.voidJournal || orderBalanceWasClosed(order)) return false;
+      const paidLines = activeLedgerLines(state.ledger)
+        .filter((line) => line.source === "ORDER_PAYMENT" && line.journal === order.journal);
+      if (paidLines.length === 0) return false;
       const journalId = nextJournalId();
       const postedAt = new Date().toISOString();
       paidLines.forEach((line) => {
         state.ledger.unshift({
           journal: journalId,
+          orderId: order.id,
           source: "ORDER_VOID",
           account: line.account,
           direction: line.direction === "Debit" ? "Credit" : "Debit",
           currency: line.currency,
           amountMinor: line.amountMinor,
+          details: `Void of ${brokerOrderNumberForOrder(order)}`,
           postedAt
         });
       });
       order.state = "Voided";
       order.voidJournal = journalId;
       order.voidRequested = false;
+      order.excludedFromCalculations = true;
       order.voidedAt = postedAt;
       order.voidedBy = actorName;
       order.updatedAt = postedAt;
       markReceivableVoidedForOrder(order, actorName);
       syncSettlementsFromLedger();
+      return true;
     }
 
     function closeCurrentBalanceForActor(actorName) {
       const actor = activeActors().find((item) => item.name === actorName && item.role !== "Master");
-      if (!actor) return;
+      if (!actor) return false;
+      const unresolvedVoid = state.orders.find((order) =>
+        order.state === "Void Requested" &&
+        (order.broker === actor.name || order.agent === actor.name || order.brokerActorId === actor.id || order.agentActorId === actor.id)
+      );
+      if (unresolvedVoid) {
+        notifyEvent("Resolve void request", `${orderDisplayNumber(unresolvedVoid, masterActor())} must be approved or rejected before closing ${actor.name}'s balance.`);
+        return false;
+      }
       const previousCloseDetails = `Previous Close for ${actor.name}`;
       const closesWithActor = (line) =>
         lineBelongsToActor(line, actor) ||
@@ -10701,7 +10761,7 @@
       const archivedLedgerSnapshots = openTransactionLines
         .filter(archiveLedgerLineIsSmart)
         .map((line) => archiveLedgerSnapshot(line, actor.name, closedAt));
-      if (!openTransactionLines.length && !archivedOrders.length && !archivedTransfers.length && !collectedReceivables.length) return;
+      if (!openTransactionLines.length && !archivedOrders.length && !archivedTransfers.length && !collectedReceivables.length) return false;
       if (actorLines.length || archivedOrders.length || archivedTransfers.length || collectedReceivables.length) {
         state.archives.unshift({
           id: archiveId,
@@ -10780,6 +10840,7 @@
         });
       if (openingLines.length) state.ledger.unshift(...openingLines);
       syncSettlementsFromLedger();
+      return true;
     }
 
     function showOrderError(message) {
@@ -10812,7 +10873,7 @@
     }
 
     function actorCanRequestVoidOrder(order, actor = selectedActor()) {
-      if (!order || order.state !== "Paid" || order.voidRequested || order.locked) return false;
+      if (!order || order.state !== "Paid" || order.voidRequested || order.locked || orderBalanceWasClosed(order)) return false;
       if (!["Agent", "Special Agent", "Special Broker"].includes(actor?.role)) return false;
       if (currentAuth?.membership?.role === "Owner") return false;
       if (currentAuth?.membership?.role === "Master" && actor?.managedByMaster !== true) return false;
@@ -10825,6 +10886,34 @@
       const assignedIdMatches = order.agentActorId && order.agentActorId === membership.actorId;
       const assignedNameMatches = [membership.actorName, currentAuth.user?.name, actor?.name].filter(Boolean).includes(order.agent);
       return Boolean(assignedIdMatches || assignedNameMatches);
+    }
+
+    function orderBalanceWasClosed(order) {
+      if (!order) return false;
+      if (order.locked === true || order.archivedAt) return true;
+      const createdAt = new Date(order.createdAt || order.sentAt || 0).getTime();
+      return state.archives.some((archive) => {
+        const closedAt = new Date(archive.closedAt || 0).getTime();
+        if (Number.isFinite(createdAt) && createdAt > 0 && Number.isFinite(closedAt) && closedAt < createdAt) return false;
+        return (archive.orders || []).some((snapshot) =>
+          snapshot.id === order.id || snapshot.internalOrderId === order.id
+        );
+      });
+    }
+
+    function requestOrderVoid(order, actor = selectedActor()) {
+      if (!actorCanRequestVoidOrder(order, actor)) return false;
+      const requestedAt = new Date().toISOString();
+      order.state = "Void Requested";
+      order.voidRequested = true;
+      order.voidRequestedBy = actor.name;
+      order.voidRequestedAt = requestedAt;
+      order.updatedAt = requestedAt;
+      state.orderState = "Void Requested";
+      els.orderState.textContent = "Void Requested";
+      els.orderState.className = "state-pill warn";
+      els.voidButton.disabled = true;
+      return true;
     }
 
     function signedInActorCanPayOrder(order) {
@@ -11167,8 +11256,10 @@
     }
 
     function rejectVoidRequest(order, actorName = "Master") {
+      if (!order || order.state !== "Void Requested" || order.voidJournal || orderBalanceWasClosed(order)) return false;
       order.state = "Paid";
       order.voidRequested = false;
+      order.excludedFromCalculations = false;
       order.voidRejectedBy = actorName;
       order.voidRejectedAt = new Date().toISOString();
       order.updatedAt = order.voidRejectedAt;
@@ -11176,6 +11267,7 @@
       els.orderState.textContent = "Paid";
       els.orderState.className = "state-pill good";
       els.voidButton.disabled = false;
+      return true;
     }
 
     document.querySelectorAll(".nav button").forEach((button) => {
@@ -12145,19 +12237,23 @@
 
     els.voidButton.addEventListener("click", () => {
       const actor = selectedActor();
-      const paidOrder = state.orders.find((order) => order.state === "Paid" && order.agent === actor?.name && !order.locked);
-      if (!paidOrder) return;
-      confirmAction("Send a void request for this paid order?", () => {
-        paidOrder.state = "Void Requested";
-        paidOrder.voidRequested = true;
-        paidOrder.voidRequestedBy = actor.name;
-        paidOrder.voidRequestedAt = new Date().toISOString();
-        paidOrder.updatedAt = paidOrder.voidRequestedAt;
-        state.orderState = "Void Requested";
-        els.orderState.textContent = "Void Requested";
-        els.orderState.className = "state-pill warn";
-        els.voidButton.disabled = true;
+      const paidOrder = state.orders
+        .filter((order) => actorCanRequestVoidOrder(order, actor))
+        .sort(newestOrderFirst)[0];
+      if (!paidOrder) {
+        notifyEvent("Void unavailable", "There is no unlocked paid order available for a void request.");
+        return;
+      }
+      const orderId = paidOrder.id;
+      confirmAction(`Send a void request for ${orderDisplayNumber(paidOrder, actor)}?`, async () => {
+        const currentOrder = state.orders.find((order) => order.id === orderId);
+        if (!requestOrderVoid(currentOrder, actor)) {
+          notifyEvent("Void unavailable", "This order is no longer available for a void request.");
+          return;
+        }
+        notifyEvent("Void requested", `${orderDisplayNumber(currentOrder, actor)} sent to Master for approval.`);
         renderAll();
+        await saveStateNow();
       });
     });
 
@@ -12695,17 +12791,16 @@
         const actor = selectedActor();
         const order = state.orders.find((item) => item.id === requestVoidButton.dataset.id);
         if (!actorCanRequestVoidOrder(order, actor)) return;
-        confirmAction("Send a void request for this paid order?", () => {
-          order.state = "Void Requested";
-          order.voidRequested = true;
-          order.voidRequestedBy = actor.name;
-          order.voidRequestedAt = new Date().toISOString();
-          order.updatedAt = order.voidRequestedAt;
-          state.orderState = "Void Requested";
-          els.orderState.textContent = "Void Requested";
-          els.orderState.className = "state-pill warn";
-          els.voidButton.disabled = true;
+        const orderId = order.id;
+        confirmAction(`Send a void request for ${orderDisplayNumber(order, actor)}?`, async () => {
+          const currentOrder = state.orders.find((item) => item.id === orderId);
+          if (!requestOrderVoid(currentOrder, actor)) {
+            notifyEvent("Void unavailable", "This order is no longer available for a void request.");
+            return;
+          }
+          notifyEvent("Void requested", `${orderDisplayNumber(currentOrder, actor)} sent to Master for approval.`);
           renderAll();
+          await saveStateNow();
         });
         return;
       }
@@ -12715,13 +12810,20 @@
         const actor = selectedActor();
         const order = state.orders.find((item) => item.id === approveVoidButton.dataset.id);
         if (!order || actor?.role !== "Master" || order.state !== "Void Requested") return;
-        confirmAction("Approve this void request?", () => {
-          approveOrderVoid(order, actor.name);
+        const orderId = order.id;
+        confirmAction(`Approve the void request for ${orderDisplayNumber(order, actor)}?`, async () => {
+          const currentOrder = state.orders.find((item) => item.id === orderId);
+          if (!approveOrderVoid(currentOrder, actor.name)) {
+            notifyEvent("Void unavailable", "This request is no longer available or its balance is already closed.");
+            return;
+          }
           state.orderState = "Voided";
           els.orderState.textContent = "Voided";
           els.orderState.className = "state-pill danger";
           els.voidButton.disabled = true;
+          notifyEvent("Void approved", `${orderDisplayNumber(currentOrder, actor)} is excluded from all calculations.`);
           renderAll();
+          await saveStateNow();
         });
         return;
       }
@@ -12731,9 +12833,16 @@
         const actor = selectedActor();
         const order = state.orders.find((item) => item.id === rejectVoidButton.dataset.id);
         if (!order || actor?.role !== "Master" || order.state !== "Void Requested") return;
-        confirmAction("Reject this void request?", () => {
-          rejectVoidRequest(order, actor.name);
+        const orderId = order.id;
+        confirmAction(`Reject the void request for ${orderDisplayNumber(order, actor)} and keep it Paid?`, async () => {
+          const currentOrder = state.orders.find((item) => item.id === orderId);
+          if (!rejectVoidRequest(currentOrder, actor.name)) {
+            notifyEvent("Void unavailable", "This request is no longer available or its balance is already closed.");
+            return;
+          }
+          notifyEvent("Void rejected", `${orderDisplayNumber(currentOrder, actor)} remains Paid and counted normally.`);
           renderAll();
+          await saveStateNow();
         });
         return;
       }

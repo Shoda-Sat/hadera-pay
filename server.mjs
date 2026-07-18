@@ -613,8 +613,10 @@ function mergeOrders(existingItems = [], incomingItems = []) {
     if (item.voidedBy && !next.voidedBy) next.voidedBy = item.voidedBy;
     const latestVoidRequest = Math.max(new Date(next.voidRequestedAt || 0).getTime(), 0);
     const latestVoidReject = Math.max(new Date(next.voidRejectedAt || 0).getTime(), 0);
-    const hasOpenVoidRequest = (previous.state === "Void Requested" || item.state === "Void Requested" || previous.voidRequested || item.voidRequested) &&
-      latestVoidRequest >= latestVoidReject;
+    const requestIsCurrent = latestVoidRequest > latestVoidReject || (latestVoidRequest === 0 && latestVoidReject === 0);
+    const hasOpenVoidRequest = !next.voidJournal &&
+      (previous.state === "Void Requested" || item.state === "Void Requested" || previous.voidRequested || item.voidRequested) &&
+      requestIsCurrent;
     if (!hasOpenVoidRequest && (previous.state === "Paid" || item.state === "Paid" || next.paidAt || next.journal)) {
       next.state = "Paid";
       next.returnedBy = "";
@@ -624,8 +626,14 @@ function mergeOrders(existingItems = [], incomingItems = []) {
     if (hasOpenVoidRequest) {
       next.state = "Void Requested";
       next.voidRequested = true;
+    } else {
+      next.voidRequested = false;
     }
-    if (previous.state === "Voided" || item.state === "Voided") next.state = "Voided";
+    if (previous.state === "Voided" || item.state === "Voided" || next.voidJournal) {
+      next.state = "Voided";
+      next.voidRequested = false;
+      next.excludedFromCalculations = true;
+    }
     merged.set(item.id, next);
   });
   return Array.from(merged.values());
