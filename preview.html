@@ -1246,6 +1246,32 @@
       font-size: 12px;
     }
 
+    .forward-transfer-form {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(120px, 1fr));
+      gap: 8px;
+      width: min(520px, 100%);
+    }
+
+    .forward-transfer-form label {
+      display: grid;
+      gap: 4px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+    }
+
+    .forward-transfer-form select,
+    .forward-transfer-form input {
+      min-height: 38px;
+      min-width: 0;
+    }
+
+    .forward-transfer-form .forward-transfer-source,
+    .forward-transfer-form .forward-transfer-submit {
+      grid-column: 1 / -1;
+    }
+
     .order-detail {
       display: grid;
       gap: 3px;
@@ -2019,6 +2045,15 @@
 
       .transfer-row {
         grid-template-columns: 1fr;
+      }
+
+      .forward-transfer-form {
+        grid-template-columns: 1fr;
+      }
+
+      .forward-transfer-form .forward-transfer-source,
+      .forward-transfer-form .forward-transfer-submit {
+        grid-column: auto;
       }
     }
 
@@ -3161,7 +3196,7 @@
             <div class="panel-body table-wrap" data-settings-body>
               <table>
                 <thead>
-                  <tr><th>Actor</th><th>Role</th><th>Currency</th><th>Transfer Access</th><th>Action</th><th>Receive Currency</th><th>Order Currency Access</th><th>Payout Divisor / %</th></tr>
+                  <tr><th>Actor</th><th>Role</th><th>Currency</th><th>Transfer Access</th><th>Action</th><th>Transfer Currency</th><th>Order Currency Access</th><th>Payout Divisor / %</th></tr>
                 </thead>
                 <tbody id="permissionRows"></tbody>
               </table>
@@ -3355,6 +3390,7 @@
     const processingOrderIds = new Set();
     const pendingProofFiles = new Map();
     const pendingProofUploads = new Map();
+    const forwardTransferDrafts = new Map();
     const processingTransferIds = new Set();
     const receivablePaymentDrafts = new Map();
     const expandedCompactOrderIds = new Set();
@@ -3363,7 +3399,10 @@
     let syncingLedgerScroll = false;
     const allowedAuthIdleSeconds = new Set([10, 20, 30, 60, 300, 900, 1800, 3600, 7200]);
     const defaultAuthIdleSeconds = 7200;
-    const maxProofFileBytes = 4 * 1024 * 1024;
+    const paymentProofImageTargetBytes = 1024 * 1024;
+    const maxPaymentProofImageSourceBytes = 24 * 1024 * 1024;
+    const maxPaymentProofDocumentBytes = 8 * 1024 * 1024;
+    const paymentProofAccept = ".jpg,.jpeg,.png,.pdf,.xls,.xlsx,image/jpeg,image/png,application/pdf,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
     const supportedCurrencies = ["USD", "ETB", "EUR", "ERN"];
 
     function actorCanInitiateOrders(role) {
@@ -3644,7 +3683,7 @@
           active: actor.role === "Master" ? true : actor.active !== false,
           transferEnabled: actor.role === "Master" ? true : normalizedTransferMode(actor) !== "none",
           transferMode: normalizedTransferMode(actor),
-          transferReceiveMultiCurrencyEnabled: actor.role === "Master" || actor.role === "Special Broker"
+          transferReceiveMultiCurrencyEnabled: actor.role === "Master"
             ? true
             : actor.transferReceiveMultiCurrencyEnabled === true,
           orderVisibilityPermissions: ["Agent", "Special Agent"].includes(actor.role)
@@ -4138,7 +4177,7 @@
 
     function settingsRateInputIsFocused() {
       return Boolean(document.activeElement?.closest?.(
-        ".fixed-order-rate, .special-agent-divider, .special-agent-percent, .usd-agent-income-divider, .usd-agent-income-percent, .master-rate-divider, .master-rate-percent, .buying-rate-input, .forward-agent, .forward-payout-divider, .forward-payout-percent, .receivable-payment, .ledger-tool-input, .actor-name-input, .actor-currency-input, .actor-currency-rate, #actorResetActor, #actorResetPermit"
+        ".forward-transfer-form, .fixed-order-rate, .special-agent-divider, .special-agent-percent, .usd-agent-income-divider, .usd-agent-income-percent, .master-rate-divider, .master-rate-percent, .buying-rate-input, .forward-agent, .forward-payout-divider, .forward-payout-percent, .receivable-payment, .ledger-tool-input, .actor-name-input, .actor-currency-input, .actor-currency-rate, #actorResetActor, #actorResetPermit"
       ));
     }
 
@@ -4624,6 +4663,11 @@
       return majorAmount(amountMinor, currency).toFixed(decimals);
     };
 
+    const formatMajorInput = (amountMajor, currency = "USD") =>
+      formatMinor(minorFromMajor(amountMajor, currency), currency)
+        .replace(/(\.\d*?[1-9])0+$/, "$1")
+        .replace(/\.0+$/, "");
+
     const text = (value) => String(value ?? "").trim();
 
     function escapeHtml(value) {
@@ -4716,6 +4760,13 @@
             key: `transfer:${transfer.id}:returned:${transfer.updatedAt || transfer.returnedAt || ""}`,
             title: "Transfer needs an update",
             detail: `${transfer.id} was returned for your review.`
+          }));
+        state.transfers
+          .filter((transfer) => transfer.state === "Pending Acceptance" && (transfer.toActorId === actor.id || transfer.to === actor.name))
+          .forEach((transfer) => notices.push({
+            key: `transfer:${transfer.id}:pending-acceptance:${transfer.updatedAt || transfer.forwardedAt || ""}`,
+            title: "Transfer acceptance needed",
+            detail: `${transfer.id} from ${transfer.from || "an Actor"} was forwarded to you by Master.`
           }));
       }
       return notices;
@@ -5570,19 +5621,24 @@
       return actor.currency === currency;
     }
 
-    function actorTransferCurrencies(actor) {
+    function actorPayoutCurrencies(actor) {
       if (!actor) return [];
-      if (actor.role === "Master") return supportedCurrencies;
       if (actorHasSpecialPayout(actor.role)) {
         return Array.from(new Set([actor.currency, ...(actor.workingCurrencies || [])]))
           .filter((currency) => supportedCurrencies.includes(currency));
       }
       return supportedCurrencies.includes(actor.currency) ? [actor.currency] : [];
     }
+    function actorTransferCurrencies(actor) {
+      if (!actor) return [];
+      if (actor.role === "Master") return supportedCurrencies;
+      if (actor.transferReceiveMultiCurrencyEnabled === true) return supportedCurrencies;
+      return supportedCurrencies.includes(actor.currency) ? [actor.currency] : [];
+    }
 
     function actorTransferReceiveCurrencies(actor) {
       if (!actor) return [];
-      if (actor.role === "Master" || actor.role === "Special Broker" || actor.transferReceiveMultiCurrencyEnabled === true) {
+      if (actor.role === "Master" || actor.transferReceiveMultiCurrencyEnabled === true) {
         return supportedCurrencies;
       }
       return supportedCurrencies.includes(actor.currency) ? [actor.currency] : [];
@@ -6298,7 +6354,121 @@
       });
     }
 
-    function updatePaymentProofStatus(input) {
+    function paymentProofKind(file) {
+      const extension = String(file?.name || "").toLowerCase().match(/\.[^.]+$/)?.[0] || "";
+      const mimeType = String(file?.type || "").toLowerCase();
+      if ([".jpg", ".jpeg", ".png"].includes(extension) || ["image/jpeg", "image/png"].includes(mimeType)) return "image";
+      if ([".pdf", ".xls", ".xlsx"].includes(extension) || [
+        "application/pdf",
+        "application/vnd.ms-excel",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      ].includes(mimeType)) return "document";
+      return "";
+    }
+
+    function validatePaymentProofFile(file) {
+      const kind = paymentProofKind(file);
+      if (!kind) throw new Error("Attach a JPG, JPEG, PNG, PDF, XLS, or XLSX file.");
+      if (kind === "image" && file.size > maxPaymentProofImageSourceBytes) {
+        throw new Error("The image is too large to prepare. Choose an image under 24 MB.");
+      }
+      if (kind === "document" && file.size > maxPaymentProofDocumentBytes) {
+        throw new Error("The document is too large. Choose a PDF or Excel file under 8 MB.");
+      }
+      return kind;
+    }
+
+    function paymentProofOrderNumber(orderId) {
+      const order = state.orders.find((item) => item.id === orderId);
+      return order ? orderDisplayNumber(order, selectedActor()) : orderId;
+    }
+
+    function paymentProofFileName(orderId, originalName, compressed = false) {
+      const orderNumber = String(paymentProofOrderNumber(orderId) || orderId).replace(/[^a-z0-9_-]+/gi, "-");
+      let name = String(originalName || "payment-proof").trim().replace(/[^a-z0-9._-]+/gi, "-").replace(/^-+/, "");
+      if (!name) name = "payment-proof";
+      if (compressed) name = `${name.replace(/\.[^.]+$/, "") || "payment-proof"}.jpg`;
+      return name.toLowerCase().startsWith(`${orderNumber.toLowerCase()}-`) ? name : `${orderNumber}-${name}`;
+    }
+
+    function loadPaymentProofImage(file) {
+      return new Promise((resolve, reject) => {
+        const source = URL.createObjectURL(file);
+        const image = new Image();
+        image.onload = () => {
+          URL.revokeObjectURL(source);
+          resolve(image);
+        };
+        image.onerror = () => {
+          URL.revokeObjectURL(source);
+          reject(new Error("The selected image could not be opened."));
+        };
+        image.src = source;
+      });
+    }
+
+    function canvasToJpegBlob(canvas, quality) {
+      return new Promise((resolve, reject) => {
+        canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("The image could not be compressed.")), "image/jpeg", quality);
+      });
+    }
+
+    async function compressPaymentProofImage(file, onProgress = () => {}) {
+      const image = await loadPaymentProofImage(file);
+      let width = image.naturalWidth || image.width;
+      let height = image.naturalHeight || image.height;
+      const largestSide = Math.max(width, height);
+      if (largestSide > 2200) {
+        const scale = 2200 / largestSide;
+        width = Math.max(1, Math.round(width * scale));
+        height = Math.max(1, Math.round(height * scale));
+      }
+      let quality = 0.84;
+      let blob = file;
+      for (let attempt = 0; attempt < 12; attempt += 1) {
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const context = canvas.getContext("2d");
+        if (!context) throw new Error("Image compression is unavailable in this browser.");
+        context.fillStyle = "#ffffff";
+        context.fillRect(0, 0, width, height);
+        context.drawImage(image, 0, 0, width, height);
+        blob = await canvasToJpegBlob(canvas, quality);
+        onProgress(Math.min(80, 10 + Math.round((attempt + 1) / 12 * 70)));
+        if (blob.size <= paymentProofImageTargetBytes) break;
+        if (quality > 0.48) quality = Math.max(0.48, quality - 0.12);
+        else {
+          width = Math.max(1, Math.round(width * 0.8));
+          height = Math.max(1, Math.round(height * 0.8));
+          quality = 0.72;
+        }
+      }
+      if (blob.size > paymentProofImageTargetBytes) throw new Error("The image could not be compressed below 1 MB. Choose a smaller image.");
+      return blob;
+    }
+
+    async function preparePaymentProof(file, orderId, onProgress = () => {}, onStatus = () => {}) {
+      const kind = validatePaymentProofFile(file);
+      const shouldCompress = kind === "image" && file.size > paymentProofImageTargetBytes;
+      let preparedFile = file;
+      if (shouldCompress) {
+        onStatus("Compressing image...");
+        preparedFile = await compressPaymentProofImage(file, onProgress);
+      }
+      onStatus("Preparing attachment...");
+      const media = await readFileAsDataUrl(preparedFile, (percent) => onProgress(80 + Math.round(percent * 0.2)));
+      return {
+        media,
+        fileName: paymentProofFileName(orderId, file.name, shouldCompress),
+        mediaType: kind,
+        mimeType: preparedFile.type || file.type || "application/octet-stream",
+        orderNumber: paymentProofOrderNumber(orderId),
+        compressed: shouldCompress
+      };
+    }
+
+    async function updatePaymentProofStatus(input) {
       const actionBox = input?.closest(".order-actions");
       const progress = actionBox?.querySelector(".proof-progress");
       const file = input?.files?.[0] || null;
@@ -6310,38 +6480,44 @@
         progress.textContent = "";
         return;
       }
-      if (file.size > maxProofFileBytes) {
+      try {
+        validatePaymentProofFile(file);
+      } catch (error) {
         if (orderId) pendingProofFiles.delete(orderId);
         if (orderId) pendingProofUploads.delete(orderId);
         input.value = "";
-        progress.textContent = "File too large";
-        showOrderError(`Payment proof is too large. Use an image under ${Math.round(maxProofFileBytes / 1024 / 1024)} MB.`);
+        progress.textContent = "Unsupported file";
+        showOrderError(error.message || "The payment attachment could not be prepared.");
         return;
       }
       if (orderId) pendingProofFiles.set(orderId, file);
-      progress.textContent = "Uploading 0%";
+      progress.textContent = "Preparing 0%";
       if (!orderId) return;
       const upload = {
         status: "uploading",
-        fileName: file.name || `${orderId}-payment-proof.png`,
+        fileName: paymentProofFileName(orderId, file.name),
         media: "",
         promise: null
       };
-      upload.promise = readFileAsDataUrl(file, (percent) => {
+      upload.promise = preparePaymentProof(file, orderId, (percent) => {
         const current = pendingProofUploads.get(orderId);
         if (current !== upload) return;
         const currentProgress = document.querySelector(`.proof-progress[data-id="${orderId}"]`);
-        if (currentProgress) currentProgress.textContent = `Uploading ${percent}%`;
-      }).then((media) => {
-        upload.status = "ready";
-        upload.media = media;
+        if (currentProgress) currentProgress.textContent = `Preparing ${percent}%`;
+      }, (status) => {
         const currentProgress = document.querySelector(`.proof-progress[data-id="${orderId}"]`);
-        if (currentProgress) currentProgress.textContent = `Photo ready: ${upload.fileName}`;
-        return { media, fileName: upload.fileName };
+        if (currentProgress) currentProgress.textContent = status;
+      }).then((proof) => {
+        upload.status = "ready";
+        upload.media = proof.media;
+        upload.fileName = proof.fileName;
+        const currentProgress = document.querySelector(`.proof-progress[data-id="${orderId}"]`);
+        if (currentProgress) currentProgress.textContent = `${proof.compressed ? "Compressed and ready" : "File ready"}: ${upload.fileName}`;
+        return proof;
       }).catch((error) => {
         upload.status = "error";
         const currentProgress = document.querySelector(`.proof-progress[data-id="${orderId}"]`);
-        if (currentProgress) currentProgress.textContent = "Could not upload photo";
+        if (currentProgress) currentProgress.textContent = "Could not prepare attachment";
         throw error;
       });
       pendingProofUploads.set(orderId, upload);
@@ -6352,30 +6528,25 @@
       const progress = actionBox?.querySelector(".proof-progress");
       const upload = pendingProofUploads.get(orderId);
       if (upload?.status === "ready" && upload.media) {
-        if (progress) progress.textContent = `Photo ready: ${upload.fileName}`;
-        return { media: upload.media, fileName: upload.fileName };
+        if (progress) progress.textContent = `File ready: ${upload.fileName}`;
+        return upload.promise;
       }
       if (upload?.status === "uploading" && upload.promise) {
-        if (progress) progress.textContent = "Waiting for photo upload...";
+        if (progress) progress.textContent = "Waiting for attachment...";
         return upload.promise;
       }
       if (upload?.status === "error") {
-        throw new Error("Could not attach the payment proof. Try another screenshot.");
+        throw new Error("Could not attach the payment proof. Try another supported file.");
       }
       const proofFile = pendingProofFiles.get(orderId) || actionBox?.querySelector(".payment-proof-input")?.files?.[0] || null;
       if (!proofFile) return null;
-      if (proofFile.size > maxProofFileBytes) {
-        pendingProofFiles.delete(orderId);
-        pendingProofUploads.delete(orderId);
-        throw new Error(`Payment proof is too large. Use an image under ${Math.round(maxProofFileBytes / 1024 / 1024)} MB.`);
-      }
-      if (progress) progress.textContent = "Uploading 0%";
-      const media = await readFileAsDataUrl(proofFile, (percent) => {
-        if (progress) progress.textContent = `Uploading ${percent}%`;
-      });
-      const proofOrder = state.orders.find((item) => item.id === orderId);
-      const proofNumber = proofOrder ? orderDisplayNumber(proofOrder, selectedActor()) : orderId;
-      return { media, fileName: proofFile.name || `${proofNumber}-payment-proof.png` };
+      if (progress) progress.textContent = "Preparing 0%";
+      return preparePaymentProof(
+        proofFile,
+        orderId,
+        (percent) => { if (progress) progress.textContent = `Preparing ${percent}%`; },
+        (status) => { if (progress) progress.textContent = status; }
+      );
     }
 
     function setChatRecordButtonState(mode) {
@@ -6453,13 +6624,15 @@
       if (!proof?.media || !actor) return;
       const chat = directChatWithMaster(actor.name);
       if (!chat) return;
+      const displayNumber = proof.orderNumber || orderDisplayNumber(order, actor);
       chat.messages.push({
         id: nextMessageId(),
         from: actor.name,
-        text: `Payment proof for order ${orderDisplayNumber(order, actor)}. Paid ${money(order.payoutCurrency || order.sourceCurrency || "USD", order.payoutAmountMinor || order.sourceAmountMinor || 0)}.`,
-        kind: "photo",
+        text: `Payment proof for order ${displayNumber}. Paid ${money(order.payoutCurrency || order.sourceCurrency || "USD", order.payoutAmountMinor || order.sourceAmountMinor || 0)}.`,
+        kind: proof.mediaType === "image" ? "photo" : "file",
         media: proof.media,
-        fileName: proof.fileName || `${orderDisplayNumber(order, actor)}-payment-proof.png`,
+        fileName: proof.fileName || `${displayNumber}-payment-proof`,
+        orderNumber: displayNumber,
         replyTo: "",
         reactions: {},
         readBy: [actor.name],
@@ -6694,17 +6867,15 @@
                 ? "Master only"
                 : "None";
           const transferStatusClass = transferMode === "none" ? "danger" : transferMode === "both" ? "good" : "warn";
-          const transferReceiveMultiCurrency = actor.role === "Special Broker" || actor.transferReceiveMultiCurrencyEnabled === true;
-          const transferReceiveCurrencyControl = actor.role === "Special Broker"
-            ? '<span class="state-pill good">Always multi-currency</span>'
-            : `
-              <div class="setting-inline">
-                <span class="state-pill ${transferReceiveMultiCurrency ? "good" : "warn"}">${transferReceiveMultiCurrency ? "Multi-currency" : `Base ${escapeHtml(actor.currency)} only`}</span>
-                <button class="btn ${transferReceiveMultiCurrency ? "danger" : "primary"} toggle-transfer-receive-currency-permission" data-id="${actor.id}" type="button">
-                  ${transferReceiveMultiCurrency ? "Restrict" : "Allow Multi"}
-                </button>
-              </div>
-            `;
+          const transferReceiveMultiCurrency = actor.transferReceiveMultiCurrencyEnabled === true;
+          const transferReceiveCurrencyControl = `
+            <div class="setting-inline">
+              <span class="state-pill ${transferReceiveMultiCurrency ? "good" : "warn"}">${transferReceiveMultiCurrency ? "Send + receive multi-currency" : `Base ${escapeHtml(actor.currency)} only`}</span>
+              <button class="btn ${transferReceiveMultiCurrency ? "danger" : "primary"} toggle-transfer-receive-currency-permission" data-id="${actor.id}" type="button">
+                ${transferReceiveMultiCurrency ? "Restrict" : "Allow Multi"}
+              </button>
+            </div>
+          `;
           const orderMultiCurrency = actor.orderMultiCurrencyEnabled === true;
           const orderCurrencyControl = actorCanInitiateOrders(actor.role)
             ? `
@@ -6716,7 +6887,7 @@
               </div>
             `
             : '<span class="muted">Not applicable</span>';
-          const specialCurrencies = actorHasSpecialPayout(actor.role) ? actorTransferCurrencies(actor) : [];
+          const specialCurrencies = actorHasSpecialPayout(actor.role) ? actorPayoutCurrencies(actor) : [];
           const specialExpanded = state.expandedSpecialDividerActorId === actor.id;
           const activeSpecialCount = specialCurrencies.filter((currency) => specialPayoutSettingFor(actor, currency).enabled).length;
           const specialDividerControl = actorHasSpecialPayout(actor.role)
@@ -7319,11 +7490,11 @@
         const pendingProof = pendingProofFiles.get(order.id);
         const proofUpload = pendingProofUploads.get(order.id);
         const proofStatus = proofUpload?.status === "uploading"
-          ? "Uploading photo..."
+          ? "Preparing attachment..."
           : proofUpload?.status === "ready"
-            ? `Photo ready: ${escapeHtml(proofUpload.fileName || "payment proof")}`
+            ? `File ready: ${escapeHtml(proofUpload.fileName || "payment proof")}`
             : proofUpload?.status === "error"
-              ? "Could not upload photo"
+              ? "Could not prepare attachment"
               : pendingProof
                 ? `Attached: ${escapeHtml(pendingProof.name || "payment proof")}`
                 : "";
@@ -7331,7 +7502,7 @@
           <div class="order-actions">
             <span class="proof-upload-row">
               <button class="btn secondary attach-proof" data-id="${order.id}" type="button">${icons.paperclip}Attach</button>
-              <input class="payment-proof-input hidden" data-id="${order.id}" type="file" accept="image/*">
+              <input class="payment-proof-input hidden" data-id="${order.id}" type="file" accept="${paymentProofAccept}">
               <span class="muted proof-progress" data-id="${order.id}">${proofStatus}</span>
             </span>
             <button class="btn primary pay-order" data-id="${order.id}" type="button">${icons.check}Mark Paid</button>
@@ -7712,10 +7883,13 @@
       const commissionMinor = transferCommissionMinor(transfer);
       const bits = [
         `${transfer.from || "Unknown"} -> ${transfer.to || "Unknown"}`,
+        transfer.forwardedAt && transfer.requestedTo ? `Originally sent to ${transfer.requestedTo}` : "",
         `Source: ${money(sourceCurrency, transfer.sourceAmountMinor || transfer.amountMinor || 0)}`,
         `Payout: ${money(payoutCurrency, transfer.amountMinor || 0)}`,
         `Rate: ${formatRate(transfer.rate || 1)}`,
         commissionPercent > 0 ? `Commission: ${money(sourceCurrency, commissionMinor)} (${formatRate(commissionPercent)}%)` : "",
+        transfer.forwardedBy ? `Forwarded by: ${transfer.forwardedBy}` : "",
+        transfer.acceptedBy ? `Accepted by: ${transfer.acceptedBy}` : "",
         transfer.remarks ? `Remarks: ${transfer.remarks}` : ""
       ];
       return bits.filter(Boolean).join(" - ");
@@ -8990,6 +9164,7 @@
       return [
         transfer.from ? `From: ${transfer.from}` : "",
         transfer.to ? `To: ${transfer.to}` : "",
+        transfer.forwardedAt && transfer.requestedTo ? `Originally sent to: ${transfer.requestedTo}` : "",
         `Source Amount: ${money(sourceCurrency, transfer.sourceAmountMinor || transfer.amountMinor || 0)}`,
         `Payout Amount: ${money(payoutCurrency, transfer.amountMinor || 0)}`,
         transfer.rate ? `Rate: ${formatRate(transfer.rate)}` : "",
@@ -9000,6 +9175,8 @@
         transfer.createdAt ? `Created: ${displayDate(transfer.createdAt)}` : "",
         transfer.sentAt ? `Sent: ${displayDate(transfer.sentAt)}` : "",
         transfer.approvedAt ? `Approved: ${displayDate(transfer.approvedAt)}` : "",
+        transfer.forwardedAt ? `Forwarded: ${displayDate(transfer.forwardedAt)}` : "",
+        transfer.acceptedAt ? `Accepted: ${displayDate(transfer.acceptedAt)}` : "",
         transfer.paidOutAt ? `Paid out: ${displayDate(transfer.paidOutAt)}` : "",
         transfer.returnedAt ? `Returned: ${displayDate(transfer.returnedAt)}` : "",
         transfer.rejectedAt ? `Rejected: ${displayDate(transfer.rejectedAt)}` : "",
@@ -9015,11 +9192,11 @@
       return {
         searchGroupKey: transfer.id ? `transfer:${transfer.id}` : "",
         searchKind: "transfer",
-        searchParticipants: uniqueSearchParticipants([transfer.from, transfer.to, "Master"]),
+        searchParticipants: uniqueSearchParticipants([transfer.from, transfer.to, transfer.requestedTo, "Master"]),
         searchParticipant: "",
         type,
-        date: transfer.reversedAt || transfer.paidOutAt || transfer.approvedAt || transfer.sentAt || transfer.createdAt || transfer.archivedAt || "",
-        time: new Date(transfer.reversedAt || transfer.paidOutAt || transfer.approvedAt || transfer.sentAt || transfer.createdAt || transfer.archivedAt || 0).getTime() || 0,
+        date: transfer.reversedAt || transfer.paidOutAt || transfer.acceptedAt || transfer.approvedAt || transfer.forwardedAt || transfer.sentAt || transfer.createdAt || transfer.archivedAt || "",
+        time: new Date(transfer.reversedAt || transfer.paidOutAt || transfer.acceptedAt || transfer.approvedAt || transfer.forwardedAt || transfer.sentAt || transfer.createdAt || transfer.archivedAt || 0).getTime() || 0,
         reference: transfer.id || transfer.journal || "",
         actors: [transfer.from, transfer.to].filter(Boolean).join(" -> "),
         amount,
@@ -9031,6 +9208,9 @@
           transfer.reversalJournal,
           transfer.from,
           transfer.to,
+          transfer.requestedTo,
+          transfer.forwardedBy,
+          transfer.acceptedBy,
           transfer.state,
           transfer.remarks,
           details,
@@ -9800,6 +9980,10 @@
       }
       els.transferList.innerHTML = visibleTransfers.map((transfer) => {
         const canApprove = actor?.role === "Master" && transfer.state === "Pending Approval";
+        const canForward = canApprove && transferArrivedAtMaster(transfer) && !transferWasSentByMaster(transfer);
+        const canRespond = actor?.role !== "Master" &&
+          transfer.state === "Pending Acceptance" &&
+          (transfer.toActorId === actor?.id || transfer.to === actor?.name);
         const canReverse = actor?.role === "Master" &&
           transfer.state === "Approved" &&
           transfer.journal &&
@@ -9807,14 +9991,52 @@
           !transferBalanceWasClosed(transfer) &&
           transferWasSentByMaster(transfer);
         const canUpdate = actor?.name === transfer.from && transfer.state === "Returned";
-        const actionHtml = canApprove
+        const forwardContext = canForward ? forwardTransferDraft(transfer) : null;
+        const forwardForm = forwardContext
           ? `
-            <div class="order-actions">
-              <button class="btn secondary approve-transfer" data-id="${transfer.id}" type="button" ${processingTransferIds.has(transfer.id) ? "disabled" : ""}>Approve</button>
-              <button class="btn danger reject-transfer" data-id="${transfer.id}" type="button">Reject</button>
-              <button class="btn secondary return-transfer" data-id="${transfer.id}" type="button">Return Back</button>
+            <div class="forward-transfer-form" data-id="${escapeHtml(transfer.id)}">
+              <span class="forward-transfer-source">Forward ${money(transfer.sourceCurrency || transfer.currency, transfer.sourceAmountMinor || transfer.amountMinor)} from ${escapeHtml(transfer.from)}</span>
+              <label>Receiving Actor
+                <select class="forward-transfer-actor" data-id="${escapeHtml(transfer.id)}">
+                  ${forwardContext.targets.map((target) => `<option value="${escapeHtml(target.id)}" ${target.id === forwardContext.draft.toActorId ? "selected" : ""}>${escapeHtml(target.name)}</option>`).join("")}
+                </select>
+              </label>
+              <label>Payout currency
+                <select class="forward-transfer-currency" data-id="${escapeHtml(transfer.id)}">
+                  ${forwardContext.currencies.map((currency) => `<option value="${currency}" ${currency === forwardContext.draft.payoutCurrency ? "selected" : ""}>${currency}</option>`).join("")}
+                </select>
+              </label>
+              <label>Rate
+                <input class="forward-transfer-rate" data-id="${escapeHtml(transfer.id)}" inputmode="decimal" value="${escapeHtml(forwardContext.draft.rate)}">
+              </label>
+              <label>Payout amount
+                <input class="forward-transfer-payout" data-id="${escapeHtml(transfer.id)}" inputmode="decimal" value="${escapeHtml(forwardContext.draft.payoutAmount)}">
+              </label>
+              <label>Percent (%)
+                <input class="forward-transfer-percent" data-id="${escapeHtml(transfer.id)}" inputmode="decimal" value="${escapeHtml(forwardContext.draft.commissionPercent)}">
+              </label>
+              <button class="btn primary forward-transfer-submit" data-id="${escapeHtml(transfer.id)}" type="button" ${!forwardContext.receiver || processingTransferIds.has(transfer.id) ? "disabled" : ""}>Forward for Acceptance</button>
             </div>
           `
+          : "";
+        const actionHtml = canApprove
+          ? `
+            <div>
+              <div class="order-actions">
+                <button class="btn secondary approve-transfer" data-id="${transfer.id}" type="button" ${processingTransferIds.has(transfer.id) ? "disabled" : ""}>${canForward ? "Approve to Master" : "Approve"}</button>
+                <button class="btn danger reject-transfer" data-id="${transfer.id}" type="button">Reject</button>
+                <button class="btn secondary return-transfer" data-id="${transfer.id}" type="button">Return Back</button>
+              </div>
+              ${forwardForm}
+            </div>
+          `
+          : canRespond
+            ? `
+              <div class="order-actions">
+                <button class="btn primary accept-forwarded-transfer" data-id="${transfer.id}" type="button" ${processingTransferIds.has(transfer.id) ? "disabled" : ""}>Accept</button>
+                <button class="btn danger reject-forwarded-transfer" data-id="${transfer.id}" type="button" ${processingTransferIds.has(transfer.id) ? "disabled" : ""}>Reject</button>
+              </div>
+            `
           : canReverse
             ? `<button class="btn danger reverse-transfer" data-id="${transfer.id}" type="button" ${processingTransferIds.has(transfer.id) ? "disabled" : ""}>Reverse</button>`
             : canUpdate
@@ -9824,6 +10046,8 @@
           transfer.createdAt ? `Created: ${displayDate(transfer.createdAt)}` : "",
           transfer.sentAt ? `Sent: ${displayDate(transfer.sentAt)}` : "",
           transfer.approvedAt ? `Approved: ${displayDate(transfer.approvedAt)}` : "",
+          transfer.forwardedAt ? `Forwarded: ${displayDate(transfer.forwardedAt)}` : "",
+          transfer.acceptedAt ? `Accepted: ${displayDate(transfer.acceptedAt)}` : "",
           transfer.paidOutAt ? `Paid out: ${displayDate(transfer.paidOutAt)}` : "",
           transfer.returnedAt ? `Returned: ${displayDate(transfer.returnedAt)}` : "",
           transfer.rejectedAt ? `Rejected: ${displayDate(transfer.rejectedAt)}` : "",
@@ -9834,7 +10058,8 @@
         return `
         <div class="transfer-row">
           <div>
-            <strong>${transfer.from} -> ${transfer.to}</strong>
+            <strong>${escapeHtml(transfer.from)} -> ${escapeHtml(transfer.to)}</strong>
+            ${transfer.forwardedAt && transfer.requestedTo ? `<span>Originally sent to ${escapeHtml(transfer.requestedTo)} · Forwarded by ${escapeHtml(transfer.forwardedBy || "Master")}</span>` : ""}
             ${transfer.remarks ? `<span>Remarks: ${escapeHtml(transfer.remarks)}</span>` : ""}
             <span>${money(transfer.sourceCurrency || transfer.currency, transfer.sourceAmountMinor || transfer.amountMinor)} -> ${money(transfer.currency, transfer.amountMinor)} at ${escapeHtml(transfer.rate || "1")} · ${transfer.state}</span>
             ${transferPercent > 0 ? `<span>Commission: ${escapeHtml(formatRate(transferPercent))}% (${money(transfer.sourceCurrency || transfer.currency, transferCommission)})</span>` : ""}
@@ -9845,7 +10070,9 @@
         </div>
       `;
       }).join("");
-      els.metricApprovals.textContent = String(state.transfers.filter((item) => item.state === "Pending Approval").length);
+      els.metricApprovals.textContent = String(actor?.role === "Master"
+        ? state.transfers.filter((item) => item.state === "Pending Approval").length
+        : state.transfers.filter((item) => item.state === "Pending Acceptance" && (item.toActorId === actor?.id || item.to === actor?.name)).length);
     }
 
     function archivedOrderAmount(archive, order) {
@@ -10371,6 +10598,120 @@
       return transfer.from === master.name || transfer.initiatedBy === master.name;
     }
 
+    function transferArrivedAtMaster(transfer) {
+      const master = masterActor();
+      if (!transfer || !master) return false;
+      return (transfer.toActorId && transfer.toActorId === master.id) || transfer.to === master.name;
+    }
+
+    function forwardTransferTargets(transfer) {
+      const master = masterActor();
+      return activeActors().filter((actor) =>
+        actor.role !== "Master" &&
+        actor.id !== transfer?.fromActorId &&
+        actor.name !== transfer?.from &&
+        actor.id !== master?.id
+      );
+    }
+
+    function forwardTransferDraft(transfer) {
+      const targets = forwardTransferTargets(transfer);
+      const current = forwardTransferDrafts.get(transfer.id);
+      const receiver = targets.find((actor) => actor.id === current?.toActorId) || targets[0];
+      const currencies = actorTransferReceiveCurrencies(receiver);
+      const sourceMajor = majorAmount(transfer.sourceAmountMinor || 0, transfer.sourceCurrency || transfer.currency);
+      const defaultRate = Number(transfer.rate) > 0 ? Number(transfer.rate) : 1;
+      const defaultCurrency = currencies[0] || receiver?.currency || transfer.currency;
+      const draft = current
+        ? {
+            ...current,
+            toActorId: receiver?.id || "",
+            payoutCurrency: currencies.includes(current.payoutCurrency) ? current.payoutCurrency : defaultCurrency
+          }
+        : {
+            toActorId: receiver?.id || "",
+            payoutCurrency: defaultCurrency,
+            rate: formatRate(defaultRate),
+            payoutAmount: formatMajorInput(sourceMajor * defaultRate, defaultCurrency),
+            commissionPercent: formatRate(Math.max(0, transferCommissionPercent(transfer)))
+          };
+      forwardTransferDrafts.set(transfer.id, draft);
+      return { draft, receiver, targets, currencies, sourceMajor };
+    }
+
+    function forwardTransferOnce(transfer, draft, actorName = "Master") {
+      if (!transfer || transfer.state !== "Pending Approval" || transfer.journal || !transferArrivedAtMaster(transfer) || transferWasSentByMaster(transfer) || processingTransferIds.has(transfer.id)) return false;
+      const receiver = forwardTransferTargets(transfer).find((actor) => actor.id === draft?.toActorId);
+      const payoutCurrency = draft?.payoutCurrency;
+      const rate = Number(draft?.rate || 0);
+      const payoutMajor = Number(draft?.payoutAmount || 0);
+      const commissionPercent = Number(draft?.commissionPercent || 0);
+      if (!receiver || !actorTransferReceiveCurrencies(receiver).includes(payoutCurrency) || rate <= 0 || payoutMajor <= 0 || commissionPercent < 0) return false;
+      processingTransferIds.add(transfer.id);
+      try {
+        const forwardedAt = new Date().toISOString();
+        transfer.requestedTo ||= transfer.to;
+        transfer.requestedToActorId ||= transfer.toActorId || "";
+        transfer.requestedCurrency ||= transfer.currency;
+        transfer.requestedAmountMinor ||= Number(transfer.amountMinor || 0);
+        transfer.requestedRate ||= transfer.rate;
+        transfer.requestedCommissionPercent = Number.isFinite(Number(transfer.requestedCommissionPercent))
+          ? Number(transfer.requestedCommissionPercent)
+          : transferCommissionPercent(transfer);
+        transfer.requestedCommissionMinor = Number.isFinite(Number(transfer.requestedCommissionMinor))
+          ? Number(transfer.requestedCommissionMinor)
+          : transferCommissionMinor(transfer);
+        transfer.to = receiver.name;
+        transfer.toActorId = receiver.id;
+        transfer.currency = payoutCurrency;
+        transfer.amountMinor = minorFromMajor(payoutMajor, payoutCurrency);
+        transfer.rate = rate;
+        transfer.commissionPercent = commissionPercent;
+        transfer.commissionMinor = Math.round(Number(transfer.sourceAmountMinor || 0) * commissionPercent / 100);
+        transfer.state = "Pending Acceptance";
+        transfer.forwardedBy = actorName;
+        transfer.forwardedAt = forwardedAt;
+        transfer.approvedAt = "";
+        transfer.paidOutAt = "";
+        transfer.returnedAt = "";
+        transfer.rejectedAt = "";
+        transfer.rejectedBy = "";
+        transfer.updatedAt = forwardedAt;
+        forwardTransferDrafts.delete(transfer.id);
+        notifyEvent("Transfer forwarded", `${transfer.id} sent to ${receiver.name} for acceptance.`);
+        return true;
+      } finally {
+        processingTransferIds.delete(transfer.id);
+      }
+    }
+
+    function respondToForwardedTransferOnce(transfer, actor, accept) {
+      const isReceiver = transfer && actor && (transfer.toActorId === actor.id || transfer.to === actor.name);
+      if (!transfer || transfer.state !== "Pending Acceptance" || transfer.journal || !isReceiver || actor.role === "Master" || processingTransferIds.has(transfer.id)) return false;
+      processingTransferIds.add(transfer.id);
+      try {
+        const respondedAt = new Date().toISOString();
+        if (accept) {
+          transfer.state = "Approved";
+          transfer.acceptedBy = actor.name;
+          transfer.acceptedAt = respondedAt;
+          transfer.approvedAt = respondedAt;
+          transfer.updatedAt = respondedAt;
+          postTransferLedger(transfer);
+          notifyEvent("Transfer accepted", `${transfer.id} was accepted by ${actor.name}.`);
+        } else {
+          transfer.state = "Rejected";
+          transfer.rejectedBy = actor.name;
+          transfer.rejectedAt = respondedAt;
+          transfer.updatedAt = respondedAt;
+          notifyEvent("Transfer rejected", `${transfer.id} was rejected by ${actor.name}.`);
+        }
+        return true;
+      } finally {
+        processingTransferIds.delete(transfer.id);
+      }
+    }
+
     function transferArchivedForActor(transfer, actor) {
       if (!transfer || !actor) return false;
       return (transfer.archivedActorIds || []).includes(actor.id) ||
@@ -10450,7 +10791,9 @@
         transfer.returnedAt = "";
         transfer.rejectedAt = "";
         postTransferLedger(transfer);
-        notifyEvent("New transfer", `${transfer.id} approved by ${actorName} and sent to ${transfer.to}.`);
+        notifyEvent("New transfer", transferArrivedAtMaster(transfer)
+          ? `${transfer.id} approved by ${actorName} and added to Master balance.`
+          : `${transfer.id} approved by ${actorName} and sent to ${transfer.to}.`);
         return true;
       } finally {
         processingTransferIds.delete(transfer.id);
@@ -10961,14 +11304,16 @@
       }
       const proofUpload = pendingProofUploads.get(orderId);
       if (proofUpload?.status === "error") {
-        showOrderError("Could not attach the payment proof. Try another screenshot.");
+        showOrderError("Could not attach the payment proof. Try another supported file.");
         return;
       }
-      if (proofFile && proofFile.size > maxProofFileBytes) {
-        if (orderId) pendingProofFiles.delete(orderId);
-        if (orderId) pendingProofUploads.delete(orderId);
-        showOrderError(`Payment proof is too large. Use an image under ${Math.round(maxProofFileBytes / 1024 / 1024)} MB.`);
-        return;
+      if (proofFile) {
+        try {
+          validatePaymentProofFile(proofFile);
+        } catch (error) {
+          showOrderError(error.message || "The payment attachment could not be prepared.");
+          return;
+        }
       }
       confirmAction("Mark this order as paid?", () => {
         markOrderPaidFromButton(payButton);
@@ -11012,7 +11357,7 @@
         processingOrderIds.delete(order.id);
         payButton.disabled = false;
         if (progress) progress.textContent = "";
-        showOrderError(error.message || "Could not attach the payment proof. Try another screenshot.");
+        showOrderError(error.message || "Could not attach the payment proof. Try another supported file.");
         return;
       }
       if (progress) progress.textContent = "Posting payment...";
@@ -11595,6 +11940,57 @@
       updateTransferConversion("rate", false);
     });
 
+    els.transferList.addEventListener("input", (event) => {
+      const input = event.target;
+      const transferId = input?.dataset?.id || "";
+      if (!transferId || !input.matches(".forward-transfer-rate, .forward-transfer-payout, .forward-transfer-percent")) return;
+      const transfer = state.transfers.find((item) => item.id === transferId);
+      if (!transfer) return;
+      const context = forwardTransferDraft(transfer);
+      const draft = { ...context.draft };
+      const form = input.closest(".forward-transfer-form");
+      if (input.matches(".forward-transfer-rate")) {
+        draft.rate = input.value;
+        const rate = Number(input.value || 0);
+        if (rate > 0) {
+          draft.payoutAmount = formatMajorInput(context.sourceMajor * rate, draft.payoutCurrency);
+          const payoutInput = form?.querySelector(".forward-transfer-payout");
+          if (payoutInput) payoutInput.value = draft.payoutAmount;
+        }
+      } else if (input.matches(".forward-transfer-payout")) {
+        draft.payoutAmount = input.value;
+        const payout = Number(String(input.value).replace(/,/g, "")) || 0;
+        if (payout > 0 && context.sourceMajor > 0) {
+          draft.rate = formatRate(payout / context.sourceMajor);
+          const rateInput = form?.querySelector(".forward-transfer-rate");
+          if (rateInput) rateInput.value = draft.rate;
+        }
+      } else {
+        draft.commissionPercent = input.value;
+      }
+      forwardTransferDrafts.set(transferId, draft);
+    });
+
+    els.transferList.addEventListener("change", (event) => {
+      const select = event.target;
+      const transferId = select?.dataset?.id || "";
+      if (!transferId || !select.matches(".forward-transfer-actor, .forward-transfer-currency")) return;
+      const transfer = state.transfers.find((item) => item.id === transferId);
+      if (!transfer) return;
+      const context = forwardTransferDraft(transfer);
+      const draft = { ...context.draft };
+      if (select.matches(".forward-transfer-actor")) {
+        draft.toActorId = select.value;
+        const receiver = forwardTransferTargets(transfer).find((actor) => actor.id === draft.toActorId);
+        const currencies = actorTransferReceiveCurrencies(receiver);
+        draft.payoutCurrency = currencies[0] || receiver?.currency || transfer.currency;
+      } else {
+        draft.payoutCurrency = select.value;
+      }
+      forwardTransferDrafts.set(transferId, draft);
+      renderTransfers();
+    });
+
     els.ledgerJournalForm.addEventListener("input", (event) => {
       els.ledgerJournalError.classList.remove("visible");
       if (event.target === els.ledgerJournalSourceAmount) {
@@ -12107,21 +12503,30 @@
       const amountMinor = parseMoney(els.transferPayoutAmount.value, currency);
       const commissionMinor = Math.round(sourceAmountMinor * commissionPercent / 100);
       const remarks = els.transferRemarks.value.trim();
+      const sendingActor = activeActors().find((item) => item.name === from);
       const receivingActor = activeActors().find((item) => item.name === to);
+      const sendingCurrencies = actorTransferCurrencies(sendingActor);
       const receivingCurrencies = actorTransferReceiveCurrencies(receivingActor);
+      const sourceCurrencyAllowed = sendingCurrencies.includes(sourceCurrency);
       const payoutCurrencyAllowed = receivingCurrencies.includes(currency);
-      const invalid = !from || !to || !sourceCurrency || !currency || !receivingActor || !payoutCurrencyAllowed || from === to || sourceAmountMinor <= 0 || amountMinor <= 0 || rate <= 0 || commissionPercent < 0;
-      els.transferError.textContent = from === to
-        ? "Sender and receiver must be different."
-        : !sourceCurrency || !currency
-          ? "Choose both transfer currencies."
-          : !receivingActor
-            ? "Choose a receiving actor."
-            : !payoutCurrencyAllowed
-              ? `${receivingActor.name} can only receive this transfer in ${receivingActor.currency}.`
-              : commissionPercent < 0
-                ? "Enter a percentage of zero or more."
-                : "Enter transfer amount, rate, payout amount, and choose both actors.";
+      const invalid = !from || !to || !sourceCurrency || !currency || !sendingActor || !sourceCurrencyAllowed || !receivingActor || !payoutCurrencyAllowed || from === to || sourceAmountMinor <= 0 || amountMinor <= 0 || rate <= 0 || commissionPercent < 0;
+      if (from === to) {
+        els.transferError.textContent = "Sender and receiver must be different.";
+      } else if (!sourceCurrency || !currency) {
+        els.transferError.textContent = "Choose both transfer currencies.";
+      } else if (!sendingActor) {
+        els.transferError.textContent = "Choose a sending actor.";
+      } else if (!sourceCurrencyAllowed) {
+        els.transferError.textContent = `${sendingActor.name} can only send this transfer in ${sendingActor.currency}.`;
+      } else if (!receivingActor) {
+        els.transferError.textContent = "Choose a receiving actor.";
+      } else if (!payoutCurrencyAllowed) {
+        els.transferError.textContent = `${receivingActor.name} can only receive this transfer in ${receivingActor.currency}.`;
+      } else if (commissionPercent < 0) {
+        els.transferError.textContent = "Enter a percentage of zero or more.";
+      } else {
+        els.transferError.textContent = "Enter transfer amount, rate, payout amount, and choose both actors.";
+      }
       els.transferError.classList.toggle("visible", invalid);
       if (invalid) return;
 
@@ -12130,7 +12535,9 @@
       const transfer = {
         id: state.editingTransferId || nextTransferId(),
         from,
+        fromActorId: sendingActor.id,
         to,
+        toActorId: receivingActor.id,
         sourceCurrency,
         currency,
         amountMinor,
@@ -12375,7 +12782,7 @@
       if (transferReceiveCurrencyButton) {
         if (selectedActor()?.role !== "Master") return;
         const actor = state.actors.find((item) => item.id === transferReceiveCurrencyButton.dataset.id);
-        if (!actor || actor.role === "Master" || actor.role === "Special Broker") return;
+        if (!actor || actor.role === "Master") return;
         actor.transferReceiveMultiCurrencyEnabled = actor.transferReceiveMultiCurrencyEnabled !== true;
         transferConversionTouches = [];
         renderAll();
@@ -12473,7 +12880,7 @@
         const percentInput = wrapper?.querySelector(".special-agent-percent");
         const divider = Number(input?.value || 0);
         const percent = Number(percentInput?.value || 0);
-        if (!actor || !actorHasSpecialPayout(actor.role) || !actorTransferCurrencies(actor).includes(currency)) return;
+        if (!actor || !actorHasSpecialPayout(actor.role) || !actorPayoutCurrencies(actor).includes(currency)) return;
         if (!Number.isFinite(divider) || divider <= 0) {
           input?.setCustomValidity("Enter a divisor greater than zero.");
           input?.reportValidity();
@@ -12501,7 +12908,7 @@
         if (selectedActor()?.role !== "Master") return;
         const actor = state.actors.find((item) => item.id === toggleSpecialDividerButton.dataset.id);
         const currency = toggleSpecialDividerButton.dataset.currency;
-        if (!actor || !actorHasSpecialPayout(actor.role) || !actorTransferCurrencies(actor).includes(currency)) return;
+        if (!actor || !actorHasSpecialPayout(actor.role) || !actorPayoutCurrencies(actor).includes(currency)) return;
         const wrapper = toggleSpecialDividerButton.closest(".special-divider-currency");
         const input = wrapper?.querySelector(".special-agent-divider");
         const percentInput = wrapper?.querySelector(".special-agent-percent");
@@ -12928,7 +13335,59 @@
         const transfer = state.transfers.find((item) => item.id === reverseTransferButton.dataset.id);
         if (!transfer || actor?.role !== "Master" || !transferWasSentByMaster(transfer)) return;
         confirmAction(`Reverse transfer ${transfer.id}? This will post an opposite ledger journal.`, async () => {
-          if (!reverseMasterTransferOnce(transfer, actor.name)) return;
+          const currentTransfer = state.transfers.find((item) => item.id === transfer.id);
+          if (!reverseMasterTransferOnce(currentTransfer, actor.name)) return;
+          renderAll();
+          await saveStateNow();
+        });
+        return;
+      }
+
+      const forwardTransferButton = event.target.closest(".forward-transfer-submit");
+      if (forwardTransferButton) {
+        const actor = selectedActor();
+        const transfer = state.transfers.find((item) => item.id === forwardTransferButton.dataset.id);
+        if (!transfer || actor?.role !== "Master" || transfer.state !== "Pending Approval" || !transferArrivedAtMaster(transfer)) return;
+        const context = forwardTransferDraft(transfer);
+        const receiver = context.targets.find((item) => item.id === context.draft.toActorId);
+        const rate = Number(context.draft.rate || 0);
+        const payoutMajor = Number(String(context.draft.payoutAmount || "").replace(/,/g, "")) || 0;
+        const percent = Number(context.draft.commissionPercent || 0);
+        if (!receiver || !context.currencies.includes(context.draft.payoutCurrency) || rate <= 0 || payoutMajor <= 0 || percent < 0) {
+          notifyEvent("Cannot forward transfer", "Choose a receiving Actor, currency, positive rate and payout, and a percentage of zero or more.");
+          return;
+        }
+        confirmAction(`Forward ${transfer.id} to ${receiver.name} for acceptance?`, async () => {
+          const currentTransfer = state.transfers.find((item) => item.id === transfer.id);
+          if (!forwardTransferOnce(currentTransfer, { ...context.draft, payoutAmount: payoutMajor }, actor.name)) return;
+          renderAll();
+          await saveStateNow();
+        });
+        return;
+      }
+
+      const acceptForwardedTransferButton = event.target.closest(".accept-forwarded-transfer");
+      if (acceptForwardedTransferButton) {
+        const actor = selectedActor();
+        const transfer = state.transfers.find((item) => item.id === acceptForwardedTransferButton.dataset.id);
+        if (!transfer || !actor || transfer.state !== "Pending Acceptance") return;
+        confirmAction(`Accept ${transfer.id} from ${transfer.from}?`, async () => {
+          const currentTransfer = state.transfers.find((item) => item.id === transfer.id);
+          if (!respondToForwardedTransferOnce(currentTransfer, actor, true)) return;
+          renderAll();
+          await saveStateNow();
+        });
+        return;
+      }
+
+      const rejectForwardedTransferButton = event.target.closest(".reject-forwarded-transfer");
+      if (rejectForwardedTransferButton) {
+        const actor = selectedActor();
+        const transfer = state.transfers.find((item) => item.id === rejectForwardedTransferButton.dataset.id);
+        if (!transfer || !actor || transfer.state !== "Pending Acceptance") return;
+        confirmAction(`Reject forwarded transfer ${transfer.id}?`, async () => {
+          const currentTransfer = state.transfers.find((item) => item.id === transfer.id);
+          if (!respondToForwardedTransferOnce(currentTransfer, actor, false)) return;
           renderAll();
           await saveStateNow();
         });

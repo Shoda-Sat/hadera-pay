@@ -4,10 +4,12 @@ import type {
   ChatConversationRecord,
   Currency,
   InternalTransferDraft,
+  InternalTransferForwardDraft,
   InternalTransferRecord,
   LedgerLine,
   MasterBankEntryRecord,
   OrderRecord,
+  PreparedPaymentProof,
   RateSetting,
   ReceivableRecord,
   UserSession,
@@ -64,23 +66,24 @@ export function actingSessionFor(loginSession: UserSession, actor: ActorRecord |
 export function actorTransferCurrencies(actor: ActorRecord | undefined): Currency[] {
   if (!actor) return [];
   if (actor.role === "Master") return supportedCurrencies;
-  if (actorHasSpecialPayout(actor.role)) {
-    return Array.from(new Set([actor.currency, ...(actor.workingCurrencies || [])]))
-      .filter((currency): currency is Currency => supportedCurrencies.includes(currency as Currency));
-  }
+  if (actor.transferReceiveMultiCurrencyEnabled === true) return supportedCurrencies;
   return [actor.currency];
 }
 
 export function actorTransferReceiveCurrencies(actor: ActorRecord | undefined): Currency[] {
   if (!actor) return [];
-  if (actor.role === "Master" || actor.role === "Special Broker" || actor.transferReceiveMultiCurrencyEnabled === true) {
+  if (actor.role === "Master" || actor.transferReceiveMultiCurrencyEnabled === true) {
     return supportedCurrencies;
   }
   return [actor.currency];
 }
 
 export function actorCanPayoutCurrency(actor: ActorRecord | undefined, currency: Currency): boolean {
-  return Boolean(actor && actorCanReceivePayouts(actor.role) && actorTransferCurrencies(actor).includes(currency));
+  if (!actor || !actorCanReceivePayouts(actor.role)) return false;
+  if (actorHasSpecialPayout(actor.role)) {
+    return Array.from(new Set([actor.currency, ...(actor.workingCurrencies || [])])).includes(currency);
+  }
+  return actor.currency === currency;
 }
 
 export function orderSortForSession(session: UserSession): (left: OrderRecord, right: OrderRecord) => number {
@@ -421,7 +424,33 @@ export async function cancelOrder(orderId: string): Promise<WorkspaceState> {
   });
 }
 
-export async function markOrderPaid(orderId: string, actorId: string, proof?: { dataUri: string; fileName: string }): Promise<WorkspaceState> {
+function appendPaymentProofToMaster(state: WorkspaceState, order: OrderRecord, actor: ActorRecord, proof: PreparedPaymentProof, postedAt: string): void {
+  ensureDirectChats(state);
+  const master = activeActors(state).find((item) => item.role === "Master");
+  const chat = master && state.chatConversations.find((item) =>
+    item.type === "direct" && item.members.includes(master.name) && item.members.includes(actor.name)
+  );
+  if (!master || !chat) throw new Error("The payment file could not be forwarded because the Master chat is unavailable.");
+  const displayNumber = proof.orderNumber || order.agentOrderNumbers?.[actor.name] || order.agentOrderNumber || brokerOrderNumber(order);
+  const payoutCurrency = order.payoutCurrency || order.sourceCurrency;
+  const payoutAmount = majorFromMinor(Number(order.payoutAmountMinor || order.sourceAmountMinor || 0), payoutCurrency);
+  chat.messages.push({
+    id: nextMessageId(state),
+    from: actor.name,
+    text: `Payment proof for order ${displayNumber}. Paid ${compactAmount(payoutCurrency, payoutAmount)}.`,
+    kind: proof.mediaType === "image" ? "photo" : "file",
+    media: proof.dataUri,
+    fileName: proof.fileName,
+    mimeType: proof.mimeType,
+    orderNumber: displayNumber,
+    replyTo: "",
+    reactions: {},
+    readBy: [actor.name],
+    createdAt: postedAt
+  });
+}
+
+export async function markOrderPaid(orderId: string, actorId: string, proof?: PreparedPaymentProof): Promise<WorkspaceState> {
   if (processingOrderIds.has(orderId)) throw new Error("This payment is already being posted.");
   processingOrderIds.add(orderId);
   try {
@@ -448,7 +477,10 @@ export async function markOrderPaid(orderId: string, actorId: string, proof?: { 
     order.updatedAt = postedAt;
     order.returnedBy = "";
     order.returnedReason = "";
-    if (proof) order.paymentProof = { ...proof, attachedAt: postedAt };
+    if (proof) {
+      appendPaymentProofToMaster(state, order, actor, proof, postedAt);
+      order.paymentProof = { ...proof, dataUri: "", attachedAt: postedAt };
+    }
     freezeIncome(state, order, lines);
     state.ledger.unshift(...lines);
     });
@@ -535,10 +567,13 @@ function transferDetails(transfer: InternalTransferRecord): string {
   const commission = Number(transfer.commissionMinor || 0);
   return [
     `${transfer.from} -> ${transfer.to}`,
+    transfer.forwardedAt && transfer.requestedTo ? `Originally sent to ${transfer.requestedTo}` : "",
     `Source: ${compactAmount(transfer.sourceCurrency, majorFromMinor(transfer.sourceAmountMinor, transfer.sourceCurrency))}`,
     `Payout: ${compactAmount(transfer.currency, majorFromMinor(transfer.amountMinor, transfer.currency))}`,
     `Rate: ${transfer.rate || 1}`,
     commission > 0 ? `Commission: ${compactAmount(transfer.sourceCurrency, majorFromMinor(commission, transfer.sourceCurrency))}` : "",
+    transfer.forwardedBy ? `Forwarded by: ${transfer.forwardedBy}` : "",
+    transfer.acceptedBy ? `Accepted by: ${transfer.acceptedBy}` : "",
     transfer.remarks ? `Remarks: ${transfer.remarks}` : ""
   ].filter(Boolean).join(" - ");
 }
@@ -673,14 +708,19 @@ export async function createInternalTransfer(session: UserSession, draft: Intern
     const to = activeActors(state).find((actor) => actor.id === draft.toActorId);
     if (!from || !to || from.id === to.id) throw new Error("Choose a receiving actor.");
     if (!transferTargetsFor(session, state).some((actor) => actor.id === to.id)) throw new Error("This transfer destination is not permitted.");
+    if (!actorTransferCurrencies(from).includes(draft.sourceCurrency)) {
+      throw new Error(`${from.name} can only send transfers in ${from.currency}.`);
+    }
     if (!actorTransferReceiveCurrencies(to).includes(draft.payoutCurrency)) {
       throw new Error(`${to.name} can only receive this transfer in ${to.currency}.`);
     }
     const sourceMajor = parseAmount(draft.sourceAmount);
     const rate = Number(draft.rate || 0);
     const payoutMajor = parseAmount(draft.payoutAmount) || sourceMajor * rate;
-    const commissionPercent = Math.max(0, Number(draft.commissionPercent || 0));
-    if (sourceMajor <= 0 || payoutMajor <= 0 || rate <= 0) throw new Error("Enter source amount, payout amount, and rate greater than zero.");
+    const commissionPercent = Number(draft.commissionPercent || 0);
+    if (sourceMajor <= 0 || payoutMajor <= 0 || rate <= 0 || !Number.isFinite(commissionPercent) || commissionPercent < 0) {
+      throw new Error("Enter source amount, payout amount, rate, and a percentage of zero or more.");
+    }
     const now = new Date().toISOString();
     const transfer: InternalTransferRecord = {
       id: nextTransferId(state),
@@ -705,6 +745,106 @@ export async function createInternalTransfer(session: UserSession, draft: Intern
     state.transfers.unshift(transfer);
     syncMasterBankAccount(state);
   });
+}
+
+export async function forwardInternalTransfer(
+  session: UserSession,
+  transferId: string,
+  draft: InternalTransferForwardDraft
+): Promise<WorkspaceState> {
+  if (!isMasterView(session)) throw new Error("Only Master can forward a pending transfer.");
+  if (processingTransferIds.has(transferId)) throw new Error("This transfer is already being processed.");
+  processingTransferIds.add(transferId);
+  try {
+    return await updateWorkspaceState((state) => {
+      const transfer = state.transfers.find((item) => item.id === transferId);
+      const master = actorForSession(session, state);
+      const receiver = activeActors(state).find((actor) => actor.id === draft.toActorId);
+      const arrivedAtMaster = Boolean(master && transfer && (transfer.toActorId === master.id || transfer.to === master.name));
+      if (!transfer || transfer.state !== "Pending Approval" || transfer.journal || !arrivedAtMaster || transfer.fromActorId === master?.id || transfer.from === master?.name) {
+        throw new Error("Only an Actor transfer awaiting Master can be forwarded.");
+      }
+      if (!receiver || receiver.role === "Master" || receiver.id === transfer.fromActorId || receiver.name === transfer.from) {
+        throw new Error("Choose another receiving Actor.");
+      }
+      if (!actorTransferReceiveCurrencies(receiver).includes(draft.payoutCurrency)) {
+        throw new Error(`${receiver.name} can only receive this transfer in ${receiver.currency}.`);
+      }
+      const sourceMajor = majorFromMinor(transfer.sourceAmountMinor, transfer.sourceCurrency);
+      const rate = Number(draft.rate || 0);
+      const payoutMajor = parseAmount(draft.payoutAmount) || sourceMajor * rate;
+      const commissionPercent = Number(draft.commissionPercent || 0);
+      if (sourceMajor <= 0 || rate <= 0 || payoutMajor <= 0 || !Number.isFinite(commissionPercent) || commissionPercent < 0) {
+        throw new Error("Enter a receiving Actor, payout currency, rate, payout amount, and percentage of zero or more.");
+      }
+      const now = new Date().toISOString();
+      transfer.requestedTo = transfer.requestedTo || transfer.to;
+      transfer.requestedToActorId = transfer.requestedToActorId || transfer.toActorId;
+      transfer.requestedCurrency = transfer.requestedCurrency || transfer.currency;
+      transfer.requestedAmountMinor = Number(transfer.requestedAmountMinor || transfer.amountMinor);
+      transfer.requestedRate = transfer.requestedRate || transfer.rate;
+      transfer.requestedCommissionPercent = Number.isFinite(Number(transfer.requestedCommissionPercent))
+        ? Number(transfer.requestedCommissionPercent)
+        : Number(transfer.commissionPercent || 0);
+      transfer.requestedCommissionMinor = Number.isFinite(Number(transfer.requestedCommissionMinor))
+        ? Number(transfer.requestedCommissionMinor)
+        : Number(transfer.commissionMinor || 0);
+      transfer.to = receiver.name;
+      transfer.toActorId = receiver.id;
+      transfer.currency = draft.payoutCurrency;
+      transfer.amountMinor = minorFromMajor(payoutMajor, draft.payoutCurrency);
+      transfer.rate = rate;
+      transfer.commissionPercent = commissionPercent;
+      transfer.commissionMinor = minorFromMajor(sourceMajor * commissionPercent / 100, transfer.sourceCurrency);
+      transfer.state = "Pending Acceptance";
+      transfer.forwardedBy = session.actorName;
+      transfer.forwardedAt = now;
+      transfer.approvedAt = "";
+      transfer.paidOutAt = "";
+      transfer.returnedAt = "";
+      transfer.rejectedAt = "";
+      transfer.rejectedBy = "";
+      transfer.updatedAt = now;
+    });
+  } finally {
+    processingTransferIds.delete(transferId);
+  }
+}
+
+export async function respondToForwardedTransfer(
+  session: UserSession,
+  transferId: string,
+  accept: boolean
+): Promise<WorkspaceState> {
+  if (processingTransferIds.has(transferId)) throw new Error("This transfer is already being processed.");
+  processingTransferIds.add(transferId);
+  try {
+    return await updateWorkspaceState((state) => {
+      const transfer = state.transfers.find((item) => item.id === transferId);
+      const actor = actorForSession(session, state);
+      const isReceiver = Boolean(actor && transfer && (transfer.toActorId === actor.id || transfer.to === actor.name));
+      if (!transfer || !actor || transfer.state !== "Pending Acceptance" || transfer.journal || !isReceiver || actor.role === "Master") {
+        throw new Error("Only the receiving Actor can respond to this forwarded transfer.");
+      }
+      const now = new Date().toISOString();
+      if (accept) {
+        transfer.state = "Approved";
+        transfer.acceptedBy = actor.name;
+        transfer.acceptedAt = now;
+        transfer.approvedAt = now;
+        transfer.updatedAt = now;
+        postTransferLedger(state, transfer);
+      } else {
+        transfer.state = "Rejected";
+        transfer.rejectedBy = actor.name;
+        transfer.rejectedAt = now;
+        transfer.updatedAt = now;
+      }
+      syncMasterBankAccount(state);
+    });
+  } finally {
+    processingTransferIds.delete(transferId);
+  }
 }
 
 export async function setTransferState(transferId: string, action: "approve" | "return" | "reject", actorName: string): Promise<WorkspaceState> {
@@ -834,7 +974,7 @@ export async function updateActorOrderSettings(actorId: string, input: {
     const actor = state.actors.find((item) => item.id === actorId);
     if (!actor || actor.role === "Master") throw new Error("Choose an actor.");
     if (typeof input.orderMultiCurrencyEnabled === "boolean") actor.orderMultiCurrencyEnabled = input.orderMultiCurrencyEnabled;
-    if (typeof input.transferReceiveMultiCurrencyEnabled === "boolean" && actor.role !== "Special Broker") {
+    if (typeof input.transferReceiveMultiCurrencyEnabled === "boolean") {
       actor.transferReceiveMultiCurrencyEnabled = input.transferReceiveMultiCurrencyEnabled;
     }
     if (input.visibility) actor.orderVisibilityPermissions = { ...(actor.orderVisibilityPermissions || {}), ...input.visibility };

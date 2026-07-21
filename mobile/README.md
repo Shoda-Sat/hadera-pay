@@ -23,12 +23,13 @@ By default the app talks to `https://haderapay.com`. To point a build at another
 - Saved sender and receiver details for Brokers and Special Brokers.
 - Receiver City is saved with receiver contacts, and Credit Reminder notes stay private to the borrowing actor's Receivables record.
 - Contact suggestions dismiss when a new name is typed, and returned orders can be corrected and resubmitted with their original number.
-- Master order forwarding, payer payment confirmation, optional proof photos, and void requests.
+- Master order forwarding, payer payment confirmation, and optional JPG, PNG, PDF, or Excel proof attachments with automatic image compression and order-number labeling.
 - Color-coded Orderbook and Pending & Cancelled statuses for assigned, returned, cancelled, and voided orders.
 - Dashboard Orderbook uses the same status colors as the full Orderbook.
 - Assignment messages delivered to payout actors, with replies, reactions, and Master message forwarding in chat.
 - Master Pending & Cancelled order view with direct payout-actor reminders.
-- Internal transfers with approval, plus Master journal and withdrawal tools.
+- Internal transfers with approval, Master forwarding with currency conversion and percentage terms, receiving-Actor acceptance, plus Master journal and withdrawal tools.
+- Actor transfers use each Actor's base currency unless Master grants multi-currency transfer access.
 - Consolidated workspace search returns one permitted result per transaction and participant instead of duplicate order, ledger, receivable, and Report rows.
 - Account-selectable inactivity logout from 10 seconds to 2 hours, including offline-cache expiry, plus server lockout warnings after repeated failed logins.
 - Ledger and Report transactions can be sorted by date or Order/Transfer number.

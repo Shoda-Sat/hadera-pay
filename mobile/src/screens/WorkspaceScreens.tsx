@@ -1,14 +1,17 @@
-import * as ImagePicker from "expo-image-picker";
+import * as DocumentPicker from "expo-document-picker";
+import * as FileSystem from "expo-file-system";
+import * as ImageManipulator from "expo-image-manipulator";
+import * as Sharing from "expo-sharing";
 import React, { useEffect, useRef, useState } from "react";
-import { Alert, Pressable, ScrollView, Share, StyleSheet, Text, TextInput, View } from "react-native";
+import { Alert, Image, Pressable, ScrollView, Share, StyleSheet, Text, TextInput, View } from "react-native";
 import {
   Check,
   ChevronDown,
   ChevronUp,
   Forward as ForwardIcon,
   Heart,
-  ImagePlus,
   MessageSquare,
+  Paperclip,
   Pencil,
   Plus,
   RefreshCw,
@@ -52,6 +55,7 @@ import {
   createManagedActor,
   deleteChatGroup,
   forwardChatMessage,
+  forwardInternalTransfer,
   fundMasterBankAccount,
   isMasterView,
   ledgerLineIsForVoidedOrder,
@@ -67,6 +71,7 @@ import {
   remindOrderActor,
   rejectOrderVoid,
   requestOrderVoid,
+  respondToForwardedTransfer,
   returnOrder,
   sendChatMessage,
   setTransferState,
@@ -87,10 +92,12 @@ import type {
   ChatMessageRecord,
   Currency,
   InternalTransferDraft,
+  InternalTransferForwardDraft,
   InviteRecord,
   OrderRecord,
   OwnerMasterRecord,
   OwnerPlan,
+  PreparedPaymentProof,
   UserSession,
   WorkspaceState
 } from "../types";
@@ -129,7 +136,7 @@ function ToggleChoice({ label, checked, onPress, disabled = false }: { label: st
 function tone(value: string): "neutral" | "good" | "warn" | "danger" {
   if (["Paid", "Approved"].includes(value)) return "good";
   if (["Voided", "Cancelled", "Rejected"].includes(value)) return "danger";
-  if (["Assigned", "Pending Forward", "Pending Approval", "Void Requested", "Returned"].includes(value)) return "warn";
+  if (["Assigned", "Pending Forward", "Pending Approval", "Pending Acceptance", "Void Requested", "Returned"].includes(value)) return "warn";
   return "neutral";
 }
 
@@ -147,6 +154,118 @@ function orderNumber(order: OrderRecord, session: UserSession): string {
     return order.agentOrderNumbers?.[session.actorName] || order.agentOrderNumber || order.brokerOrderNumber || order.id;
   }
   return order.brokerOrderNumber || order.id;
+}
+
+const paymentProofImageTargetBytes = 1024 * 1024;
+const maxPaymentProofImageSourceBytes = 24 * 1024 * 1024;
+const maxPaymentProofDocumentBytes = 8 * 1024 * 1024;
+const paymentProofMimeTypes = [
+  "image/jpeg",
+  "image/png",
+  "application/pdf",
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+];
+
+function paymentProofKind(name: string, mimeType = ""): "image" | "document" | "" {
+  const extension = name.toLowerCase().match(/\.[^.]+$/)?.[0] || "";
+  const mime = mimeType.toLowerCase();
+  if ([".jpg", ".jpeg", ".png"].includes(extension) || ["image/jpeg", "image/png"].includes(mime)) return "image";
+  if ([".pdf", ".xls", ".xlsx"].includes(extension) || paymentProofMimeTypes.slice(2).includes(mime)) return "document";
+  return "";
+}
+
+function paymentProofMimeType(name: string, mimeType = ""): string {
+  if (mimeType && mimeType !== "application/octet-stream") return mimeType;
+  const extension = name.toLowerCase().match(/\.[^.]+$/)?.[0] || "";
+  if ([".jpg", ".jpeg"].includes(extension)) return "image/jpeg";
+  if (extension === ".png") return "image/png";
+  if (extension === ".pdf") return "application/pdf";
+  if (extension === ".xls") return "application/vnd.ms-excel";
+  if (extension === ".xlsx") return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  return "application/octet-stream";
+}
+
+function safePaymentProofName(order: OrderRecord, session: UserSession, originalName: string, compressed: boolean): string {
+  const displayNumber = orderNumber(order, session).replace(/[^a-z0-9_-]+/gi, "-");
+  let name = (originalName || "payment-proof").trim().replace(/[^a-z0-9._-]+/gi, "-").replace(/^-+/, "") || "payment-proof";
+  if (compressed) name = `${name.replace(/\.[^.]+$/, "") || "payment-proof"}.jpg`;
+  return name.toLowerCase().startsWith(`${displayNumber.toLowerCase()}-`) ? name : `${displayNumber}-${name}`;
+}
+
+function base64ByteLength(base64: string): number {
+  const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor(base64.length * 3 / 4) - padding);
+}
+
+function imageDimensions(uri: string): Promise<{ width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    Image.getSize(uri, (width, height) => resolve({ width, height }), () => reject(new Error("The selected image could not be opened.")));
+  });
+}
+
+async function paymentProofAssetSize(asset: DocumentPicker.DocumentPickerAsset): Promise<number> {
+  if (Number.isFinite(Number(asset.size)) && Number(asset.size) > 0) return Number(asset.size);
+  const info = await FileSystem.getInfoAsync(asset.uri);
+  return info.exists && "size" in info ? Number(info.size || 0) : 0;
+}
+
+async function compressPaymentProofImage(asset: DocumentPicker.DocumentPickerAsset, onStatus: (status: string) => void): Promise<string> {
+  const dimensions = await imageDimensions(asset.uri);
+  let width = dimensions.width;
+  let height = dimensions.height;
+  const largestSide = Math.max(width, height);
+  if (largestSide > 2200) {
+    const scale = 2200 / largestSide;
+    width = Math.max(1, Math.round(width * scale));
+    height = Math.max(1, Math.round(height * scale));
+  }
+  let quality = 0.84;
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    onStatus(`Compressing image ${Math.min(95, Math.round((attempt + 1) / 12 * 100))}%`);
+    const result = await ImageManipulator.manipulateAsync(
+      asset.uri,
+      [{ resize: { width, height } }],
+      { compress: quality, format: ImageManipulator.SaveFormat.JPEG, base64: true }
+    );
+    if (!result.base64) throw new Error("The selected image could not be compressed.");
+    if (base64ByteLength(result.base64) <= paymentProofImageTargetBytes) return result.base64;
+    if (quality > 0.48) quality = Math.max(0.48, quality - 0.12);
+    else {
+      width = Math.max(1, Math.round(width * 0.8));
+      height = Math.max(1, Math.round(height * 0.8));
+      quality = 0.72;
+    }
+  }
+  throw new Error("The image could not be compressed below 1 MB. Choose a smaller image.");
+}
+
+async function preparePaymentProof(
+  order: OrderRecord,
+  session: UserSession,
+  asset: DocumentPicker.DocumentPickerAsset,
+  onStatus: (status: string) => void
+): Promise<PreparedPaymentProof> {
+  const kind = paymentProofKind(asset.name, asset.mimeType || "");
+  if (!kind) throw new Error("Attach a JPG, JPEG, PNG, PDF, XLS, or XLSX file.");
+  const size = await paymentProofAssetSize(asset);
+  if (kind === "image" && size > maxPaymentProofImageSourceBytes) throw new Error("Choose an image under 24 MB.");
+  if (kind === "document" && size > maxPaymentProofDocumentBytes) throw new Error("Choose a PDF or Excel file under 8 MB.");
+  const shouldCompress = kind === "image" && size > paymentProofImageTargetBytes;
+  onStatus(shouldCompress ? "Compressing image..." : "Preparing attachment...");
+  const base64 = shouldCompress
+    ? await compressPaymentProofImage(asset, onStatus)
+    : await FileSystem.readAsStringAsync(asset.uri, { encoding: FileSystem.EncodingType.Base64 });
+  if (!base64) throw new Error("The selected file could not be prepared.");
+  if (kind === "document" && base64ByteLength(base64) > maxPaymentProofDocumentBytes) throw new Error("Choose a PDF or Excel file under 8 MB.");
+  return {
+    dataUri: `data:${shouldCompress ? "image/jpeg" : paymentProofMimeType(asset.name, asset.mimeType || "")};base64,${base64}`,
+    fileName: safePaymentProofName(order, session, asset.name, shouldCompress),
+    mediaType: kind,
+    mimeType: shouldCompress ? "image/jpeg" : paymentProofMimeType(asset.name, asset.mimeType || ""),
+    orderNumber: orderNumber(order, session),
+    compressed: shouldCompress
+  };
 }
 
 function visibleOrders(session: UserSession, state: WorkspaceState): OrderRecord[] {
@@ -167,7 +286,9 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
   const [selectedAgent, setSelectedAgent] = useState<Record<string, string>>({});
   const [divider, setDivider] = useState<Record<string, string>>({});
   const [percent, setPercent] = useState<Record<string, string>>({});
-  const [proofs, setProofs] = useState<Record<string, { dataUri: string; fileName: string }>>({});
+  const [proofs, setProofs] = useState<Record<string, PreparedPaymentProof>>({});
+  const [proofStatus, setProofStatus] = useState<Record<string, string>>({});
+  const [preparingProof, setPreparingProof] = useState("");
   const [busy, setBusy] = useState("");
   const orders = visibleOrders(session, state);
 
@@ -183,25 +304,58 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
     }
   };
 
-  const chooseProof = async (orderId: string) => {
+  const chooseProof = async (order: OrderRecord) => {
     if (offline) return Alert.alert("Offline", "Reconnect before attaching a payment file.");
-    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permission.granted) return Alert.alert("Photo access", "Allow photo access to attach proof of payment.");
-    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], quality: 0.65, base64: true });
-    if (result.canceled) return;
-    const asset = result.assets[0];
-    if (Number(asset.fileSize || 0) > 8 * 1024 * 1024) return Alert.alert("File too large", "Choose a photo smaller than 8 MB.");
-    if (!asset.base64) return Alert.alert("Attachment", "The selected photo could not be prepared.");
-    setProofs((current) => ({
-      ...current,
-      [orderId]: { dataUri: `data:${asset.mimeType || "image/jpeg"};base64,${asset.base64}`, fileName: asset.fileName || `payment-${orderId}.jpg` }
-    }));
+    setPreparingProof(order.id);
+    setProofStatus((current) => ({ ...current, [order.id]: "Choose a payment file" }));
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: paymentProofMimeTypes,
+        copyToCacheDirectory: true,
+        multiple: false
+      });
+      if (result.canceled) {
+        setProofStatus((current) => ({ ...current, [order.id]: current[order.id] === "Choose a payment file" ? "" : current[order.id] }));
+        return;
+      }
+      const proof = await preparePaymentProof(order, session, result.assets[0], (status) => {
+        setProofStatus((current) => ({ ...current, [order.id]: status }));
+      });
+      setProofs((current) => ({ ...current, [order.id]: proof }));
+      setProofStatus((current) => ({
+        ...current,
+        [order.id]: `${proof.compressed ? "Compressed and ready" : "File ready"}: ${proof.fileName}`
+      }));
+    } catch (error) {
+      setProofs((current) => {
+        const next = { ...current };
+        delete next[order.id];
+        return next;
+      });
+      setProofStatus((current) => ({ ...current, [order.id]: "Attachment failed" }));
+      Alert.alert("Attachment", errorMessage(error));
+    } finally {
+      setPreparingProof("");
+    }
   };
 
   const confirmPaid = (order: OrderRecord) => {
+    if (preparingProof === order.id) return Alert.alert("Attachment", "Wait until the payment file is ready.");
     Alert.alert("Mark as paid?", `Post ${orderNumber(order, session)} to the ledger now?`, [
       { text: "Cancel", style: "cancel" },
-      { text: "Mark Paid", onPress: () => run(`paid-${order.id}`, () => markOrderPaid(order.id, session.actorId, proofs[order.id])) }
+      {
+        text: "Mark Paid",
+        onPress: () => run(`paid-${order.id}`, async () => {
+          const next = await markOrderPaid(order.id, session.actorId, proofs[order.id]);
+          setProofs((current) => {
+            const updated = { ...current };
+            delete updated[order.id];
+            return updated;
+          });
+          setProofStatus((current) => ({ ...current, [order.id]: "" }));
+          return next;
+        })
+      }
     ]);
   };
 
@@ -313,10 +467,18 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
             ) : null}
             {isPayer && order.state === "Assigned" ? (
               <View style={styles.actionBlock}>
-                <Button label={proofs[order.id] ? "Photo ready" : "Attach payment photo"} variant="secondary" icon={proofs[order.id] ? <Check size={17} color={colors.good} /> : <ImagePlus size={17} color={colors.ink} />} onPress={() => chooseProof(order.id)} disabled={offline || busy !== ""} />
+                <Button
+                  label={proofs[order.id] ? "Attachment ready" : "Attach payment file"}
+                  variant="secondary"
+                  icon={proofs[order.id] ? <Check size={17} color={colors.good} /> : <Paperclip size={17} color={colors.ink} />}
+                  loading={preparingProof === order.id}
+                  onPress={() => chooseProof(order)}
+                  disabled={offline || busy !== "" || Boolean(preparingProof)}
+                />
+                {proofStatus[order.id] ? <Text style={styles.muted}>{proofStatus[order.id]}</Text> : null}
                 <View style={styles.rowButtons}>
-                  <Button label="Return" variant="secondary" disabled={offline || busy !== ""} onPress={() => confirmReturn(order)} style={styles.flexButton} />
-                  <Button label={busy === `paid-${order.id}` ? "Uploading and posting..." : "Mark as Paid"} loading={busy === `paid-${order.id}`} disabled={offline || busy !== ""} onPress={() => confirmPaid(order)} style={styles.flexButton} />
+                  <Button label="Return" variant="secondary" disabled={offline || busy !== "" || Boolean(preparingProof)} onPress={() => confirmReturn(order)} style={styles.flexButton} />
+                  <Button label={busy === `paid-${order.id}` ? "Uploading and posting..." : "Mark as Paid"} loading={busy === `paid-${order.id}`} disabled={offline || busy !== "" || Boolean(preparingProof)} onPress={() => confirmPaid(order)} style={styles.flexButton} />
                 </View>
               </View>
             ) : null}
@@ -420,6 +582,9 @@ export function TransfersScreen(props: CommonProps) {
   const payoutCurrencies = actorTransferReceiveCurrencies(receivingActor);
   const transfers = state.transfers.filter((item) => isMasterView(session) || item.from === session.actorName || item.to === session.actorName);
   const master = isMasterView(session);
+  const masterActor = activeActors(state).find((item) => item.role === "Master");
+  const [forwardingTransferId, setForwardingTransferId] = useState("");
+  const [forwardDrafts, setForwardDrafts] = useState<Record<string, InternalTransferForwardDraft>>({});
 
   const run = async (task: () => Promise<WorkspaceState>) => {
     if (offline) return Alert.alert("Offline", "Reconnect before making this change.");
@@ -440,6 +605,86 @@ export function TransfersScreen(props: CommonProps) {
       toActorId: target.id,
       payoutCurrency: allowedCurrencies.includes(current.payoutCurrency) ? current.payoutCurrency : allowedCurrencies[0] || target.currency
     }));
+  };
+
+  const transferArrivedAtMaster = (transfer: typeof transfers[number]) => Boolean(
+    masterActor && (transfer.toActorId === masterActor.id || transfer.to === masterActor.name)
+  );
+
+  const forwardTargetsFor = (transfer: typeof transfers[number]) => activeActors(state).filter((candidate) =>
+    candidate.role !== "Master" &&
+    candidate.id !== transfer.fromActorId &&
+    candidate.name !== transfer.from
+  );
+
+  const initialForwardDraft = (transfer: typeof transfers[number]): InternalTransferForwardDraft => {
+    const target = forwardTargetsFor(transfer)[0];
+    const allowed = actorTransferReceiveCurrencies(target);
+    const payoutCurrency = allowed[0] || target?.currency || transfer.currency;
+    const rate = Number(transfer.rate || 0) > 0 ? Number(transfer.rate) : 1;
+    const sourceAmount = majorFromMinor(transfer.sourceAmountMinor, transfer.sourceCurrency);
+    return {
+      toActorId: target?.id || "",
+      payoutCurrency,
+      rate: String(rate),
+      payoutAmount: inputAmount(payoutCurrency, sourceAmount * rate),
+      commissionPercent: String(Number(transfer.commissionPercent || 0))
+    };
+  };
+
+  const openForward = (transfer: typeof transfers[number]) => {
+    setForwardDrafts((current) => ({ ...current, [transfer.id]: current[transfer.id] || initialForwardDraft(transfer) }));
+    setForwardingTransferId((current) => current === transfer.id ? "" : transfer.id);
+  };
+
+  const updateForwardReceiver = (transfer: typeof transfers[number], target: ActorRecord) => {
+    const allowed = actorTransferReceiveCurrencies(target);
+    setForwardDrafts((current) => {
+      const draft = current[transfer.id] || initialForwardDraft(transfer);
+      return { ...current, [transfer.id]: { ...draft, toActorId: target.id, payoutCurrency: allowed.includes(draft.payoutCurrency) ? draft.payoutCurrency : allowed[0] || target.currency } };
+    });
+  };
+
+  const updateForwardRate = (transfer: typeof transfers[number], value: string) => {
+    setForwardDrafts((current) => {
+      const draft = current[transfer.id] || initialForwardDraft(transfer);
+      const payout = majorFromMinor(transfer.sourceAmountMinor, transfer.sourceCurrency) * Number(value || 0);
+      return { ...current, [transfer.id]: { ...draft, rate: value, payoutAmount: Number(value || 0) > 0 ? inputAmount(draft.payoutCurrency, payout) : draft.payoutAmount } };
+    });
+  };
+
+  const updateForwardPayout = (transfer: typeof transfers[number], value: string) => {
+    setForwardDrafts((current) => {
+      const draft = current[transfer.id] || initialForwardDraft(transfer);
+      const source = majorFromMinor(transfer.sourceAmountMinor, transfer.sourceCurrency);
+      const rate = source > 0 && parseAmount(value) > 0 ? parseAmount(value) / source : 0;
+      return { ...current, [transfer.id]: { ...draft, payoutAmount: value, rate: rate > 0 ? String(Number(rate.toFixed(8))) : draft.rate } };
+    });
+  };
+
+  const submitForward = (transfer: typeof transfers[number]) => {
+    const draft = forwardDrafts[transfer.id] || initialForwardDraft(transfer);
+    run(async () => {
+      const next = await forwardInternalTransfer(session, transfer.id, draft);
+      setForwardingTransferId("");
+      setForwardDrafts((current) => {
+        const updated = { ...current };
+        delete updated[transfer.id];
+        return updated;
+      });
+      return next;
+    });
+  };
+
+  const respondToForward = (transfer: typeof transfers[number], accept: boolean) => {
+    Alert.alert(
+      accept ? "Accept transfer?" : "Reject transfer?",
+      `${transfer.id} from ${transfer.from} will ${accept ? "post to your ledger" : "be rejected"}.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: accept ? "Accept" : "Reject", style: accept ? "default" : "destructive", onPress: () => run(() => respondToForwardedTransfer(session, transfer.id, accept)) }
+      ]
+    );
   };
 
   return (
@@ -476,7 +721,58 @@ export function TransfersScreen(props: CommonProps) {
         </Panel>
       )}
       <Panel title="Transfer history" badge={String(transfers.length)}>
-        {transfers.map((transfer) => <View key={transfer.id} style={styles.recordRow}><View style={styles.recordMain}><Text style={styles.primaryLine}>{transfer.id}: {transfer.from} to {transfer.to}</Text><Text style={styles.muted}>{compactAmount(transfer.sourceCurrency, majorFromMinor(transfer.sourceAmountMinor, transfer.sourceCurrency))} to {compactAmount(transfer.currency, majorFromMinor(transfer.amountMinor, transfer.currency))}{transfer.remarks ? ` - ${transfer.remarks}` : ""}</Text></View><Pill label={transfer.state} tone={tone(transfer.state)} />{master && transfer.state === "Pending Approval" ? <View style={styles.rowButtons}><Button label="Approve" disabled={offline} onPress={() => run(() => setTransferState(transfer.id, "approve", session.actorName))} style={styles.flexButton} /><Button label="Return" variant="secondary" disabled={offline} onPress={() => run(() => setTransferState(transfer.id, "return", session.actorName))} style={styles.flexButton} /><Button label="Reject" variant="danger" disabled={offline} onPress={() => run(() => setTransferState(transfer.id, "reject", session.actorName))} style={styles.flexButton} /></View> : null}</View>)}
+        {transfers.map((transfer) => {
+          const pendingMaster = master && transfer.state === "Pending Approval";
+          const canForward = pendingMaster && transferArrivedAtMaster(transfer) && transfer.from !== masterActor?.name;
+          const receivingForward = !master && transfer.state === "Pending Acceptance" && (transfer.toActorId === session.actorId || transfer.to === session.actorName);
+          const forwardOpen = canForward && forwardingTransferId === transfer.id;
+          const forwardDraft = forwardDrafts[transfer.id] || initialForwardDraft(transfer);
+          const forwardTargets = forwardTargetsFor(transfer);
+          const forwardReceiver = forwardTargets.find((candidate) => candidate.id === forwardDraft.toActorId);
+          const forwardCurrencies = actorTransferReceiveCurrencies(forwardReceiver);
+          return (
+            <View key={transfer.id} style={styles.recordRow}>
+              <View style={styles.recordMain}>
+                <Text style={styles.primaryLine}>{transfer.id}: {transfer.from} to {transfer.to}</Text>
+                {transfer.forwardedAt && transfer.requestedTo ? <Text style={styles.muted}>Originally sent to {transfer.requestedTo}; forwarded by {transfer.forwardedBy || "Master"}</Text> : null}
+                <Text style={styles.muted}>
+                  {compactAmount(transfer.sourceCurrency, majorFromMinor(transfer.sourceAmountMinor, transfer.sourceCurrency))} to {compactAmount(transfer.currency, majorFromMinor(transfer.amountMinor, transfer.currency))}{transfer.remarks ? ` - ${transfer.remarks}` : ""}
+                </Text>
+              </View>
+              <Pill label={transfer.state} tone={tone(transfer.state)} />
+              {pendingMaster ? (
+                <View style={styles.actionBlock}>
+                  <View style={styles.rowButtons}>
+                    <Button label={canForward ? "Approve to Master" : "Approve"} disabled={offline || busy} onPress={() => run(() => setTransferState(transfer.id, "approve", session.actorName))} style={styles.flexButton} />
+                    {canForward ? <Button label={forwardOpen ? "Hide Forward" : "Forward"} variant="secondary" disabled={offline || busy} onPress={() => openForward(transfer)} style={styles.flexButton} /> : null}
+                    <Button label="Return" variant="secondary" disabled={offline || busy} onPress={() => run(() => setTransferState(transfer.id, "return", session.actorName))} style={styles.flexButton} />
+                    <Button label="Reject" variant="danger" disabled={offline || busy} onPress={() => run(() => setTransferState(transfer.id, "reject", session.actorName))} style={styles.flexButton} />
+                  </View>
+                  {forwardOpen ? (
+                    <View style={styles.forwardTransferBlock}>
+                      <SummaryRow label="Source" value={compactAmount(transfer.sourceCurrency, majorFromMinor(transfer.sourceAmountMinor, transfer.sourceCurrency))} />
+                      <Text style={styles.fieldLabel}>Receiving Actor</Text>
+                      <View style={styles.choiceWrap}>
+                        {forwardTargets.map((target) => <Pressable key={target.id} onPress={() => updateForwardReceiver(transfer, target)} style={[styles.choice, forwardDraft.toActorId === target.id && styles.choiceActive]}><Text style={[styles.choiceText, forwardDraft.toActorId === target.id && styles.choiceTextActive]}>{target.name}</Text></Pressable>)}
+                      </View>
+                      <SelectRow label="Payout currency" options={forwardCurrencies.length ? forwardCurrencies : [forwardDraft.payoutCurrency]} value={forwardDraft.payoutCurrency} onChange={(value) => setForwardDrafts((current) => ({ ...current, [transfer.id]: { ...(current[transfer.id] || forwardDraft), payoutCurrency: value } }))} />
+                      <Field label="Rate" value={forwardDraft.rate} onChangeText={(value) => updateForwardRate(transfer, value)} keyboardType="decimal-pad" />
+                      <Field label="Payout amount" value={forwardDraft.payoutAmount} onChangeText={(value) => updateForwardPayout(transfer, value)} keyboardType="decimal-pad" />
+                      <Field label="Percent (%)" value={forwardDraft.commissionPercent} onChangeText={(value) => setForwardDrafts((current) => ({ ...current, [transfer.id]: { ...(current[transfer.id] || forwardDraft), commissionPercent: value } }))} keyboardType="decimal-pad" />
+                      <Button label="Forward for acceptance" disabled={offline || busy || !forwardReceiver} loading={busy} onPress={() => submitForward(transfer)} />
+                    </View>
+                  ) : null}
+                </View>
+              ) : null}
+              {receivingForward ? (
+                <View style={styles.rowButtons}>
+                  <Button label="Accept" disabled={offline || busy} onPress={() => respondToForward(transfer, true)} style={styles.flexButton} />
+                  <Button label="Reject" variant="danger" disabled={offline || busy} onPress={() => respondToForward(transfer, false)} style={styles.flexButton} />
+                </View>
+              ) : null}
+            </View>
+          );
+        })}
       </Panel>
     </View>
   );
@@ -593,11 +889,20 @@ export function SearchScreen({ session, state, onNavigate }: CommonProps) {
     const payoutCurrency = transfer.currency || sourceCurrency;
     const sourceAmount = compactAmount(sourceCurrency, majorFromMinor(Number(transfer.sourceAmountMinor || transfer.amountMinor || 0), sourceCurrency));
     const payoutAmount = compactAmount(payoutCurrency, majorFromMinor(Number(transfer.amountMinor || 0), payoutCurrency));
-    const details = [transfer.from ? `From: ${transfer.from}` : "", transfer.to ? `To: ${transfer.to}` : "", transfer.remarks ? `Remarks: ${transfer.remarks}` : "", transfer.journal ? `Journal: ${transfer.journal}` : "", transfer.reversalJournal ? `Reversal: ${transfer.reversalJournal}` : ""].filter(Boolean).join(" - ");
+    const details = [
+      transfer.from ? `From: ${transfer.from}` : "",
+      transfer.to ? `To: ${transfer.to}` : "",
+      transfer.forwardedAt && transfer.requestedTo ? `Originally sent to: ${transfer.requestedTo}` : "",
+      transfer.forwardedBy ? `Forwarded by: ${transfer.forwardedBy}` : "",
+      transfer.acceptedBy ? `Accepted by: ${transfer.acceptedBy}` : "",
+      transfer.remarks ? `Remarks: ${transfer.remarks}` : "",
+      transfer.journal ? `Journal: ${transfer.journal}` : "",
+      transfer.reversalJournal ? `Reversal: ${transfer.reversalJournal}` : ""
+    ].filter(Boolean).join(" - ");
     const reference = transfer.id || transfer.journal || "Transfer";
-    const participants = uniqueSearchNames([transfer.from, transfer.to, "Master"]);
+    const participants = uniqueSearchNames([transfer.from, transfer.to, transfer.requestedTo, transfer.forwardedBy, transfer.acceptedBy, "Master"]);
     const status = type.startsWith("Archived") ? "Locked" : transfer.state || "Posted";
-    rawResults.push({ key: `${type}:${reference}`, groupKey: transfer.id ? `transfer:${transfer.id}` : `single:${singleIndex++}`, kind: "transfer", type, reference, actor: "", participants, amount: `${sourceAmount} to ${payoutAmount}`, status, details, time: new Date(transfer.reversedAt || transfer.paidOutAt || transfer.approvedAt || transfer.sentAt || transfer.createdAt || archivedAt || 0).getTime() || 0, screen: type.startsWith("Archived") ? "archive" : "transfers", searchText: [reference, status, participants, details, sourceAmount, payoutAmount].flat().join(" ").toLocaleLowerCase() });
+    rawResults.push({ key: `${type}:${reference}`, groupKey: transfer.id ? `transfer:${transfer.id}` : `single:${singleIndex++}`, kind: "transfer", type, reference, actor: "", participants, amount: `${sourceAmount} to ${payoutAmount}`, status, details, time: new Date(transfer.reversedAt || transfer.paidOutAt || transfer.acceptedAt || transfer.approvedAt || transfer.forwardedAt || transfer.sentAt || transfer.createdAt || archivedAt || 0).getTime() || 0, screen: type.startsWith("Archived") ? "archive" : "transfers", searchText: [reference, status, participants, details, sourceAmount, payoutAmount].flat().join(" ").toLocaleLowerCase() });
   };
 
   const ledgerParticipant = (account: string) => {
@@ -686,6 +991,21 @@ function chatMessageSummary(message: ChatMessageRecord | undefined): string {
   if (message.kind === "photo") return "Photo";
   if (message.kind === "voice") return "Voice message";
   return message.fileName || "Attachment";
+}
+
+async function openChatAttachment(message: ChatMessageRecord): Promise<void> {
+  if (!message.media) throw new Error("This attachment is no longer available.");
+  const separator = message.media.indexOf(",");
+  if (!message.media.startsWith("data:") || separator < 0) throw new Error("This attachment cannot be opened on this device.");
+  if (!(await Sharing.isAvailableAsync())) throw new Error("Opening attachments is unavailable on this device.");
+  const header = message.media.slice(5, separator);
+  const mimeType = message.mimeType || header.split(";")[0] || "application/octet-stream";
+  const fileName = (message.fileName || "payment-proof").replace(/[^a-z0-9._-]+/gi, "-");
+  const cacheDirectory = FileSystem.cacheDirectory;
+  if (!cacheDirectory) throw new Error("Temporary file storage is unavailable.");
+  const uri = `${cacheDirectory}${Date.now()}-${fileName}`;
+  await FileSystem.writeAsStringAsync(uri, message.media.slice(separator + 1), { encoding: FileSystem.EncodingType.Base64 });
+  await Sharing.shareAsync(uri, { mimeType, dialogTitle: `Open ${message.orderNumber || fileName}` });
 }
 
 export function ChatScreen({ session, state, offline, onState, onRefresh, onScrollToEnd }: CommonProps) {
@@ -801,6 +1121,18 @@ export function ChatScreen({ session, state, offline, onState, onRefresh, onScro
                     </View>
                   ) : null}
                   <Text style={styles.messageText}>{chatMessageSummary(item)}</Text>
+                  {item.media && item.kind === "photo" ? <Image source={{ uri: item.media }} resizeMode="contain" style={styles.messageImage} /> : null}
+                  {item.media ? (
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`Open ${item.fileName || "attachment"}`}
+                      onPress={() => openChatAttachment(item).catch((error) => Alert.alert("Attachment", errorMessage(error)))}
+                      style={styles.attachmentButton}
+                    >
+                      <Paperclip size={15} color={colors.accent} />
+                      <Text numberOfLines={2} style={styles.attachmentText}>Open {item.fileName || "attachment"}</Text>
+                    </Pressable>
+                  ) : null}
                   {Object.entries(item.reactions || {}).length ? (
                     <View style={styles.reactionList}>
                       {Object.entries(item.reactions || {}).map(([name, reaction]) => (
@@ -1207,16 +1539,12 @@ export function SettingsScreen({ session, state, offline, onState, onSessionTime
               <View key={actor.id} style={styles.permissionRow}>
                 <Text style={styles.primaryLine}>{actor.name} - {actor.role}</Text>
                 <SelectRow label="Transfer access" options={["actor", "master", "both", "none"]} value={actor.transferMode || "master"} onChange={(mode) => setMode(actor.id, mode)} />
-                {actor.role === "Special Broker" ? (
-                  <Pill label="Transfer receipts: Multi-currency" tone="good" />
-                ) : (
-                  <ToggleChoice
-                    label="Receive transfers in multiple currencies"
-                    checked={actor.transferReceiveMultiCurrencyEnabled === true}
-                    disabled={offline || busy === actor.id}
-                    onPress={() => updateActor(actor.id, { transferReceiveMultiCurrencyEnabled: actor.transferReceiveMultiCurrencyEnabled !== true })}
-                  />
-                )}
+                <ToggleChoice
+                  label="Send and receive transfers in multiple currencies"
+                  checked={actor.transferReceiveMultiCurrencyEnabled === true}
+                  disabled={offline || busy === actor.id}
+                  onPress={() => updateActor(actor.id, { transferReceiveMultiCurrencyEnabled: actor.transferReceiveMultiCurrencyEnabled !== true })}
+                />
                 {["Broker", "Special Broker"].includes(actor.role) ? <ToggleChoice label="Multi-currency orders" checked={actor.orderMultiCurrencyEnabled === true} disabled={offline || busy === actor.id} onPress={() => updateActor(actor.id, { orderMultiCurrencyEnabled: actor.orderMultiCurrencyEnabled !== true })} /> : null}
                 {["Agent", "Special Agent", "Special Broker"].includes(actor.role) ? <View style={styles.choiceWrap}>{([['sourceCurrency', 'Source currency'], ['rate', 'Rate'], ['commission', 'Commission'], ['baseAmount', 'Base currency and amount']] as const).map(([key, label]) => <ToggleChoice key={key} label={label} checked={visibility[key] !== false} disabled={offline || busy === actor.id} onPress={() => updateActor(actor.id, { visibility: { [key]: visibility[key] === false } })} />)}</View> : null}
               </View>
@@ -1267,9 +1595,11 @@ export function OwnerScreen({ offline }: { offline: boolean }) {
 
 export function NotificationsPanel({ session, state, onNavigate }: { session: UserSession; state: WorkspaceState; onNavigate: (screen: AppScreen) => void }) {
   const pendingOrders = isMasterView(session) ? state.orders.filter((order) => order.state === "Pending Forward" || order.state === "Void Requested").length : state.orders.filter((order) => order.state === "Assigned" && (order.agentActorId === session.actorId || order.agent === session.actorName)).length;
-  const pendingTransfers = isMasterView(session) ? state.transfers.filter((transfer) => transfer.state === "Pending Approval").length : 0;
+  const pendingTransfers = isMasterView(session)
+    ? state.transfers.filter((transfer) => transfer.state === "Pending Approval").length
+    : state.transfers.filter((transfer) => transfer.state === "Pending Acceptance" && (transfer.toActorId === session.actorId || transfer.to === session.actorName)).length;
   if (!pendingOrders && !pendingTransfers) return null;
-  return <Panel title="Action required" badge={String(pendingOrders + pendingTransfers)}>{pendingOrders ? <Pressable style={styles.noticeRow} onPress={() => onNavigate("orders")}><MessageSquare size={18} color={colors.warn} /><Text style={styles.noticeText}>{pendingOrders} order action{pendingOrders === 1 ? "" : "s"} pending</Text></Pressable> : null}{pendingTransfers ? <Pressable style={styles.noticeRow} onPress={() => onNavigate("transfers")}><MessageSquare size={18} color={colors.warn} /><Text style={styles.noticeText}>{pendingTransfers} transfer approval{pendingTransfers === 1 ? "" : "s"} pending</Text></Pressable> : null}</Panel>;
+  return <Panel title="Action required" badge={String(pendingOrders + pendingTransfers)}>{pendingOrders ? <Pressable style={styles.noticeRow} onPress={() => onNavigate("orders")}><MessageSquare size={18} color={colors.warn} /><Text style={styles.noticeText}>{pendingOrders} order action{pendingOrders === 1 ? "" : "s"} pending</Text></Pressable> : null}{pendingTransfers ? <Pressable style={styles.noticeRow} onPress={() => onNavigate("transfers")}><MessageSquare size={18} color={colors.warn} /><Text style={styles.noticeText}>{pendingTransfers} transfer {isMasterView(session) ? "approval" : "acceptance"}{pendingTransfers === 1 ? "" : "s"} pending</Text></Pressable> : null}</Panel>;
 }
 
 const styles = StyleSheet.create({
@@ -1286,6 +1616,7 @@ const styles = StyleSheet.create({
   linkText: { color: colors.accent, fontWeight: "900" },
   detailBlock: { gap: 0 },
   actionBlock: { gap: spacing.md, borderTopWidth: 1, borderTopColor: colors.line, paddingTop: spacing.md },
+  forwardTransferBlock: { gap: spacing.md, borderTopWidth: 1, borderTopColor: colors.line, paddingTop: spacing.md },
   rowButtons: { flexDirection: "row", flexWrap: "wrap", gap: spacing.sm },
   flexButton: { flex: 1, minWidth: 100 },
   fieldLabel: { color: colors.muted, fontSize: 12, fontWeight: "800" },
@@ -1303,6 +1634,9 @@ const styles = StyleSheet.create({
   myMessage: { alignSelf: "flex-end", backgroundColor: colors.accentSoft },
   messageFrom: { color: colors.accent, fontSize: 11, fontWeight: "900" },
   messageText: { color: colors.ink, lineHeight: 20 },
+  messageImage: { width: 240, maxWidth: "100%", height: 180, borderRadius: radius.sm, backgroundColor: colors.panel },
+  attachmentButton: { minHeight: 38, flexDirection: "row", alignItems: "center", gap: spacing.sm, borderRadius: radius.sm, paddingHorizontal: spacing.sm, paddingVertical: spacing.xs, backgroundColor: colors.panel, borderWidth: 1, borderColor: colors.line },
+  attachmentText: { color: colors.accent, fontSize: 12, fontWeight: "800", flexShrink: 1 },
   messageTime: { color: colors.muted, fontSize: 10 },
   messageReply: { borderLeftWidth: 3, borderLeftColor: colors.returned, backgroundColor: colors.panel, borderRadius: radius.sm, padding: spacing.sm, gap: 2 },
   messageReplyFrom: { color: colors.ink, fontSize: 11, fontWeight: "900" },

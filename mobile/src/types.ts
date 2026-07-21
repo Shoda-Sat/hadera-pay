@@ -156,7 +156,7 @@ export interface OrderRecord {
   manualSpecialPayoutPercent?: number;
   manualMasterRateDivider?: number;
   manualMasterRatePercent?: number;
-  paymentProof?: { dataUri: string; fileName: string; attachedAt: string };
+  paymentProof?: PaymentProofRecord;
   incomeBaseCurrency?: Currency;
   incomeBaseAmountMinor?: number;
   incomeCollectedCurrency?: Currency;
@@ -168,6 +168,18 @@ export interface OrderRecord {
   incomeMasterRateSnapshot?: RateSetting & { payoutCurrency?: Currency };
   incomeUsdAgentRateSnapshot?: RateSetting & { actorId?: string; actorName?: string };
 }
+
+export interface PaymentProofRecord {
+  dataUri: string;
+  fileName: string;
+  attachedAt: string;
+  mediaType?: "image" | "document";
+  mimeType?: string;
+  orderNumber?: string;
+  compressed?: boolean;
+}
+
+export type PreparedPaymentProof = Omit<PaymentProofRecord, "attachedAt">;
 
 export interface ReceivableRecord {
   id: string;
@@ -228,7 +240,7 @@ export interface LedgerLine {
   [key: string]: unknown;
 }
 
-export type TransferState = "Pending Approval" | "Approved" | "Returned" | "Rejected" | "Reversed";
+export type TransferState = "Pending Approval" | "Pending Acceptance" | "Approved" | "Returned" | "Rejected" | "Reversed";
 
 export interface InternalTransferRecord {
   id: string;
@@ -256,6 +268,19 @@ export interface InternalTransferRecord {
   returnedBy?: string;
   returnedReason?: string;
   rejectedAt?: string;
+  rejectedBy?: string;
+  requestedTo?: string;
+  requestedToActorId?: string;
+  requestedCurrency?: Currency;
+  requestedAmountMinor?: number;
+  requestedRate?: number | string;
+  requestedCommissionPercent?: number;
+  requestedCommissionMinor?: number;
+  forwardedBy?: string;
+  forwardedAt?: string;
+  acceptedBy?: string;
+  acceptedAt?: string;
+  updatedAt?: string;
   reversalJournal?: string;
   reversedAt?: string;
   reversedBy?: string;
@@ -280,9 +305,11 @@ export interface ChatMessageRecord {
   id: string;
   from: string;
   text: string;
-  kind?: "text" | "photo" | "voice";
+  kind?: "text" | "photo" | "voice" | "file";
   media?: string;
   fileName?: string;
+  mimeType?: string;
+  orderNumber?: string;
   forwardedFrom?: string;
   replyTo?: string;
   reactions?: Record<string, string>;
@@ -320,7 +347,9 @@ export interface ArchiveRecord {
   transfers?: Array<{
     id?: string;
     from?: string;
+    fromActorId?: string;
     to?: string;
+    toActorId?: string;
     sourceCurrency?: Currency;
     sourceAmountMinor?: number;
     currency?: Currency;
@@ -332,10 +361,24 @@ export interface ArchiveRecord {
     sentAt?: string;
     approvedAt?: string;
     paidOutAt?: string;
+    returnedAt?: string;
+    rejectedAt?: string;
     journal?: string;
     initiatedBy?: string;
     commissionPercent?: number;
     commissionMinor?: number;
+    requestedTo?: string;
+    requestedToActorId?: string;
+    requestedCurrency?: Currency;
+    requestedAmountMinor?: number;
+    requestedRate?: string | number;
+    requestedCommissionPercent?: number;
+    requestedCommissionMinor?: number;
+    forwardedBy?: string;
+    forwardedAt?: string;
+    acceptedBy?: string;
+    acceptedAt?: string;
+    updatedAt?: string;
     reversalJournal?: string;
     reversedAt?: string;
     reversedBy?: string;
@@ -390,6 +433,14 @@ export interface InternalTransferDraft {
   rate: string;
   commissionPercent: string;
   remarks: string;
+}
+
+export interface InternalTransferForwardDraft {
+  toActorId: string;
+  payoutCurrency: Currency;
+  payoutAmount: string;
+  rate: string;
+  commissionPercent: string;
 }
 
 export interface InviteRecord {
