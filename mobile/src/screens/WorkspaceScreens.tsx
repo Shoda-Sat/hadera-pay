@@ -1,4 +1,5 @@
 import * as DocumentPicker from "expo-document-picker";
+import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
 import * as FileSystem from "expo-file-system";
 import * as ImageManipulator from "expo-image-manipulator";
 import * as Sharing from "expo-sharing";
@@ -11,8 +12,10 @@ import {
   Forward as ForwardIcon,
   Heart,
   MessageSquare,
+  Pause,
   Paperclip,
   Pencil,
+  Play,
   Plus,
   RefreshCw,
   Reply,
@@ -994,18 +997,125 @@ function chatMessageSummary(message: ChatMessageRecord | undefined): string {
 }
 
 async function openChatAttachment(message: ChatMessageRecord): Promise<void> {
+  if (!(await Sharing.isAvailableAsync())) throw new Error("Opening attachments is unavailable on this device.");
+  const attachment = await cacheChatAttachment(message);
+  await Sharing.shareAsync(attachment.uri, { mimeType: attachment.mimeType, dialogTitle: `Open ${message.orderNumber || attachment.fileName}` });
+}
+
+function chatAttachmentFileName(message: ChatMessageRecord, mimeType: string): string {
+  if (message.fileName) return message.fileName.replace(/[^a-z0-9._-]+/gi, "-");
+  if (message.kind !== "voice") return "attachment";
+  const extension = mimeType.includes("mp4") || mimeType.includes("aac") ? "m4a"
+    : mimeType.includes("ogg") ? "ogg"
+      : mimeType.includes("wav") ? "wav" : "webm";
+  return `voice-message.${extension}`;
+}
+
+function detectedChatAudioMimeType(message: ChatMessageRecord, declaredType: string): string {
+  if (message.kind !== "voice" || !message.media?.includes(";base64,")) return declaredType;
+  const encoded = message.media.slice(message.media.indexOf(",") + 1, message.media.indexOf(",") + 65);
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const bytes: number[] = [];
+  let buffer = 0;
+  let bitCount = 0;
+  for (const character of encoded) {
+    if (character === "=") break;
+    const value = alphabet.indexOf(character);
+    if (value < 0) continue;
+    buffer = (buffer << 6) | value;
+    bitCount += 6;
+    if (bitCount >= 8) {
+      bitCount -= 8;
+      bytes.push((buffer >> bitCount) & 0xff);
+      buffer &= bitCount ? (1 << bitCount) - 1 : 0;
+      if (bytes.length >= 24) break;
+    }
+  }
+  const signature = (start: number, expected: string) => Array.from(expected).every((character, index) => bytes[start + index] === character.charCodeAt(0));
+  if (signature(4, "ftyp")) return "audio/mp4";
+  if (signature(0, "OggS")) return "audio/ogg";
+  if (signature(0, "RIFF") && signature(8, "WAVE")) return "audio/wav";
+  if ([0x1a, 0x45, 0xdf, 0xa3].every((byte, index) => bytes[index] === byte)) return "audio/webm";
+  return declaredType;
+}
+
+async function cacheChatAttachment(message: ChatMessageRecord): Promise<{ uri: string; mimeType: string; fileName: string }> {
   if (!message.media) throw new Error("This attachment is no longer available.");
   const separator = message.media.indexOf(",");
   if (!message.media.startsWith("data:") || separator < 0) throw new Error("This attachment cannot be opened on this device.");
-  if (!(await Sharing.isAvailableAsync())) throw new Error("Opening attachments is unavailable on this device.");
   const header = message.media.slice(5, separator);
-  const mimeType = message.mimeType || header.split(";")[0] || "application/octet-stream";
-  const fileName = (message.fileName || "payment-proof").replace(/[^a-z0-9._-]+/gi, "-");
+  const declaredType = message.mimeType || header.split(";")[0] || "application/octet-stream";
+  const mimeType = detectedChatAudioMimeType(message, declaredType);
+  const fileName = chatAttachmentFileName(message, mimeType);
   const cacheDirectory = FileSystem.cacheDirectory;
   if (!cacheDirectory) throw new Error("Temporary file storage is unavailable.");
-  const uri = `${cacheDirectory}${Date.now()}-${fileName}`;
-  await FileSystem.writeAsStringAsync(uri, message.media.slice(separator + 1), { encoding: FileSystem.EncodingType.Base64 });
-  await Sharing.shareAsync(uri, { mimeType, dialogTitle: `Open ${message.orderNumber || fileName}` });
+  const cacheKey = String(message.id || Date.now()).replace(/[^a-z0-9_-]+/gi, "-");
+  const uri = `${cacheDirectory}chat-${cacheKey}-${message.media.length}-${fileName}`;
+  const existing = await FileSystem.getInfoAsync(uri);
+  if (!existing.exists) {
+    await FileSystem.writeAsStringAsync(uri, message.media.slice(separator + 1), { encoding: FileSystem.EncodingType.Base64 });
+  }
+  return { uri, mimeType, fileName };
+}
+
+function formatVoiceTime(seconds: number): string {
+  const safeSeconds = Number.isFinite(seconds) && seconds > 0 ? Math.floor(seconds) : 0;
+  return `${Math.floor(safeSeconds / 60)}:${String(safeSeconds % 60).padStart(2, "0")}`;
+}
+
+function VoiceMessagePlayer({ message }: { message: ChatMessageRecord }) {
+  const player = useAudioPlayer();
+  const status = useAudioPlayerStatus(player);
+  const [ready, setReady] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    setReady(false);
+    setFailed(false);
+    cacheChatAttachment(message)
+      .then(({ uri }) => {
+        if (!active) return;
+        player.replace({ uri });
+        setReady(true);
+      })
+      .catch(() => {
+        if (active) setFailed(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [message.id, message.media, player]);
+
+  const togglePlayback = async () => {
+    if (!ready || failed) return;
+    if (status.playing) {
+      player.pause();
+      return;
+    }
+    if (status.didJustFinish || (status.duration > 0 && status.currentTime >= status.duration - 0.1)) {
+      await player.seekTo(0);
+    }
+    player.play();
+  };
+
+  return (
+    <View style={styles.voicePlayer}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={status.playing ? "Pause voice message" : "Play voice message"}
+        disabled={!ready || failed}
+        onPress={() => togglePlayback().catch(() => setFailed(true))}
+        style={[styles.voicePlayButton, (!ready || failed) && styles.voicePlayButtonDisabled]}
+      >
+        {status.playing ? <Pause size={18} color="#fff" /> : <Play size={18} color="#fff" />}
+      </Pressable>
+      <View style={styles.voicePlayerText}>
+        <Text style={styles.voicePlayerLabel}>{failed ? "Unable to play" : ready ? status.playing ? "Playing" : "Play voice message" : "Preparing audio..."}</Text>
+        <Text style={styles.voicePlayerTime}>{formatVoiceTime(status.currentTime)} / {formatVoiceTime(status.duration)}</Text>
+      </View>
+    </View>
+  );
 }
 
 export function ChatScreen({ session, state, offline, onState, onRefresh, onScrollToEnd }: CommonProps) {
@@ -1122,6 +1232,7 @@ export function ChatScreen({ session, state, offline, onState, onRefresh, onScro
                   ) : null}
                   <Text style={styles.messageText}>{chatMessageSummary(item)}</Text>
                   {item.media && item.kind === "photo" ? <Image source={{ uri: item.media }} resizeMode="contain" style={styles.messageImage} /> : null}
+                  {item.media && item.kind === "voice" ? <VoiceMessagePlayer message={item} /> : null}
                   {item.media ? (
                     <Pressable
                       accessibilityRole="button"
@@ -1130,7 +1241,7 @@ export function ChatScreen({ session, state, offline, onState, onRefresh, onScro
                       style={styles.attachmentButton}
                     >
                       <Paperclip size={15} color={colors.accent} />
-                      <Text numberOfLines={2} style={styles.attachmentText}>Open {item.fileName || "attachment"}</Text>
+                      <Text numberOfLines={2} style={styles.attachmentText}>{item.kind === "voice" ? "More audio options" : `Open ${item.fileName || "attachment"}`}</Text>
                     </Pressable>
                   ) : null}
                   {Object.entries(item.reactions || {}).length ? (
@@ -1635,6 +1746,12 @@ const styles = StyleSheet.create({
   messageFrom: { color: colors.accent, fontSize: 11, fontWeight: "900" },
   messageText: { color: colors.ink, lineHeight: 20 },
   messageImage: { width: 240, maxWidth: "100%", height: 180, borderRadius: radius.sm, backgroundColor: colors.panel },
+  voicePlayer: { minWidth: 240, maxWidth: "100%", minHeight: 52, flexDirection: "row", alignItems: "center", gap: spacing.sm, borderRadius: radius.sm, padding: spacing.sm, backgroundColor: colors.panel, borderWidth: 1, borderColor: colors.line },
+  voicePlayButton: { width: 38, height: 38, borderRadius: 19, alignItems: "center", justifyContent: "center", backgroundColor: colors.accent },
+  voicePlayButtonDisabled: { opacity: 0.45 },
+  voicePlayerText: { flex: 1, gap: 2 },
+  voicePlayerLabel: { color: colors.ink, fontSize: 12, fontWeight: "800" },
+  voicePlayerTime: { color: colors.muted, fontSize: 11 },
   attachmentButton: { minHeight: 38, flexDirection: "row", alignItems: "center", gap: spacing.sm, borderRadius: radius.sm, paddingHorizontal: spacing.sm, paddingVertical: spacing.xs, backgroundColor: colors.panel, borderWidth: 1, borderColor: colors.line },
   attachmentText: { color: colors.accent, fontSize: 12, fontWeight: "800", flexShrink: 1 },
   messageTime: { color: colors.muted, fontSize: 10 },

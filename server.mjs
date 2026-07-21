@@ -639,13 +639,26 @@ function mergeOrders(existingItems = [], incomingItems = []) {
   return Array.from(merged.values());
 }
 
+function transferIdentity(transfer = {}) {
+  return String(transfer.recordKey || [
+    "TRX",
+    transfer.id || "",
+    transfer.createdAt || transfer.sentAt || "",
+    transfer.from || "",
+    transfer.to || "",
+    transfer.sourceCurrency || transfer.currency || "",
+    transfer.sourceAmountMinor || transfer.amountMinor || 0,
+  ].join(":"));
+}
+
 function mergeTransfers(existingItems = [], incomingItems = []) {
   const merged = new Map();
   [...existingItems, ...incomingItems].forEach((item) => {
     if (!item || typeof item !== "object" || !item.id) return;
-    const previous = merged.get(item.id);
+    const recordKey = transferIdentity(item);
+    const previous = merged.get(recordKey);
     if (!previous) {
-      merged.set(item.id, item);
+      merged.set(recordKey, { ...item, recordKey });
       return;
     }
     const itemIsNewer = recordTimestamp(item) >= recordTimestamp(previous);
@@ -674,7 +687,7 @@ function mergeTransfers(existingItems = [], incomingItems = []) {
     } else if ((previous.state === "Approved" || item.state === "Approved") && next.journal) {
       next.state = "Approved";
     }
-    merged.set(item.id, next);
+    merged.set(recordKey, { ...next, recordKey });
   });
   return Array.from(merged.values());
 }
@@ -694,10 +707,28 @@ function nextReceivableNumberFromReceivables(receivables = []) {
 }
 
 function nextTransferNumberFromTransfers(transfers = []) {
-  return transfers.reduce((next, transfer) => {
+  return transfers.filter((transfer) => !transfer.masterTransactionClosedAt).reduce((next, transfer) => {
     const match = String(transfer?.id || "").match(/^TRF-(\d+)$/);
     return match ? Math.max(next, Number(match[1]) + 1) : next;
   }, 1);
+}
+
+function nextManualJournalNumberFromLedger(ledger = []) {
+  return ledger
+    .filter((line) => line?.source === "JOURNAL" && !line.masterTransactionClosedAt)
+    .reduce((next, line) => {
+      const match = String(line?.entryId || "").match(/^JNL-(\d+)$/);
+      return match ? Math.max(next, Number(match[1]) + 1) : next;
+    }, 1);
+}
+
+function nextWithdrawalNumberFromLedger(ledger = []) {
+  return ledger
+    .filter((line) => line?.source === "WITHDRAWAL" && !line.masterTransactionClosedAt)
+    .reduce((next, line) => {
+      const match = String(line?.entryId || "").match(/^WDL-(\d+)$/);
+      return match ? Math.max(next, Number(match[1]) + 1) : next;
+    }, 1);
 }
 
 function nextJournalNumberFromLedger(ledger = []) {
@@ -723,7 +754,7 @@ function archiveSnapshotItemKey(type, item = {}) {
     return [item.id || item.brokerOrderNumber, item.createdAt || item.sentAt, item.broker, item.agent, item.sourceCurrency, item.sourceAmountMinor, item.payoutCurrency, item.payoutAmountMinor, item.journal].join(":");
   }
   if (type === "receivables") return [item.id || item.orderId, item.createdAt, item.orderId, item.borrower, item.currency, item.principalMinor].join(":");
-  if (type === "transfers") return [item.id || item.journal, item.createdAt || item.sentAt, item.from, item.to, item.currency, item.amountMinor, item.journal].join(":");
+  if (type === "transfers") return [item.recordKey || item.id || item.journal, item.createdAt || item.sentAt, item.from, item.to, item.currency, item.amountMinor, item.journal].join(":");
   if (type === "ledger") {
     return [item.entryId, item.journal, item.source, item.account, item.direction, item.currency, item.amountMinor, item.postedAt].join(":");
   }
@@ -869,7 +900,23 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   nextState.orderCounter = Math.max(Number(currentState.orderCounter || 0), Number(incomingState.orderCounter || 0), nextOrderNumberFromOrders(nextState.orders) - 1);
   nextState.receivableCounter = Math.max(Number(currentState.receivableCounter || 0), Number(incomingState.receivableCounter || 0), nextReceivableNumberFromReceivables(nextState.receivables) - 1);
   nextState.customerCounter = Math.max(Number(currentState.customerCounter || 0), Number(incomingState.customerCounter || 0));
-  nextState.transferCounter = Math.max(Number(currentState.transferCounter || 0), Number(incomingState.transferCounter || 0), nextTransferNumberFromTransfers(nextState.transfers) - 1);
+  const currentMasterTransactionCycle = Number(currentState.masterTransactionCycle || 0);
+  const incomingMasterTransactionCycle = Number(incomingState.masterTransactionCycle || 0);
+  const currentPeriodCounter = (currentValue, incomingValue, scannedValue) => {
+    if (incomingMasterTransactionCycle > currentMasterTransactionCycle) return Math.max(Number(incomingValue || 0), scannedValue);
+    if (currentMasterTransactionCycle > incomingMasterTransactionCycle) return Math.max(Number(currentValue || 0), scannedValue);
+    return Math.max(Number(currentValue || 0), Number(incomingValue || 0), scannedValue);
+  };
+  nextState.masterTransactionCycle = Math.max(currentMasterTransactionCycle, incomingMasterTransactionCycle);
+  nextState.transferCounter = currentPeriodCounter(currentState.transferCounter, incomingState.transferCounter, nextTransferNumberFromTransfers(nextState.transfers) - 1);
+  nextState.manualJournalCounter = currentPeriodCounter(currentState.manualJournalCounter, incomingState.manualJournalCounter, nextManualJournalNumberFromLedger(nextState.ledger) - 1);
+  nextState.withdrawalCounter = currentPeriodCounter(currentState.withdrawalCounter, incomingState.withdrawalCounter, nextWithdrawalNumberFromLedger(nextState.ledger) - 1);
+  nextState.transferRecordCounter = Math.max(Number(currentState.transferRecordCounter || 0), Number(incomingState.transferRecordCounter || 0));
+  nextState.transfers = nextState.transfers.map((transfer) =>
+    !transfer.masterTransactionClosedAt && !Object.prototype.hasOwnProperty.call(transfer, "masterTransactionCycle")
+      ? { ...transfer, masterTransactionCycle: nextState.masterTransactionCycle }
+      : transfer
+  );
   nextState.journalCounter = Math.max(Number(currentState.journalCounter || 0), Number(incomingState.journalCounter || 0), nextJournalNumberFromLedger(nextState.ledger) - 1);
   return nextState;
 }
@@ -948,10 +995,14 @@ function resetWorkspaceState(db, workspaceId, scope = "data") {
         .filter((actor) => actor?.role !== "Master")
         .map((actor) => ({ actor: actor.name, currency: actor.currency || "USD", netMinor: 0 })),
     journalCounter: 0,
+    manualJournalCounter: 0,
+    withdrawalCounter: 0,
     orderCounter: 0,
     receivableCounter: 0,
     customerCounter: 0,
     transferCounter: 0,
+    transferRecordCounter: 0,
+    masterTransactionCycle: 0,
     editingOrderId: "",
     editingTransferId: "",
     selectedLedgerActor: "",

@@ -1134,6 +1134,34 @@
       white-space: nowrap;
     }
 
+    .search-result-row {
+      cursor: pointer;
+    }
+
+    .search-result-row:hover td,
+    .search-result-row:focus td {
+      background: #eef8f4;
+    }
+
+    .search-result-row:focus {
+      outline: 2px solid var(--accent);
+      outline-offset: -2px;
+    }
+
+    [data-search-target] {
+      scroll-margin-block: 96px;
+    }
+
+    .search-destination-highlight {
+      outline: 3px solid var(--accent);
+      outline-offset: -3px;
+      box-shadow: 0 0 0 4px rgba(5, 122, 85, 0.14);
+    }
+
+    tr.search-destination-highlight td {
+      background: #e5f7f0;
+    }
+
     table {
       border-collapse: collapse;
       width: 100%;
@@ -1807,7 +1835,14 @@
     }
 
     .message audio {
-      max-width: 260px;
+      display: block;
+      width: min(320px, 100%);
+      min-height: 42px;
+    }
+
+    .voice-message {
+      display: grid;
+      gap: 4px;
     }
 
     .message-reply {
@@ -2571,7 +2606,13 @@
             <div class="panel span-6">
               <div class="panel-header">
                 <h2>Approval Queue</h2>
-                <span class="state-pill warn">Pending</span>
+                <div class="panel-actions">
+                  <span class="state-pill warn">Pending</span>
+                  <button class="btn secondary" id="closeMasterTransactionsButton" type="button" data-master-action>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M20 6 9 17l-5-5"/></svg>
+                    Close Transactions
+                  </button>
+                </div>
               </div>
               <div class="panel-body">
                 <div class="transfer-list" id="transferList"></div>
@@ -3015,7 +3056,7 @@
             <div class="panel-body table-wrap">
               <table>
                 <thead>
-                  <tr><th>Date</th><th>Type</th><th>Reference</th><th>Direction</th><th>Amount</th><th>Status</th></tr>
+                    <tr><th>Date</th><th>Type</th><th>Reference</th><th>Direction</th><th>Amount</th><th>Paid Out</th><th>Status</th></tr>
                 </thead>
                 <tbody id="archiveRows"></tbody>
               </table>
@@ -3391,6 +3432,10 @@
     const pendingProofFiles = new Map();
     const pendingProofUploads = new Map();
     const forwardTransferDrafts = new Map();
+    let renderedGlobalSearchResults = [];
+    let activeSearchDestination = null;
+    let searchDestinationFocusTimer = null;
+    let searchDestinationHighlightTimer = null;
     const processingTransferIds = new Set();
     const receivablePaymentDrafts = new Map();
     const expandedCompactOrderIds = new Set();
@@ -3551,9 +3596,13 @@
       trialBalanceExpanded: true,
       buyingRates: normalizeBuyingRates(),
       journalCounter: 0,
+      manualJournalCounter: 0,
+      withdrawalCounter: 0,
       orderCounter: 0,
       receivableCounter: 0,
       transferCounter: 0,
+      transferRecordCounter: 0,
+      masterTransactionCycle: 0,
       customerCounter: 0,
       actorCounter: 5,
       chatCounter: 0,
@@ -3695,6 +3744,27 @@
       });
     }
 
+    function transferIdentity(transfer) {
+      if (!transfer) return "";
+      return String(transfer.recordKey || [
+        "TRX",
+        transfer.id || "",
+        transfer.createdAt || transfer.sentAt || "",
+        transfer.from || "",
+        transfer.to || "",
+        transfer.sourceCurrency || transfer.currency || "",
+        transfer.sourceAmountMinor || transfer.amountMinor || 0
+      ].join(":"));
+    }
+
+    function transferByIdentity(identity) {
+      const key = String(identity || "");
+      return state.transfers.find((transfer) => transferIdentity(transfer) === key) ||
+        state.transfers.find((transfer) => transfer.id === key && !transfer.masterTransactionClosedAt) ||
+        state.transfers.find((transfer) => transfer.id === key) ||
+        null;
+    }
+
     function normalizeTransfers(transfers) {
       return transfers.filter((transfer) =>
         transfer &&
@@ -3702,7 +3772,7 @@
         typeof transfer.to === "string" &&
         supportedCurrencies.includes(transfer.currency) &&
         Number(transfer.amountMinor) > 0
-      );
+      ).map((transfer) => ({ ...transfer, recordKey: transferIdentity(transfer) }));
     }
 
     function normalizeMasterBankEntries(entries) {
@@ -3722,7 +3792,7 @@
         return [item.id || item.brokerOrderNumber, item.createdAt || item.sentAt, item.broker, item.agent, item.sourceCurrency, item.sourceAmountMinor, item.payoutCurrency, item.payoutAmountMinor, item.journal].join(":");
       }
       if (type === "receivables") return [item.id || item.orderId, item.createdAt, item.orderId, item.borrower, item.currency, item.principalMinor].join(":");
-      if (type === "transfers") return [item.id || item.journal, item.createdAt || item.sentAt, item.from, item.to, item.currency, item.amountMinor, item.journal].join(":");
+      if (type === "transfers") return [item.recordKey || item.id || item.journal, item.createdAt || item.sentAt, item.from, item.to, item.currency, item.amountMinor, item.journal].join(":");
       if (type === "ledger") {
         return [item.entryId, item.journal, item.source, item.account, item.direction, item.currency, item.amountMinor, item.postedAt].join(":");
       }
@@ -3819,6 +3889,17 @@
     }
 
     const state = loadState();
+
+    function assignCurrentMasterTransactionCycle() {
+      const cycle = Number(state.masterTransactionCycle || 0);
+      state.transfers = state.transfers.map((transfer) =>
+        !transfer.masterTransactionClosedAt && !Object.prototype.hasOwnProperty.call(transfer, "masterTransactionCycle")
+          ? { ...transfer, masterTransactionCycle: cycle }
+          : transfer
+      );
+    }
+
+    assignCurrentMasterTransactionCycle();
 
     function saveState() {
       try {
@@ -3962,9 +4043,10 @@
       const merged = new Map();
       [...existingItems, ...incomingItems].forEach((item) => {
         if (!item || typeof item !== "object" || !item.id) return;
-        const previous = merged.get(item.id);
+        const recordKey = transferIdentity(item);
+        const previous = merged.get(recordKey);
         if (!previous) {
-          merged.set(item.id, item);
+          merged.set(recordKey, item);
           return;
         }
         const itemIsNewer = recordTimestamp(item) >= recordTimestamp(previous);
@@ -3993,7 +4075,7 @@
         } else if ((previous.state === "Approved" || item.state === "Approved") && next.journal) {
           next.state = "Approved";
         }
-        merged.set(item.id, next);
+        merged.set(recordKey, next);
       });
       return Array.from(merged.values());
     }
@@ -4169,8 +4251,20 @@
       state.buyingRates = normalizeBuyingRates(remoteState.buyingRates || { eurToUsdDivider: remoteState.eurToUsdDivider });
       state.orderCounter = Math.max(Number(state.orderCounter || 0), nextOrderNumberFromOrders() - 1, Number(remoteState.orderCounter || 0));
       state.receivableCounter = Math.max(Number(state.receivableCounter || 0), nextReceivableNumberFromReceivables() - 1, Number(remoteState.receivableCounter || 0));
-      state.transferCounter = Math.max(Number(state.transferCounter || 0), nextTransferNumberFromTransfers() - 1, Number(remoteState.transferCounter || 0));
+      const localMasterTransactionCycle = Number(state.masterTransactionCycle || 0);
+      const remoteMasterTransactionCycle = Number(remoteState.masterTransactionCycle || 0);
+      const currentPeriodCounter = (localValue, remoteValue, scannedValue) => {
+        if (remoteMasterTransactionCycle > localMasterTransactionCycle) return Math.max(Number(remoteValue || 0), scannedValue);
+        if (localMasterTransactionCycle > remoteMasterTransactionCycle) return Math.max(Number(localValue || 0), scannedValue);
+        return Math.max(Number(localValue || 0), Number(remoteValue || 0), scannedValue);
+      };
+      state.transferCounter = currentPeriodCounter(state.transferCounter, remoteState.transferCounter, nextTransferNumberFromTransfers() - 1);
       state.journalCounter = Math.max(Number(state.journalCounter || 0), nextJournalNumberFromLedger() - 1, Number(remoteState.journalCounter || 0));
+      state.manualJournalCounter = currentPeriodCounter(state.manualJournalCounter, remoteState.manualJournalCounter, nextManualJournalNumberFromLedger() - 1);
+      state.withdrawalCounter = currentPeriodCounter(state.withdrawalCounter, remoteState.withdrawalCounter, nextWithdrawalNumberFromLedger() - 1);
+      state.transferRecordCounter = Math.max(Number(state.transferRecordCounter || 0), Number(remoteState.transferRecordCounter || 0));
+      state.masterTransactionCycle = Math.max(localMasterTransactionCycle, remoteMasterTransactionCycle);
+      assignCurrentMasterTransactionCycle();
       state.customerCounter = Math.max(Number(state.customerCounter || 0), Number(remoteState.customerCounter || 0));
       return true;
     }
@@ -4400,6 +4494,9 @@
       state.receivableCounter = Math.max(Number(state.receivableCounter || 0), nextReceivableNumberFromReceivables() - 1);
       state.transferCounter = Math.max(Number(state.transferCounter || 0), nextTransferNumberFromTransfers() - 1);
       state.journalCounter = Math.max(Number(state.journalCounter || 0), nextJournalNumberFromLedger() - 1);
+      state.manualJournalCounter = Math.max(Number(state.manualJournalCounter || 0), nextManualJournalNumberFromLedger() - 1);
+      state.withdrawalCounter = Math.max(Number(state.withdrawalCounter || 0), nextWithdrawalNumberFromLedger() - 1);
+      assignCurrentMasterTransactionCycle();
       ensureSessionActor();
       remoteStateReady = true;
       startRemoteRefresh();
@@ -4527,6 +4624,7 @@
       archivePdfActor: document.getElementById("archivePdfActor"),
       archivePdfTime: document.getElementById("archivePdfTime"),
       transferList: document.getElementById("transferList"),
+      closeMasterTransactionsButton: document.getElementById("closeMasterTransactionsButton"),
       archiveRows: document.getElementById("archiveRows"),
       archiveBalanceSummary: document.getElementById("archiveBalanceSummary"),
       journalPreview: document.getElementById("journalPreview"),
@@ -5446,10 +5544,28 @@
     }
 
     function nextTransferNumberFromTransfers() {
-      return state.transfers.reduce((next, transfer) => {
+      return state.transfers.filter((transfer) => !transfer.masterTransactionClosedAt).reduce((next, transfer) => {
         const match = String(transfer?.id || "").match(/^TRF-(\d+)$/);
         return match ? Math.max(next, Number(match[1]) + 1) : next;
       }, 1);
+    }
+
+    function nextManualJournalNumberFromLedger() {
+      return state.ledger
+        .filter((line) => line.source === "JOURNAL" && !line.masterTransactionClosedAt)
+        .reduce((next, line) => {
+          const match = String(line?.entryId || "").match(/^JNL-(\d+)$/);
+          return match ? Math.max(next, Number(match[1]) + 1) : next;
+        }, 1);
+    }
+
+    function nextWithdrawalNumberFromLedger() {
+      return state.ledger
+        .filter((line) => line.source === "WITHDRAWAL" && !line.masterTransactionClosedAt)
+        .reduce((next, line) => {
+          const match = String(line?.entryId || "").match(/^WDL-(\d+)$/);
+          return match ? Math.max(next, Number(match[1]) + 1) : next;
+        }, 1);
     }
 
     function nextJournalNumberFromLedger() {
@@ -5467,6 +5583,26 @@
     function nextTransferId() {
       state.transferCounter = Math.max(Number(state.transferCounter || 0), nextTransferNumberFromTransfers() - 1) + 1;
       return "TRF-" + state.transferCounter;
+    }
+
+    function nextTransferRecordKey() {
+      state.transferRecordCounter = Number(state.transferRecordCounter || 0) + 1;
+      return `TRX-${Date.now()}-${state.transferRecordCounter}`;
+    }
+
+    function nextManualJournalEntryId() {
+      state.manualJournalCounter = Math.max(Number(state.manualJournalCounter || 0), nextManualJournalNumberFromLedger() - 1) + 1;
+      return `JNL-${state.manualJournalCounter}`;
+    }
+
+    function nextWithdrawalEntryId() {
+      state.withdrawalCounter = Math.max(Number(state.withdrawalCounter || 0), nextWithdrawalNumberFromLedger() - 1) + 1;
+      return `WDL-${state.withdrawalCounter}`;
+    }
+
+    function masterTransactionBankKey(reference, cycle) {
+      const period = Number(cycle || 0);
+      return period > 0 ? `C${period}-${reference}` : reference;
     }
 
     function buildJournalPreview() {
@@ -5894,7 +6030,8 @@
     function postActorJournal({ actorName, sourceCurrency, sourceAmountMinor, currency, amountMinor, rate, remarks }) {
       const journalId = nextJournalId();
       const postedAt = new Date().toISOString();
-      const entryId = `JNL-${journalId.replace("JRN-", "")}`;
+      const entryId = nextManualJournalEntryId();
+      const masterTransactionCycle = Number(state.masterTransactionCycle || 0);
       const detailBits = [
         `Journal add ${money(sourceCurrency, sourceAmountMinor)} to ${money(currency, amountMinor)}`,
         `Rate ${formatRate(rate)}`,
@@ -5911,6 +6048,7 @@
         sourceCurrency,
         sourceAmountMinor,
         rate,
+        masterTransactionCycle,
         details: detailBits.join(" - "),
         postedAt
       });
@@ -5921,11 +6059,12 @@
     function postActorWithdrawal({ actorName, currency, amountMinor, remarks }) {
       const journalId = nextJournalId();
       const postedAt = new Date().toISOString();
-      const entryId = `WDL-${journalId.replace("JRN-", "")}`;
+      const entryId = nextWithdrawalEntryId();
+      const masterTransactionCycle = Number(state.masterTransactionCycle || 0);
       const details = [`Withdrawal ${money(currency, amountMinor)} from ${actorName}`, remarks ? `Remarks: ${remarks}` : ""].filter(Boolean).join(" - ");
       state.ledger.unshift(
-        { journal: journalId, entryId, source: "WITHDRAWAL", account: `${actorName} ACTOR_CLEARING`, direction: "Credit", currency, amountMinor, details, postedAt },
-        { journal: journalId, entryId, source: "WITHDRAWAL", account: "MASTER_FX_CLEARING", direction: "Debit", currency, amountMinor, details, postedAt }
+        { journal: journalId, entryId, source: "WITHDRAWAL", account: `${actorName} ACTOR_CLEARING`, direction: "Credit", currency, amountMinor, masterTransactionCycle, details, postedAt },
+        { journal: journalId, entryId, source: "WITHDRAWAL", account: "MASTER_FX_CLEARING", direction: "Debit", currency, amountMinor, masterTransactionCycle, details, postedAt }
       );
       syncSettlementsFromLedger();
       return entryId;
@@ -5950,15 +6089,17 @@
       const masterNames = new Set(["Master", master?.name].filter(Boolean));
       const isMasterName = (name) => masterNames.has(name);
       const transfersById = new Map();
-      state.transfers.forEach((transfer) => transfersById.set(transfer.id, transfer));
+      state.transfers.forEach((transfer) => transfersById.set(transferIdentity(transfer), transfer));
       state.archives.forEach((archive) => {
         (archive.transfers || []).forEach((transfer) => {
-          transfersById.set(transfer.id, { ...(transfersById.get(transfer.id) || {}), ...transfer });
+          const recordKey = transferIdentity(transfer);
+          transfersById.set(recordKey, { ...(transfersById.get(recordKey) || {}), ...transfer });
         });
       });
 
       transfersById.forEach((transfer) => {
         if (!transfer?.id || !transfer.journal || !["Approved", "Reversed"].includes(transfer.state)) return;
+        const bankReference = masterTransactionBankKey(transfer.id, transfer.masterTransactionCycle);
         const details = transfer.details || transferLedgerDetails(transfer);
         const postedAt = transfer.paidOutAt || transfer.approvedAt || transfer.sentAt || transfer.createdAt || new Date(0).toISOString();
         const sourceCurrency = transfer.sourceCurrency || transfer.currency || "USD";
@@ -5967,7 +6108,7 @@
         const payoutAmountMinor = Number(transfer.amountMinor || 0);
         if (isMasterName(transfer.to) && !isMasterName(transfer.from)) {
           recordMasterBankEntry({
-            id: `BANK-TRANSFER-${transfer.id}-IN`,
+            id: `BANK-TRANSFER-${bankReference}-IN`,
             type: "Transfer In",
             reference: transfer.id,
             direction: "Credit",
@@ -5978,7 +6119,7 @@
           });
         } else if (isMasterName(transfer.from) && !isMasterName(transfer.to)) {
           recordMasterBankEntry({
-            id: `BANK-TRANSFER-${transfer.id}-OUT`,
+            id: `BANK-TRANSFER-${bankReference}-OUT`,
             type: "Transfer Out",
             reference: transfer.id,
             direction: "Debit",
@@ -5989,7 +6130,7 @@
           });
           if (transfer.reversalJournal) {
             recordMasterBankEntry({
-              id: `BANK-TRANSFER-${transfer.id}-REVERSAL`,
+              id: `BANK-TRANSFER-${bankReference}-REVERSAL`,
               type: "Transfer Reversal",
               reference: transfer.reversalJournal,
               direction: "Credit",
@@ -6003,7 +6144,7 @@
           const commissionMinor = transferCommissionMinor(transfer);
           if (commissionMinor > 0) {
             recordMasterBankEntry({
-              id: `BANK-TRANSFER-${transfer.id}-FEE`,
+              id: `BANK-TRANSFER-${bankReference}-FEE`,
               type: "Transfer Fee Expense",
               reference: transfer.id,
               direction: "Debit",
@@ -6017,8 +6158,9 @@
       });
 
       state.ledger.filter((line) => line.source === "JOURNAL").forEach((line) => {
+        const bankReference = masterTransactionBankKey(line.entryId || line.journal, line.masterTransactionCycle);
         recordMasterBankEntry({
-          id: `BANK-JOURNAL-${line.entryId || line.journal}`,
+          id: `BANK-JOURNAL-${bankReference}`,
           type: "Journal",
           reference: line.entryId || line.journal,
           direction: "Debit",
@@ -6032,8 +6174,9 @@
       state.ledger
         .filter((line) => line.source === "WITHDRAWAL" && line.direction === "Credit" && actorNameFromAccount(line.account))
         .forEach((line) => {
+          const bankReference = masterTransactionBankKey(line.entryId || line.journal, line.masterTransactionCycle);
           recordMasterBankEntry({
-            id: `BANK-WITHDRAWAL-${line.entryId || line.journal}`,
+            id: `BANK-WITHDRAWAL-${bankReference}`,
             type: "Withdrawal",
             reference: line.entryId || line.journal,
             direction: "Credit",
@@ -6202,10 +6345,57 @@
       return message.text || "";
     }
 
+    function detectedAudioMimeType(media) {
+      const value = String(media || "");
+      const match = value.match(/^data:([^;,]+)(?:;[^,]*)?,/i);
+      const declaredType = match?.[1] || "audio/webm";
+      if (!value.includes(";base64,")) return declaredType;
+      try {
+        const payload = value.slice(value.indexOf(",") + 1, value.indexOf(",") + 65);
+        const bytes = atob(payload);
+        const signature = (start, expected) => expected.split("").every((character, index) => bytes.charCodeAt(start + index) === character.charCodeAt(0));
+        if (signature(4, "ftyp")) return "audio/mp4";
+        if (signature(0, "OggS")) return "audio/ogg";
+        if (signature(0, "RIFF") && signature(8, "WAVE")) return "audio/wav";
+        if ([0x1a, 0x45, 0xdf, 0xa3].every((byte, index) => bytes.charCodeAt(index) === byte)) return "audio/webm";
+      } catch {
+        // Keep the declared type when the recording header cannot be inspected.
+      }
+      return declaredType;
+    }
+
+    function normalizedVoiceMedia(media) {
+      const value = String(media || "");
+      if (!value.startsWith("data:")) return value;
+      const comma = value.indexOf(",");
+      if (comma < 0) return value;
+      const header = value.slice(0, comma);
+      const detectedType = detectedAudioMimeType(value);
+      return `data:${detectedType}${header.includes(";base64") ? ";base64" : ""},${value.slice(comma + 1)}`;
+    }
+
+    function audioFileExtension(mimeType) {
+      const type = String(mimeType || "").toLowerCase();
+      if (type.includes("mp4") || type.includes("aac") || type.includes("m4a")) return "m4a";
+      if (type.includes("ogg")) return "ogg";
+      if (type.includes("wav")) return "wav";
+      return "webm";
+    }
+
     function renderMessageBody(message) {
       const text = message.text ? `<div>${escapeHtml(message.text)}</div>` : "";
       if (!message.media) return `<div>${escapeHtml(message.text || "")}</div>`;
-      if (message.kind === "voice") return `${text}<audio controls src="${message.media}"></audio>`;
+      if (message.kind === "voice") {
+        const media = normalizedVoiceMedia(message.media);
+        const fileName = escapeHtml(message.fileName || `voice-message.${audioFileExtension(detectedAudioMimeType(media))}`);
+        return `
+          ${text}
+          <div class="voice-message">
+            <audio controls preload="metadata" playsinline src="${escapeHtml(media)}">Your device cannot play this voice message.</audio>
+            <a class="attachment-link" href="${escapeHtml(media)}" download="${fileName}">Download voice message</a>
+          </div>
+        `;
+      }
       const fileName = escapeHtml(message.fileName || "attachment");
       const isImage = String(message.media).startsWith("data:image/");
       return `
@@ -6313,7 +6503,7 @@
       els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
     }
 
-    function sendChatMessage({ text = "", kind = "text", media = "", fileName = "" }) {
+    function sendChatMessage({ text = "", kind = "text", media = "", fileName = "", mimeType = "" }) {
       const chat = selectedChat();
       const actor = selectedActor();
       if (!chat || !actor || (!text.trim() && !media)) return;
@@ -6324,6 +6514,7 @@
         kind,
         media,
         fileName,
+        mimeType,
         replyTo: state.chatReplyTo || "",
         reactions: {},
         readBy: [actor.name],
@@ -7252,9 +7443,13 @@
       state.archives = [];
       state.actorResetTombstones = normalizeActorResetTombstones();
       state.journalCounter = 0;
+      state.manualJournalCounter = 0;
+      state.withdrawalCounter = 0;
       state.orderCounter = 0;
       state.receivableCounter = 0;
       state.transferCounter = 0;
+      state.transferRecordCounter = 0;
+      state.masterTransactionCycle = 0;
       state.editingOrderId = "";
       state.editingTransferId = "";
       state.orderState = "Draft";
@@ -7424,15 +7619,39 @@
       return `${code}${formatted}`;
     }
 
-    function orderCopyText(order) {
+    function viewerCanCopyOrder(order, viewer = selectedActor()) {
+      if (!order || !viewer) return false;
+      if (viewer.role === "Master") return true;
+      return actorCanReceivePayouts(viewer.role) && (
+        order.agent === viewer.name ||
+        Boolean(order.agentActorId && order.agentActorId === viewer.id)
+      );
+    }
+
+    function orderCopySourceAmount(order, viewer) {
+      if (!viewerCanSeeOrderField(viewer, "baseAmount")) return "";
+      const currency = order.sourceCurrency || "USD";
+      if (viewerCanSeeOrderField(viewer, "sourceCurrency")) return orderCopyAmount(currency, order.sourceAmountMinor);
+      return formatMinor(Number(order.sourceAmountMinor || 0), currency).replace(/(\.\d*?[1-9])0+$/, "$1").replace(/\.0+$/, "");
+    }
+
+    function orderCopyText(order, viewer = selectedActor()) {
       const sourceCurrency = order.sourceCurrency || "USD";
       const payoutCurrency = order.payoutCurrency || sourceCurrency;
       const payoutMinor = Number(order.payoutAmountMinor || order.sourceAmountMinor || 0);
+      const orderNumber = viewer?.role === "Master"
+        ? brokerOrderNumberForOrder(order)
+        : orderDisplayNumber(order, viewer);
+      const fileNumber = viewer?.role === "Master"
+        ? agentOrderNumberForOrder(order, order.agent)
+        : "";
       return [
+        ["Order Number", orderNumber],
+        ["File Number", fileNumber],
         ["Sender Name", order.senderName],
         ["Receiver Name", order.receiverName],
         ["Receiver City", order.receiverCity],
-        ["Source Amount", orderCopyAmount(sourceCurrency, order.sourceAmountMinor)],
+        ["Source Amount", orderCopySourceAmount(order, viewer)],
         ["Total Payout", orderCopyAmount(payoutCurrency, payoutMinor)],
         ["Phone Number", order.phoneNumber],
         ["Account Number", order.accountNumber],
@@ -7450,7 +7669,7 @@
       const secondaryNumber = viewer?.role === "Master" && payerNumber && payerNumber !== primaryNumber && order.agent !== "Unassigned"
         ? `<span class="order-number-secondary">${escapeHtml(payerNumber)}</span>`
         : "";
-      const copyButton = viewer?.role === "Master"
+      const copyButton = viewerCanCopyOrder(order, viewer)
         ? `<button class="order-copy-details" data-id="${escapeHtml(order.id)}" type="button" aria-label="Copy order details" title="Copy order details">${icons.copy}</button>`
         : "";
       return `<span class="order-number-line"><strong>${escapeHtml(primaryNumber)}</strong>${secondaryNumber}${copyButton}</span>`;
@@ -7752,7 +7971,7 @@
 
     function ledgerBalanceRows(lines, actor, showOrderInfo = false, showPaidOutInfo = false) {
       if (!actor || actor.role === "Master") return "";
-      const orderInfoColumnCount = showOrderInfo ? 5 + (showPaidOutInfo ? 1 : 0) : 0;
+      const orderInfoColumnCount = (showOrderInfo ? 5 : 0) + (showPaidOutInfo ? 1 : 0);
       const orderInfoSpacer = orderInfoColumnCount ? `<td colspan="${orderInfoColumnCount}"></td>` : "";
       const totals = calculableLedgerLines(lines).reduce((acc, line) => {
         const sign = line.direction === "Debit" ? 1 : -1;
@@ -7868,7 +8087,15 @@
 
     function transferForLedgerLine(line) {
       if (!line || !["TRANSFER", "TRANSFER_REVERSAL"].includes(line.source)) return null;
-      return state.transfers.find((transfer) =>
+      const transfers = [
+        ...state.transfers,
+        ...state.archives.flatMap((archive) => archive.transfers || [])
+      ];
+      if (line.transferRecordKey) {
+        const exactTransfer = transfers.find((transfer) => transferIdentity(transfer) === line.transferRecordKey);
+        if (exactTransfer) return exactTransfer;
+      }
+      return transfers.find((transfer) =>
         transfer.journal === line.journal ||
         transfer.reversalJournal === line.journal ||
         transfer.id === line.transferId
@@ -7899,8 +8126,13 @@
       if (!transfer?.journal) return;
       const details = transferLedgerDetails(transfer);
       if (!details) return;
+      const recordKey = transferIdentity(transfer);
       state.ledger = state.ledger.map((line) =>
-        line.source === "TRANSFER" && (line.journal === transfer.journal || line.transferId === transfer.id)
+        line.source === "TRANSFER" && (
+          line.transferRecordKey
+            ? line.transferRecordKey === recordKey
+            : line.journal === transfer.journal
+        )
           ? { ...line, details }
           : line
       );
@@ -7922,7 +8154,8 @@
     }
 
     function showSpecialAgentPaidOutColumn(viewer, ledgerActor) {
-      return viewer?.role === "Master" && actorHasSpecialPayout(ledgerActor?.role);
+      if (!actorHasSpecialPayout(ledgerActor?.role)) return false;
+      return viewer?.role === "Master" || viewer?.id === ledgerActor?.id || viewer?.name === ledgerActor?.name;
     }
 
     function ledgerColumnCount(showOrderInfo, showPaidOutInfo = false) {
@@ -7962,8 +8195,8 @@
       const headers = ["Date", "Journal", "Order / Transfer No.", "Source", "Details"];
       if (showOrderInfo) {
         headers.push("Ordering Broker", "Ordered Amount", "Rate", "%", "Payout Currency");
-        if (showPaidOutInfo) headers.push("Paid Out");
       }
+      if (showPaidOutInfo) headers.push("Paid Out");
       headers.push("Account", "Direction", ...supportedCurrencies);
       els.ledgerHeadRow.innerHTML = headers.map(ledgerHeaderCell).join("");
     }
@@ -7985,7 +8218,7 @@
       return `${code} ${formatted}`;
     }
 
-    function ledgerOrderInfoCells(line, showPaidOutInfo = false) {
+    function ledgerOrderInfoCells(line) {
       const order = orderForLedgerLine(line);
       if (!order) return `
         <td class="ledger-order-info-cell ledger-ordering-cell"></td>
@@ -7993,22 +8226,35 @@
         <td class="ledger-order-info-cell ledger-rate-cell"></td>
         <td class="ledger-order-info-cell ledger-percent-cell"></td>
         <td class="ledger-order-info-cell ledger-payout-cell"></td>
-        ${showPaidOutInfo ? '<td class="ledger-order-info-cell ledger-paid-out-cell"></td>' : ""}
       `;
       const sourceCurrency = order.sourceCurrency || "USD";
       const sourceAmount = `${formatMinor(order.sourceAmountMinor || 0, sourceCurrency)} ${sourceCurrency}`;
       const rate = Number(order.rate || 0);
       const percent = ledgerOrderPercent(order);
       const payoutCurrency = order.payoutCurrency || sourceCurrency;
-      const paidOut = compactCurrencyAmount(payoutCurrency, order.payoutAmountMinor || order.sourceAmountMinor || 0);
       return `
         <td class="ledger-order-info-cell ledger-ordering-cell">${escapeHtml(order.broker || "")}</td>
         <td class="ledger-order-info-cell ledger-ordered-cell">${escapeHtml(sourceAmount)}</td>
         <td class="ledger-order-info-cell ledger-rate-cell">${Number.isFinite(rate) && rate > 0 ? escapeHtml(formatRate(rate)) : ""}</td>
         <td class="ledger-order-info-cell ledger-percent-cell">${percent === null ? "" : `${escapeHtml(formatRate(percent))}%`}</td>
         <td class="ledger-order-info-cell ledger-payout-cell">${escapeHtml(payoutCurrency)}</td>
-        ${showPaidOutInfo ? `<td class="ledger-order-info-cell ledger-paid-out-cell">${escapeHtml(paidOut)}</td>` : ""}
       `;
+    }
+
+    function orderPaidOutLabel(order) {
+      if (!order) return "";
+      const payoutCurrency = order.payoutCurrency || order.sourceCurrency || "USD";
+      const payoutAmountMinor = Number(order.payoutAmountMinor || order.sourceAmountMinor || 0);
+      return payoutAmountMinor > 0 ? compactCurrencyAmount(payoutCurrency, payoutAmountMinor) : "";
+    }
+
+    function ledgerPaidOutLabel(line) {
+      if (line?.source !== "ORDER_PAYMENT") return "";
+      return orderPaidOutLabel(orderForLedgerLine(line));
+    }
+
+    function ledgerPaidOutCell(line) {
+      return `<td class="ledger-order-info-cell ledger-paid-out-cell">${escapeHtml(ledgerPaidOutLabel(line))}</td>`;
     }
 
     function payerAgentPayoutMinorForOrder(order, journalLines, currency = "USD") {
@@ -8314,6 +8560,7 @@
     function ledgerExportRows(lines, actor, { dateOnly = false } = {}) {
       const viewer = selectedActor();
       const options = ledgerExportOptions(actor);
+      const showPaidOutInfo = showSpecialAgentPaidOutColumn(viewer, actor);
       const rows = lines.map((line) => {
         const row = {
           Date: dateOnly ? displayDateOnly(line.postedAt) : displayDate(line.postedAt),
@@ -8323,6 +8570,7 @@
           Details: ledgerLineDetails(line, viewer, actor)
         };
         addLedgerExportOptionColumns(row, options, ledgerOrderExportValues(line));
+        if (showPaidOutInfo) row["Paid Out"] = ledgerPaidOutLabel(line);
         return {
           ...row,
           Account: line.account,
@@ -8350,6 +8598,7 @@
             Details: ""
           };
           addLedgerExportOptionColumns(row, options);
+          if (showPaidOutInfo) row["Paid Out"] = "";
           return {
             ...row,
             Account: `${actor.name} ACTOR_CLEARING`,
@@ -8368,6 +8617,7 @@
           Details: ""
         };
         addLedgerExportOptionColumns(row, options);
+        if (showPaidOutInfo) row["Paid Out"] = "";
         balanceRows.push({
           ...row,
           Account: `${actor.name} ACTOR_CLEARING`,
@@ -8478,6 +8728,7 @@
         Reference: 18,
         Status: 10,
         Amount: 16,
+        "Paid Out": 16,
         ...customWidths
       };
       const doc = new JsPdf({ orientation: "landscape", unit: "pt", format: "a4", compress: true, putOnlyUsedFonts: true });
@@ -8670,6 +8921,7 @@
         ...presentCurrencies.filter((currency) => currency !== primaryBaseCurrency && !supportedCurrencies.includes(currency)).sort()
       ];
       const showCurrencyColumns = currencies.length > 1;
+      const showPaidOut = orderedRecords.some((record) => Boolean(record.paidOut));
       const buildRow = (record) => {
         const exportedAmountMinor = pdfMode && Number.isFinite(Number(record.signedAmountMinor))
           ? Number(record.signedAmountMinor)
@@ -8686,6 +8938,7 @@
         if (pdfMode) row.Position = record.position || "";
         row.Details = record.details;
         row.Amount = `${formatMinor(exportedAmountMinor, record.currency)} ${record.currency}`;
+        if (showPaidOut) row["Paid Out"] = record.paidOut || "";
         if (showCurrencyColumns) {
           currencies.forEach((currency) => {
             if (pdfMode && currency === "EUR" && !includeEur) return;
@@ -8816,7 +9069,7 @@
           ? `<small class="muted">Last sent ${escapeHtml(displayDate(order.lastReminderAt))}</small>`
           : "";
         return `
-          <tr class="${orderRecordIsVoided(order) ? "void-row" : ""}">
+          <tr class="${orderRecordIsVoided(order) ? "void-row" : ""}" data-search-target="${escapeHtml(orderSearchTargetKey(order))}" tabindex="-1">
             <td>${orderNumberHtml(order, actor)}${orderDetailsHtml(order, actor)}</td>
             <td>${escapeHtml(order.broker)}</td>
             <td>${escapeHtml(payoutActor)}</td>
@@ -8859,7 +9112,7 @@
               ? "warn"
               : "";
         return `
-          <tr class="${orderRecordIsVoided(order) ? "void-row" : ""}">
+          <tr class="${orderRecordIsVoided(order) ? "void-row" : ""}" data-search-target="${escapeHtml(orderSearchTargetKey(order))}" tabindex="-1">
             <td>${orderNumberHtml(order, actor)}${orderDetailsHtml(order, actor)}</td>
             <td>${actor?.role === "Master" || order.broker === actor?.name ? escapeHtml(order.broker) : '<span class="muted">Master assigned</span>'}</td>
             <td>${escapeHtml(payoutAgent)}</td>
@@ -8954,7 +9207,7 @@
         const creditReminder = actorCanSeeCreditReminder(item, actor) ? item.creditReminder || "" : "";
         const draftValue = receivablePaymentDrafts.get(item.id) ?? "";
         return `
-          <tr class="${isVoided ? "void-row" : ""}">
+          <tr class="${isVoided ? "void-row" : ""}" data-search-target="${escapeHtml(receivableSearchTargetKey(item))}" tabindex="-1">
             <td>${escapeHtml(displayDateOnly(item.createdAt))}</td>
             <td><strong>${escapeHtml(item.id)}</strong></td>
             <td>${escapeHtml(item.borrower)}</td>
@@ -9103,6 +9356,34 @@
       ]);
     }
 
+    function orderSearchTargetKey(order) {
+      return `order:${text(order?.internalOrderId || order?.id || order?.brokerOrderNumber)}`;
+    }
+
+    function transferSearchTargetKey(transfer) {
+      return `transfer:${text(transferIdentity(transfer) || transfer?.journal)}`;
+    }
+
+    function receivableSearchTargetKey(receivable) {
+      return `receivable:${text(receivable?.id || receivable?.orderId)}`;
+    }
+
+    function ledgerSearchTargetKey(line) {
+      return [
+        "ledger",
+        line?.journal,
+        line?.entryId,
+        line?.account,
+        line?.currency,
+        line?.amountMinor,
+        line?.postedAt
+      ].map((value) => text(value)).join(":");
+    }
+
+    function archiveBalanceSearchTargetKey(archive, currency) {
+      return `archive:${text(archive?.id)}:${text(currency)}`;
+    }
+
     function orderSearchResult(order, viewer, type = "Order", statusOverride = "") {
       const sourceCurrency = order.sourceCurrency || "USD";
       const payoutCurrency = order.payoutCurrency || sourceCurrency;
@@ -9128,6 +9409,11 @@
         searchKind: "order",
         searchParticipants: orderSearchParticipants(order),
         searchParticipant: "",
+        destinationView: order.searchArchiveId ? "archive" : "orders",
+        destinationTarget: orderSearchTargetKey(order),
+        destinationActor: order.searchArchiveActor || "",
+        destinationArchiveId: order.searchArchiveId || "",
+        destinationClosedAt: order.searchArchiveClosedAt || "",
         type,
         date: order.paidAt || order.sentAt || order.createdAt || order.archivedAt || "",
         time: new Date(order.paidAt || order.sentAt || order.createdAt || order.archivedAt || 0).getTime() || 0,
@@ -9190,10 +9476,15 @@
       const amount = `${money(sourceCurrency, transfer.sourceAmountMinor || transfer.amountMinor || 0)} -> ${money(payoutCurrency, transfer.amountMinor || 0)}`;
       const details = transferDetailsForSearch(transfer);
       return {
-        searchGroupKey: transfer.id ? `transfer:${transfer.id}` : "",
+        searchGroupKey: transfer.id ? `transfer:${transferIdentity(transfer)}` : "",
         searchKind: "transfer",
         searchParticipants: uniqueSearchParticipants([transfer.from, transfer.to, transfer.requestedTo, "Master"]),
         searchParticipant: "",
+        destinationView: transfer.searchArchiveId ? "archive" : "transfers",
+        destinationTarget: transferSearchTargetKey(transfer),
+        destinationActor: transfer.searchArchiveActor || "",
+        destinationArchiveId: transfer.searchArchiveId || "",
+        destinationClosedAt: transfer.searchArchiveClosedAt || "",
         type,
         date: transfer.reversedAt || transfer.paidOutAt || transfer.acceptedAt || transfer.approvedAt || transfer.forwardedAt || transfer.sentAt || transfer.createdAt || transfer.archivedAt || "",
         time: new Date(transfer.reversedAt || transfer.paidOutAt || transfer.acceptedAt || transfer.approvedAt || transfer.forwardedAt || transfer.sentAt || transfer.createdAt || transfer.archivedAt || 0).getTime() || 0,
@@ -9258,6 +9549,11 @@
         searchKind: "ledger",
         searchParticipants: participant ? [participant] : [],
         searchParticipant: participant,
+        destinationView: line.searchArchiveId ? "archive" : "ledger",
+        destinationTarget: ledgerSearchTargetKey(line),
+        destinationActor: line.searchArchiveActor || participant || "",
+        destinationArchiveId: line.searchArchiveId || "",
+        destinationClosedAt: line.searchArchiveClosedAt || "",
         type: typeOverride || (line.source === "JOURNAL" ? "Journal" : line.source === "WITHDRAWAL" ? "Withdrawal" : "Ledger"),
         date: line.postedAt || line.archivedAt || "",
         time: new Date(line.postedAt || line.archivedAt || 0).getTime() || 0,
@@ -9317,6 +9613,11 @@
         searchKind: "receivable",
         searchParticipants: uniqueSearchParticipants([item.borrower, "Master"]),
         searchParticipant: "",
+        destinationView: item.searchArchiveId ? "archive" : "receivables",
+        destinationTarget: receivableSearchTargetKey(item),
+        destinationActor: item.searchArchiveActor || item.borrower || "",
+        destinationArchiveId: item.searchArchiveId || "",
+        destinationClosedAt: item.searchArchiveClosedAt || "",
         type: "Receivable",
         date: item.createdAt || item.updatedAt || "",
         time: new Date(item.createdAt || item.updatedAt || 0).getTime() || 0,
@@ -9360,6 +9661,15 @@
         `Closed: ${displayDate(archive.closedAt)}`
       ].join(" - ");
       return {
+        searchGroupKey: `archive:${archive.id || "report"}:${currency}`,
+        searchKind: "archive",
+        searchParticipants: uniqueSearchParticipants([archive.actor]),
+        searchParticipant: archive.actor || "",
+        destinationView: "archive",
+        destinationTarget: archiveBalanceSearchTargetKey(archive, currency),
+        destinationActor: archive.actor || "",
+        destinationArchiveId: archive.id || "",
+        destinationClosedAt: archive.closedAt || "",
         type: "Closed Balance",
         date: archive.closedAt || archive.archivedAt || "",
         time: new Date(archive.closedAt || archive.archivedAt || 0).getTime() || 0,
@@ -9384,6 +9694,9 @@
       return {
         ...order,
         archivedAt: archive.closedAt || order.archivedAt,
+        searchArchiveId: archive.id || "",
+        searchArchiveActor: archive.actor || "",
+        searchArchiveClosedAt: archive.closedAt || "",
         state: order.state || "Archived"
       };
     }
@@ -9392,6 +9705,9 @@
       return {
         ...transfer,
         archivedAt: archive.closedAt || transfer.archivedAt,
+        searchArchiveId: archive.id || "",
+        searchArchiveActor: archive.actor || "",
+        searchArchiveClosedAt: archive.closedAt || "",
         state: transfer.state || "Archived"
       };
     }
@@ -9400,6 +9716,9 @@
       return {
         ...line,
         archivedAt: archive.closedAt || line.archivedAt,
+        searchArchiveId: archive.id || "",
+        searchArchiveActor: archive.actor || "",
+        searchArchiveClosedAt: archive.closedAt || "",
         details: line.details || archive.details || ""
       };
     }
@@ -9451,7 +9770,10 @@
         ]));
         const visibleParticipants = participants.length ? participants : ["Master"];
         return visibleParticipants.map((participant) => {
-          const preferred = preferredGroupedSearchResult(group, participant);
+          const destinationMatches = group.filter((result) =>
+            result.destinationView === "archive" && result.destinationActor === participant
+          );
+          const preferred = preferredGroupedSearchResult(destinationMatches.length ? destinationMatches : group, participant);
           return { ...preferred, actors: participant };
         });
       });
@@ -9465,9 +9787,10 @@
         : state.orders.filter((order) => order.broker === actor.name || order.agent === actor.name))
         .map((order) => orderSearchResult(order, actor));
       const transferResults = (viewerIsMaster
-        ? state.transfers.filter((transfer) => !transferBalanceWasClosed(transfer))
+        ? state.transfers.filter((transfer) => !transfer.masterTransactionClosedAt && !transferBalanceWasClosed(transfer))
         : state.transfers.filter((transfer) =>
             (transfer.from === actor.name || transfer.to === actor.name) &&
+            !transfer.masterTransactionClosedAt &&
             !transferArchivedForActor(transfer, actor)
           ))
         .map((transfer) => transferSearchResult(transfer));
@@ -9495,7 +9818,13 @@
             )
           );
           const receivableRows = (archive.receivables || []).map((receivable) => {
-            const result = receivableSearchResult({ ...receivable, archivedAt: receivable.archivedAt || archive.closedAt });
+            const result = receivableSearchResult({
+              ...receivable,
+              archivedAt: receivable.archivedAt || archive.closedAt,
+              searchArchiveId: archive.id || "",
+              searchArchiveActor: archive.actor || "",
+              searchArchiveClosedAt: archive.closedAt || ""
+            });
             return {
               ...result,
               type: "Archived Receivable",
@@ -9544,22 +9873,89 @@
         .join("");
     }
 
+    function prepareArchiveSearchDestination(result) {
+      const actor = selectedActor();
+      if (actor?.role === "Master" && result.destinationActor) {
+        els.archiveActorFilter.value = result.destinationActor;
+      }
+      els.archiveMonthFilter.value = "";
+      els.archiveDatePreset.value = "custom";
+      els.archiveDateFrom.value = "";
+      els.archiveDateTo.value = "";
+      els.archiveAmountMin.value = "";
+      els.archiveAmountMax.value = "";
+      els.archiveSearch.value = "";
+      renderArchive();
+      const month = archiveMonthKey(result.destinationClosedAt);
+      const monthExists = Array.from(els.archiveMonthFilter.options).some((option) => option.value === month);
+      if (month && monthExists) {
+        els.archiveMonthFilter.value = month;
+        renderArchive();
+      }
+    }
+
+    function prepareLedgerSearchDestination(result) {
+      const viewer = selectedActor();
+      if (viewer?.role !== "Master") return;
+      const actorName = result.destinationActor || result.searchParticipant || result.actors;
+      const ledgerActor = activeActors().find((actor) => actor.name === actorName && actor.role !== "Master");
+      if (!ledgerActor) return;
+      state.selectedLedgerActor = ledgerActor.name;
+      renderLedgerActorSelector();
+      renderLedger();
+    }
+
+    function focusSearchDestination(result, { remember = true } = {}) {
+      if (remember) activeSearchDestination = { result, expiresAt: Date.now() + 5000 };
+      clearTimeout(searchDestinationFocusTimer);
+      searchDestinationFocusTimer = window.setTimeout(() => {
+        const view = document.getElementById(result.destinationView);
+        if (!view || !result.destinationTarget) return;
+        const target = Array.from(view.querySelectorAll("[data-search-target]"))
+          .find((element) => element.dataset.searchTarget === result.destinationTarget);
+        if (!target) {
+          notifyEvent("Destination opened", `${result.reference || result.type} is not in the current active list.`);
+          return;
+        }
+        document.querySelectorAll(".search-destination-highlight").forEach((element) => element.classList.remove("search-destination-highlight"));
+        target.classList.add("search-destination-highlight");
+        target.setAttribute("tabindex", "-1");
+        target.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+        target.focus({ preventScroll: true });
+        clearTimeout(searchDestinationHighlightTimer);
+        searchDestinationHighlightTimer = window.setTimeout(() => {
+          target.classList.remove("search-destination-highlight");
+          activeSearchDestination = null;
+        }, Math.max(0, (activeSearchDestination?.expiresAt || Date.now()) - Date.now()));
+      }, 50);
+    }
+
+    function navigateToGlobalSearchResult(result) {
+      if (!result?.destinationView || !canUseView(result.destinationView)) return;
+      setView(result.destinationView);
+      if (result.destinationView === "archive") prepareArchiveSearchDestination(result);
+      if (result.destinationView === "ledger") prepareLedgerSearchDestination(result);
+      focusSearchDestination(result);
+    }
+
     function renderGlobalSearch() {
       if (!els.globalSearchRows) return;
       const terms = searchTerms();
       if (!terms.length) {
+        renderedGlobalSearchResults = [];
         els.globalSearchCount.textContent = "Ready";
         els.globalSearchRows.innerHTML = '<tr><td colspan="7">Enter text or number to search.</td></tr>';
         return;
       }
       const results = buildGlobalSearchResults(selectedActor(), terms);
+      renderedGlobalSearchResults = results;
       els.globalSearchCount.textContent = `${results.length} result${results.length === 1 ? "" : "s"}`;
       if (results.length === 0) {
         els.globalSearchRows.innerHTML = '<tr><td colspan="7">No matching records.</td></tr>';
         return;
       }
-      els.globalSearchRows.innerHTML = results.map((result) => `
-        <tr>
+      els.globalSearchRows.innerHTML = results.map((result, index) => `
+        <tr class="search-result-row" data-search-result-index="${index}" tabindex="0" role="link" title="Open ${escapeHtml(result.type)} ${escapeHtml(result.reference)}" aria-label="Open ${escapeHtml(result.type)} ${escapeHtml(result.reference)}">
           <td>${escapeHtml(displayDate(result.date))}</td>
           <td><span class="state-pill">${escapeHtml(result.type)}</span></td>
           <td><strong>${escapeHtml(result.reference)}</strong></td>
@@ -9763,13 +10159,14 @@
         return;
       }
       const lineRows = visibleLines.map((line) => `
-        <tr class="${ledgerLineIsForVoidedOrder(line) ? "void-row" : ""}">
+        <tr class="${ledgerLineIsForVoidedOrder(line) ? "void-row" : ""}" data-search-target="${escapeHtml(ledgerSearchTargetKey(line))}" tabindex="-1">
           <td class="ledger-date-cell">${escapeHtml(displayDate(line.postedAt))}</td>
           <td class="ledger-journal-cell"><strong>${escapeHtml(line.journal)}</strong></td>
           <td class="ledger-reference-cell">${escapeHtml(ledgerReferenceNumber(line, actor, ledgerActor))}</td>
           <td class="ledger-source-cell">${escapeHtml(line.source)}</td>
           ${ledgerDetailsCell(line, actor, ledgerActor)}
-          ${showOrderInfo ? ledgerOrderInfoCells(line, showPaidOutInfo) : ""}
+          ${showOrderInfo ? ledgerOrderInfoCells(line) : ""}
+          ${showPaidOutInfo ? ledgerPaidOutCell(line) : ""}
           <td class="ledger-account-cell">${escapeHtml(line.account)}</td>
           <td class="ledger-direction-cell ${toneClass(line.direction.toLowerCase())}"><strong>${escapeHtml(line.direction)}</strong></td>
           ${currencyCells(line.currency, line.amountMinor)}
@@ -9968,9 +10365,10 @@
     function renderTransfers() {
       const actor = selectedActor();
       const visibleTransfers = actor?.role === "Master"
-        ? state.transfers.filter((transfer) => !transferBalanceWasClosed(transfer))
+        ? state.transfers.filter((transfer) => !transfer.masterTransactionClosedAt && !transferBalanceWasClosed(transfer))
         : state.transfers.filter((transfer) =>
             (transfer.from === actor?.name || transfer.to === actor?.name) &&
+            !transfer.masterTransactionClosedAt &&
             !transferArchivedForActor(transfer, actor)
           );
       if (visibleTransfers.length === 0) {
@@ -9979,6 +10377,7 @@
         return;
       }
       els.transferList.innerHTML = visibleTransfers.map((transfer) => {
+        const actionId = escapeHtml(transferIdentity(transfer));
         const canApprove = actor?.role === "Master" && transfer.state === "Pending Approval";
         const canForward = canApprove && transferArrivedAtMaster(transfer) && !transferWasSentByMaster(transfer);
         const canRespond = actor?.role !== "Master" &&
@@ -9994,28 +10393,28 @@
         const forwardContext = canForward ? forwardTransferDraft(transfer) : null;
         const forwardForm = forwardContext
           ? `
-            <div class="forward-transfer-form" data-id="${escapeHtml(transfer.id)}">
+            <div class="forward-transfer-form" data-id="${actionId}">
               <span class="forward-transfer-source">Forward ${money(transfer.sourceCurrency || transfer.currency, transfer.sourceAmountMinor || transfer.amountMinor)} from ${escapeHtml(transfer.from)}</span>
               <label>Receiving Actor
-                <select class="forward-transfer-actor" data-id="${escapeHtml(transfer.id)}">
+                <select class="forward-transfer-actor" data-id="${actionId}">
                   ${forwardContext.targets.map((target) => `<option value="${escapeHtml(target.id)}" ${target.id === forwardContext.draft.toActorId ? "selected" : ""}>${escapeHtml(target.name)}</option>`).join("")}
                 </select>
               </label>
               <label>Payout currency
-                <select class="forward-transfer-currency" data-id="${escapeHtml(transfer.id)}">
+                <select class="forward-transfer-currency" data-id="${actionId}">
                   ${forwardContext.currencies.map((currency) => `<option value="${currency}" ${currency === forwardContext.draft.payoutCurrency ? "selected" : ""}>${currency}</option>`).join("")}
                 </select>
               </label>
               <label>Rate
-                <input class="forward-transfer-rate" data-id="${escapeHtml(transfer.id)}" inputmode="decimal" value="${escapeHtml(forwardContext.draft.rate)}">
+                <input class="forward-transfer-rate" data-id="${actionId}" inputmode="decimal" value="${escapeHtml(forwardContext.draft.rate)}">
               </label>
               <label>Payout amount
-                <input class="forward-transfer-payout" data-id="${escapeHtml(transfer.id)}" inputmode="decimal" value="${escapeHtml(forwardContext.draft.payoutAmount)}">
+                <input class="forward-transfer-payout" data-id="${actionId}" inputmode="decimal" value="${escapeHtml(forwardContext.draft.payoutAmount)}">
               </label>
               <label>Percent (%)
-                <input class="forward-transfer-percent" data-id="${escapeHtml(transfer.id)}" inputmode="decimal" value="${escapeHtml(forwardContext.draft.commissionPercent)}">
+                <input class="forward-transfer-percent" data-id="${actionId}" inputmode="decimal" value="${escapeHtml(forwardContext.draft.commissionPercent)}">
               </label>
-              <button class="btn primary forward-transfer-submit" data-id="${escapeHtml(transfer.id)}" type="button" ${!forwardContext.receiver || processingTransferIds.has(transfer.id) ? "disabled" : ""}>Forward for Acceptance</button>
+              <button class="btn primary forward-transfer-submit" data-id="${actionId}" type="button" ${!forwardContext.receiver || processingTransferIds.has(transfer.id) ? "disabled" : ""}>Forward for Acceptance</button>
             </div>
           `
           : "";
@@ -10023,9 +10422,9 @@
           ? `
             <div>
               <div class="order-actions">
-                <button class="btn secondary approve-transfer" data-id="${transfer.id}" type="button" ${processingTransferIds.has(transfer.id) ? "disabled" : ""}>${canForward ? "Approve to Master" : "Approve"}</button>
-                <button class="btn danger reject-transfer" data-id="${transfer.id}" type="button">Reject</button>
-                <button class="btn secondary return-transfer" data-id="${transfer.id}" type="button">Return Back</button>
+                <button class="btn secondary approve-transfer" data-id="${actionId}" type="button" ${processingTransferIds.has(transfer.id) ? "disabled" : ""}>${canForward ? "Approve to Master" : "Approve"}</button>
+                <button class="btn danger reject-transfer" data-id="${actionId}" type="button">Reject</button>
+                <button class="btn secondary return-transfer" data-id="${actionId}" type="button">Return Back</button>
               </div>
               ${forwardForm}
             </div>
@@ -10033,14 +10432,14 @@
           : canRespond
             ? `
               <div class="order-actions">
-                <button class="btn primary accept-forwarded-transfer" data-id="${transfer.id}" type="button" ${processingTransferIds.has(transfer.id) ? "disabled" : ""}>Accept</button>
-                <button class="btn danger reject-forwarded-transfer" data-id="${transfer.id}" type="button" ${processingTransferIds.has(transfer.id) ? "disabled" : ""}>Reject</button>
+                <button class="btn primary accept-forwarded-transfer" data-id="${actionId}" type="button" ${processingTransferIds.has(transfer.id) ? "disabled" : ""}>Accept</button>
+                <button class="btn danger reject-forwarded-transfer" data-id="${actionId}" type="button" ${processingTransferIds.has(transfer.id) ? "disabled" : ""}>Reject</button>
               </div>
             `
           : canReverse
-            ? `<button class="btn danger reverse-transfer" data-id="${transfer.id}" type="button" ${processingTransferIds.has(transfer.id) ? "disabled" : ""}>Reverse</button>`
+            ? `<button class="btn danger reverse-transfer" data-id="${actionId}" type="button" ${processingTransferIds.has(transfer.id) ? "disabled" : ""}>Reverse</button>`
             : canUpdate
-              ? `<button class="btn secondary edit-transfer" data-id="${transfer.id}" type="button">Update Details</button>`
+              ? `<button class="btn secondary edit-transfer" data-id="${actionId}" type="button">Update Details</button>`
               : `<button class="btn secondary" type="button" disabled>${transfer.state === "Approved" ? icons.check : ""}${transfer.state}</button>`;
         const dateBits = [
           transfer.createdAt ? `Created: ${displayDate(transfer.createdAt)}` : "",
@@ -10056,9 +10455,9 @@
         const transferPercent = transferCommissionPercent(transfer);
         const transferCommission = transferCommissionMinor(transfer);
         return `
-        <div class="transfer-row">
+        <div class="transfer-row" data-search-target="${escapeHtml(transferSearchTargetKey(transfer))}" tabindex="-1">
           <div>
-            <strong>${escapeHtml(transfer.from)} -> ${escapeHtml(transfer.to)}</strong>
+            <strong>${escapeHtml(transfer.id)} - ${escapeHtml(transfer.from)} -> ${escapeHtml(transfer.to)}</strong>
             ${transfer.forwardedAt && transfer.requestedTo ? `<span>Originally sent to ${escapeHtml(transfer.requestedTo)} · Forwarded by ${escapeHtml(transfer.forwardedBy || "Master")}</span>` : ""}
             ${transfer.remarks ? `<span>Remarks: ${escapeHtml(transfer.remarks)}</span>` : ""}
             <span>${money(transfer.sourceCurrency || transfer.currency, transfer.sourceAmountMinor || transfer.amountMinor)} -> ${money(transfer.currency, transfer.amountMinor)} at ${escapeHtml(transfer.rate || "1")} · ${transfer.state}</span>
@@ -10159,7 +10558,7 @@
     function renderArchiveBalanceSummary(byActor, filters) {
       if (!els.archiveBalanceSummary) return;
       const groups = Object.entries(byActor).map(([actorName, archives]) => {
-        const visibleArchives = sortedArchiveStatements(archives)
+        const visibleArchives = sortedArchiveStatements(archives.filter((archive) => archive.kind !== "master-transactions"))
           .filter((archive) => archiveBalanceStatementVisible(archive, filters));
         if (!visibleArchives.length) return "";
         const primaryCurrency = archiveStatementBaseCurrency(visibleArchives[0]);
@@ -10246,6 +10645,7 @@
           date: archive.closedAt,
           type: "Closed Balance",
           reference: archive.id,
+          searchTarget: archiveBalanceSearchTargetKey(archive, currency),
           direction,
           position,
           details: "",
@@ -10258,6 +10658,11 @@
         const date = order.sentAt || order.createdAt || order.postedAt || archive.closedAt;
         const amount = archivedOrderAmount(archive, order);
         const voided = orderRecordIsVoided(order) || order.excludedFromCalculations === true;
+        const archivedActor = state.actors.find((item) => item.id === archive.actorId || item.name === archive.actor);
+        const archivedActorRole = archive.actorRole || archivedActor?.role || "";
+        const paidOut = order.agent === archive.actor && actorHasSpecialPayout(archivedActorRole)
+          ? orderPaidOutLabel(order)
+          : "";
         const archiveOrderViewer = viewer?.role === "Master" && archive.actor === order.agent
           ? { name: archive.actor, role: archive.actorRole || "Agent" }
           : viewer;
@@ -10278,8 +10683,10 @@
           date,
           type: "Order",
           reference,
+          searchTarget: orderSearchTargetKey(order),
           direction,
           details,
+          paidOut,
           voided,
           status: voided ? "Voided - Excluded" : "Locked",
           ...amount
@@ -10301,6 +10708,7 @@
           order.voidJournal,
           direction,
           details,
+          paidOut,
           amount.currency
         ]);
       });
@@ -10320,6 +10728,7 @@
           date,
           type: "Receivable",
           reference: receivable.brokerOrderNumber || receivable.orderId || receivable.id,
+          searchTarget: receivableSearchTargetKey(receivable),
           direction,
           details,
           currency,
@@ -10356,6 +10765,7 @@
           date,
           type: "Transfer",
           reference: transfer.id,
+          searchTarget: transferSearchTargetKey(transfer),
           direction,
           details,
           currency: transfer.currency || transfer.sourceCurrency || "USD",
@@ -10378,8 +10788,9 @@
         const details = line.details || `${line.account} ${line.direction}`;
         addRow({
           date,
-          type: "Ledger",
+          type: line.source === "JOURNAL" ? "Journal" : line.source === "WITHDRAWAL" ? "Withdrawal" : "Ledger",
           reference,
+          searchTarget: ledgerSearchTargetKey(line),
           direction: line.direction || "",
           details,
           currency: line.currency || "USD",
@@ -10456,7 +10867,7 @@
       renderArchiveBalanceSummary(byActor, filters);
       let recordCount = 0;
       const rows = Object.entries(byActor).flatMap(([actorName, archives]) => {
-        const actorRows = [`<tr><td colspan="6"><strong>${escapeHtml(actorName)}</strong></td></tr>`];
+        const actorRows = [`<tr><td colspan="7"><strong>${escapeHtml(actorName)}</strong></td></tr>`];
         sortedArchiveStatements(archives)
           .forEach((archive) => {
             const records = sortedTransactionRows(
@@ -10469,7 +10880,7 @@
             recordCount += records.length;
             actorRows.push(`
               <tr>
-                <td colspan="6"><strong>${escapeHtml(archiveMonthLabel(archiveMonthKey(archive.closedAt)))} closed statement</strong> - ${escapeHtml(displayDate(archive.closedAt))} - ${escapeHtml(archive.id || "")}</td>
+                <td colspan="7"><strong>${escapeHtml(archiveMonthLabel(archiveMonthKey(archive.closedAt)))} closed statement</strong> - ${escapeHtml(displayDate(archive.closedAt))} - ${escapeHtml(archive.id || "")}</td>
               </tr>
             `);
             records.forEach((record) => {
@@ -10477,12 +10888,13 @@
                 ? record.details
                 : [record.direction, record.details].filter(Boolean).join(" - ");
               actorRows.push(`
-                <tr class="${record.voided ? "void-row" : ""}">
+                <tr class="${record.voided ? "void-row" : ""}" data-search-target="${escapeHtml(record.searchTarget || "")}" tabindex="-1">
                   <td>${escapeHtml(displayDate(record.date))}</td>
                   <td>${escapeHtml(record.type)}</td>
                   <td><strong>${escapeHtml(record.reference)}</strong></td>
                   <td>${escapeHtml(description)}</td>
                   <td>${lockedAmount(record.currency, record.amountMinor)}</td>
+                  <td>${escapeHtml(record.paidOut || "")}</td>
                   <td><span class="state-pill ${record.voided ? "danger" : ""}">${escapeHtml(record.status || "Locked")}</span></td>
                 </tr>
               `);
@@ -10492,7 +10904,7 @@
       });
       els.archiveRows.innerHTML = rows.length
         ? rows.join("")
-        : '<tr><td colspan="6">No closed transactions archived yet.</td></tr>';
+        : '<tr><td colspan="7">No closed transactions archived yet.</td></tr>';
       els.exportArchiveExcelButton.disabled = recordCount === 0;
       els.exportArchivePdfButton.disabled = recordCount === 0;
     }
@@ -10575,17 +10987,20 @@
       const payoutAmountMinor = Number(transfer.amountMinor || 0);
       const commissionMinor = transferCommissionMinor(transfer);
       transfer.commissionMinor = commissionMinor;
+      transfer.recordKey ||= transferIdentity(transfer);
+      transfer.masterTransactionCycle = Number(transfer.masterTransactionCycle || state.masterTransactionCycle || 0);
+      const transferRecordKey = transferIdentity(transfer);
       const details = transferLedgerDetails(transfer);
       state.ledger.unshift(
-        { journal: journalId, transferId: transfer.id, source: "TRANSFER", account: transfer.to, direction: "Debit", currency: transfer.currency, amountMinor: payoutAmountMinor, details, postedAt },
-        { journal: journalId, transferId: transfer.id, source: "TRANSFER", account: "MASTER_FX_CLEARING", direction: "Credit", currency: transfer.currency, amountMinor: payoutAmountMinor, details, postedAt },
-        { journal: journalId, transferId: transfer.id, source: "TRANSFER", account: "MASTER_FX_CLEARING", direction: "Debit", currency: sourceCurrency, amountMinor: sourceAmountMinor, details, postedAt },
-        { journal: journalId, transferId: transfer.id, source: "TRANSFER", account: transfer.from, direction: "Credit", currency: sourceCurrency, amountMinor: sourceAmountMinor, details, postedAt }
+        { journal: journalId, transferId: transfer.id, transferRecordKey, source: "TRANSFER", account: transfer.to, direction: "Debit", currency: transfer.currency, amountMinor: payoutAmountMinor, masterTransactionCycle: transfer.masterTransactionCycle, details, postedAt },
+        { journal: journalId, transferId: transfer.id, transferRecordKey, source: "TRANSFER", account: "MASTER_FX_CLEARING", direction: "Credit", currency: transfer.currency, amountMinor: payoutAmountMinor, masterTransactionCycle: transfer.masterTransactionCycle, details, postedAt },
+        { journal: journalId, transferId: transfer.id, transferRecordKey, source: "TRANSFER", account: "MASTER_FX_CLEARING", direction: "Debit", currency: sourceCurrency, amountMinor: sourceAmountMinor, masterTransactionCycle: transfer.masterTransactionCycle, details, postedAt },
+        { journal: journalId, transferId: transfer.id, transferRecordKey, source: "TRANSFER", account: transfer.from, direction: "Credit", currency: sourceCurrency, amountMinor: sourceAmountMinor, masterTransactionCycle: transfer.masterTransactionCycle, details, postedAt }
       );
       if (commissionMinor > 0) {
         state.ledger.unshift(
-          { journal: journalId, transferId: transfer.id, source: "TRANSFER", account: transfer.from, direction: "Debit", currency: sourceCurrency, amountMinor: commissionMinor, details, postedAt },
-          { journal: journalId, transferId: transfer.id, source: "TRANSFER", account: "MASTER_FEE_REVENUE", direction: "Credit", currency: sourceCurrency, amountMinor: commissionMinor, details, postedAt }
+          { journal: journalId, transferId: transfer.id, transferRecordKey, source: "TRANSFER", account: transfer.from, direction: "Debit", currency: sourceCurrency, amountMinor: commissionMinor, masterTransactionCycle: transfer.masterTransactionCycle, details, postedAt },
+          { journal: journalId, transferId: transfer.id, transferRecordKey, source: "TRANSFER", account: "MASTER_FEE_REVENUE", direction: "Credit", currency: sourceCurrency, amountMinor: commissionMinor, masterTransactionCycle: transfer.masterTransactionCycle, details, postedAt }
         );
       }
       syncTransferLedgerDetails(transfer);
@@ -10719,15 +11134,16 @@
     }
 
     function transferBalanceWasClosed(transfer) {
-      return Boolean(transfer?.archivedAt || transfer?.archivedActorIds?.length || transfer?.archivedActorNames?.length);
+      return Boolean(transfer?.masterTransactionClosedAt || transfer?.archivedAt || transfer?.archivedActorIds?.length || transfer?.archivedActorNames?.length);
     }
 
     function syncClosedTransferArchiveMarkers() {
-      const transfersById = new Map(state.transfers.map((transfer) => [transfer.id, transfer]));
+      const transfersById = new Map(state.transfers.map((transfer) => [transferIdentity(transfer), transfer]));
       state.archives.forEach((archive) => {
+        if (archive.kind === "master-transactions") return;
         const archiveActor = state.actors.find((actor) => actor.id === archive.actorId || actor.name === archive.actor);
         (archive.transfers || []).forEach((snapshot) => {
-          const transfer = transfersById.get(snapshot.id);
+          const transfer = transfersById.get(transferIdentity(snapshot));
           if (!transfer) return;
           const actorId = archive.actorId || archiveActor?.id || "";
           const actorName = archive.actor || archiveActor?.name || snapshot.actor || "";
@@ -10759,11 +11175,13 @@
         state.ledger.unshift(...originalLines.map((line) => ({
           journal: journalId,
           transferId: transfer.id,
+          transferRecordKey: transferIdentity(transfer),
           source: "TRANSFER_REVERSAL",
           account: line.account,
           direction: line.direction === "Debit" ? "Credit" : "Debit",
           currency: line.currency,
           amountMinor: line.amountMinor,
+          masterTransactionCycle: Number(transfer.masterTransactionCycle || 0),
           details,
           postedAt
         })));
@@ -10983,6 +11401,8 @@
     function archiveTransferSnapshot(transfer, actorName, closedAt = new Date().toISOString()) {
       return {
         id: transfer.id,
+        recordKey: transferIdentity(transfer),
+        masterTransactionCycle: Number(transfer.masterTransactionCycle || 0),
         actor: actorName,
         from: transfer.from,
         to: transfer.to,
@@ -11004,6 +11424,7 @@
         paidOutAt: transfer.paidOutAt || "",
         reversedAt: transfer.reversedAt || "",
         reversedBy: transfer.reversedBy || "",
+        masterTransactionClosedAt: transfer.masterTransactionClosedAt || "",
         archivedAt: closedAt,
         details: transferLedgerDetails(transfer)
       };
@@ -11015,12 +11436,15 @@
         journal: line.journal || "",
         entryId: line.entryId || "",
         transferId: line.transferId || "",
+        transferRecordKey: line.transferRecordKey || "",
         orderId: line.orderId || "",
         source: line.source || "",
         account: line.account || "",
         direction: line.direction || "",
         currency: line.currency || "USD",
         amountMinor: Number(line.amountMinor || 0),
+        masterTransactionCycle: Number(line.masterTransactionCycle || 0),
+        masterTransactionClosedAt: line.masterTransactionClosedAt || "",
         postedAt: line.postedAt || "",
         details: line.details || ledgerLineDetails(line, selectedActor()) || "",
         archivedAt: closedAt
@@ -11084,6 +11508,81 @@
       order.updatedAt = postedAt;
       markReceivableVoidedForOrder(order, actorName);
       syncSettlementsFromLedger();
+      return true;
+    }
+
+    function closeMasterTransactions() {
+      if (selectedActor()?.role !== "Master") return false;
+      const transfers = state.transfers.filter((transfer) => !transfer.masterTransactionClosedAt);
+      const unresolved = transfers.find((transfer) =>
+        !["Approved", "Reversed", "Rejected", "Cancelled"].includes(transfer.state)
+      );
+      if (unresolved) {
+        notifyEvent("Close unavailable", `${unresolved.id} is ${unresolved.state}. Resolve every open transfer before closing these transactions.`);
+        return false;
+      }
+      const manualLines = state.ledger.filter((line) =>
+        ["JOURNAL", "WITHDRAWAL"].includes(line.source) && !line.masterTransactionClosedAt
+      );
+      if (!transfers.length && !manualLines.length) {
+        notifyEvent("Nothing to close", "There are no open transfers, journals, or withdrawals in this period.");
+        return false;
+      }
+
+      const closedAt = new Date().toISOString();
+      const archiveId = `MTR-${Date.now()}`;
+      const master = masterActor();
+      const transferKeys = new Set(transfers.map(transferIdentity));
+      const transferJournals = new Set(transfers.flatMap((transfer) => [transfer.journal, transfer.reversalJournal]).filter(Boolean));
+      const reportLedgerLines = manualLines.filter((line) =>
+        line.source === "JOURNAL" ||
+        (line.source === "WITHDRAWAL" && line.direction === "Credit" && actorNameFromAccount(line.account))
+      );
+
+      state.transfers = state.transfers.map((transfer) =>
+        transferKeys.has(transferIdentity(transfer))
+          ? { ...transfer, masterTransactionClosedAt: closedAt, masterTransactionArchiveId: archiveId, updatedAt: closedAt }
+          : transfer
+      );
+      state.ledger = state.ledger.map((line) => {
+        const closesManualLine = ["JOURNAL", "WITHDRAWAL"].includes(line.source) && !line.masterTransactionClosedAt;
+        const closesTransferLine = ["TRANSFER", "TRANSFER_REVERSAL"].includes(line.source) && (
+          (line.transferRecordKey && transferKeys.has(line.transferRecordKey)) ||
+          transferJournals.has(line.journal)
+        );
+        return closesManualLine || closesTransferLine
+          ? { ...line, masterTransactionClosedAt: closedAt, masterTransactionArchiveId: archiveId }
+          : line;
+      });
+
+      const closedTransfers = state.transfers.filter((transfer) => transfer.masterTransactionArchiveId === archiveId);
+      state.archives.unshift({
+        id: archiveId,
+        kind: "master-transactions",
+        actor: "Master Transactions",
+        actorRole: "Master",
+        actorCurrency: master?.currency || "USD",
+        closedAt,
+        balances: {},
+        ledger: reportLedgerLines.map((line) => archiveLedgerSnapshot({
+          ...line,
+          masterTransactionClosedAt: closedAt,
+          masterTransactionArchiveId: archiveId
+        }, "Master Transactions", closedAt)),
+        orders: [],
+        receivables: [],
+        transfers: closedTransfers.map((transfer) => archiveTransferSnapshot(transfer, "Master Transactions", closedAt))
+      });
+
+      state.transferCounter = 0;
+      state.manualJournalCounter = 0;
+      state.withdrawalCounter = 0;
+      state.masterTransactionCycle = Number(state.masterTransactionCycle || 0) + 1;
+      state.editingTransferId = "";
+      notifyEvent(
+        "Transactions closed",
+        `${transfers.length} transfer${transfers.length === 1 ? "" : "s"}, ${reportLedgerLines.filter((line) => line.source === "JOURNAL").length} journal${reportLedgerLines.filter((line) => line.source === "JOURNAL").length === 1 ? "" : "s"}, and ${reportLedgerLines.filter((line) => line.source === "WITHDRAWAL").length} withdrawal${reportLedgerLines.filter((line) => line.source === "WITHDRAWAL").length === 1 ? "" : "s"} moved to Report. New numbering starts from 1.`
+      );
       return true;
     }
 
@@ -11159,9 +11658,9 @@
         !(order.state === "Paid" || order.state === "Voided") ||
         (order.broker !== actor.name && order.agent !== actor.name)
       );
-      const archivedTransferIds = new Set(archivedTransfers.map((transfer) => transfer.id));
+      const archivedTransferIds = new Set(archivedTransfers.map(transferIdentity));
       state.transfers = state.transfers.map((transfer) => {
-        if (!archivedTransferIds.has(transfer.id)) return transfer;
+        if (!archivedTransferIds.has(transferIdentity(transfer))) return transfer;
         return {
           ...transfer,
           archivedAt: transfer.archivedAt || closedAt,
@@ -11857,6 +12356,18 @@
       renderGlobalSearch();
       els.globalSearch.focus();
     });
+    els.globalSearchRows?.addEventListener("click", (event) => {
+      const row = event.target.closest("[data-search-result-index]");
+      if (!row) return;
+      navigateToGlobalSearchResult(renderedGlobalSearchResults[Number(row.dataset.searchResultIndex)]);
+    });
+    els.globalSearchRows?.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      const row = event.target.closest("[data-search-result-index]");
+      if (!row) return;
+      event.preventDefault();
+      navigateToGlobalSearchResult(renderedGlobalSearchResults[Number(row.dataset.searchResultIndex)]);
+    });
 
     document.getElementById("orderForm").addEventListener("input", (event) => {
       state.orderValidationVisible = false;
@@ -11944,7 +12455,7 @@
       const input = event.target;
       const transferId = input?.dataset?.id || "";
       if (!transferId || !input.matches(".forward-transfer-rate, .forward-transfer-payout, .forward-transfer-percent")) return;
-      const transfer = state.transfers.find((item) => item.id === transferId);
+      const transfer = transferByIdentity(transferId);
       if (!transfer) return;
       const context = forwardTransferDraft(transfer);
       const draft = { ...context.draft };
@@ -11968,14 +12479,14 @@
       } else {
         draft.commissionPercent = input.value;
       }
-      forwardTransferDrafts.set(transferId, draft);
+      forwardTransferDrafts.set(transfer.id, draft);
     });
 
     els.transferList.addEventListener("change", (event) => {
       const select = event.target;
       const transferId = select?.dataset?.id || "";
       if (!transferId || !select.matches(".forward-transfer-actor, .forward-transfer-currency")) return;
-      const transfer = state.transfers.find((item) => item.id === transferId);
+      const transfer = transferByIdentity(transferId);
       if (!transfer) return;
       const context = forwardTransferDraft(transfer);
       const draft = { ...context.draft };
@@ -11987,7 +12498,7 @@
       } else {
         draft.payoutCurrency = select.value;
       }
-      forwardTransferDrafts.set(transferId, draft);
+      forwardTransferDrafts.set(transfer.id, draft);
       renderTransfers();
     });
 
@@ -12137,19 +12648,42 @@
         setTimeout(() => setChatRecordButtonState("idle"), 1200);
         return;
       }
+      const preferredMimeType = ["audio/mp4", "audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/webm"]
+        .find((mimeType) => MediaRecorder.isTypeSupported?.(mimeType)) || "";
       chatAudioChunks = [];
-      chatRecorder = new MediaRecorder(stream);
-      chatRecorder.ondataavailable = (event) => {
+      const recorder = preferredMimeType
+        ? new MediaRecorder(stream, { mimeType: preferredMimeType })
+        : new MediaRecorder(stream);
+      chatRecorder = recorder;
+      recorder.ondataavailable = (event) => {
         if (event.data.size > 0) chatAudioChunks.push(event.data);
       };
-      chatRecorder.onstop = () => {
+      recorder.onerror = () => {
         stream.getTracks().forEach((track) => track.stop());
-        const blob = new Blob(chatAudioChunks, { type: "audio/webm" });
+        chatRecorder = null;
+        setChatRecordButtonState("unavailable");
+        notifyEvent("Voice recording failed", "Please try recording the message again.");
+        setTimeout(() => setChatRecordButtonState("idle"), 1200);
+      };
+      recorder.onstop = () => {
+        stream.getTracks().forEach((track) => track.stop());
+        chatRecorder = null;
+        const mimeType = chatAudioChunks.find((chunk) => chunk.type)?.type || recorder.mimeType || preferredMimeType || "audio/webm";
+        const blob = new Blob(chatAudioChunks, { type: mimeType });
+        if (!blob.size) {
+          notifyEvent("Voice recording is empty", "Please try recording the message again.");
+          return;
+        }
         const reader = new FileReader();
-        reader.onload = () => sendChatMessage({ kind: "voice", media: String(reader.result || "") });
+        reader.onload = () => sendChatMessage({
+          kind: "voice",
+          media: String(reader.result || ""),
+          fileName: `voice-message-${Date.now()}.${audioFileExtension(mimeType)}`,
+          mimeType
+        });
         reader.readAsDataURL(blob);
       };
-      chatRecorder.start();
+      recorder.start();
       setChatRecordButtonState("recording");
     });
 
@@ -12530,10 +13064,12 @@
       els.transferError.classList.toggle("visible", invalid);
       if (invalid) return;
 
-      const existingTransfer = state.transfers.find((item) => item.id === state.editingTransferId);
+      const existingTransfer = transferByIdentity(state.editingTransferId);
       const sentAt = existingTransfer?.sentAt || existingTransfer?.createdAt || new Date().toISOString();
       const transfer = {
-        id: state.editingTransferId || nextTransferId(),
+        id: existingTransfer?.id || nextTransferId(),
+        recordKey: existingTransfer?.recordKey || nextTransferRecordKey(),
+        masterTransactionCycle: Number(existingTransfer?.masterTransactionCycle || state.masterTransactionCycle || 0),
         from,
         fromActorId: sendingActor.id,
         to,
@@ -12561,7 +13097,7 @@
         if (transfer.state === "Approved") {
           postTransferLedger(transfer);
         }
-        const existingIndex = state.transfers.findIndex((item) => item.id === state.editingTransferId);
+        const existingIndex = state.transfers.findIndex((item) => transferIdentity(item) === transferIdentity(existingTransfer));
         if (existingIndex >= 0) {
           state.transfers.splice(existingIndex, 1, transfer);
         } else {
@@ -12703,13 +13239,14 @@
 
       const copyOrderButton = event.target.closest(".order-copy-details");
       if (copyOrderButton) {
-        if (selectedActor()?.role !== "Master") return;
         const order = state.orders.find((item) => item.id === copyOrderButton.dataset.id);
-        const value = order ? orderCopyText(order) : "";
+        const viewer = selectedActor();
+        if (!viewerCanCopyOrder(order, viewer)) return;
+        const value = orderCopyText(order, viewer);
         if (!value) return;
         try {
           const copied = await copyTextToClipboard(value);
-          notifyEvent(copied ? "Order copied" : "Copy failed", copied ? `${orderDisplayNumber(order, selectedActor())} details copied.` : "Your browser could not copy this order.");
+          notifyEvent(copied ? "Order copied" : "Copy failed", copied ? `${orderDisplayNumber(order, viewer)} details copied.` : "Your browser could not copy this order.");
         } catch {
           notifyEvent("Copy failed", "Your browser could not copy this order.");
         }
@@ -13320,9 +13857,9 @@
       const editTransferButton = event.target.closest(".edit-transfer");
       if (editTransferButton) {
         const actor = selectedActor();
-        const transfer = state.transfers.find((item) => item.id === editTransferButton.dataset.id);
+        const transfer = transferByIdentity(editTransferButton.dataset.id);
         if (!transfer || transfer.state !== "Returned" || transfer.from !== actor?.name) return;
-        state.editingTransferId = transfer.id;
+        state.editingTransferId = transferIdentity(transfer);
         fillTransferForm(transfer);
         els.transferError.classList.remove("visible");
         renderAll();
@@ -13332,10 +13869,10 @@
       const reverseTransferButton = event.target.closest(".reverse-transfer");
       if (reverseTransferButton) {
         const actor = selectedActor();
-        const transfer = state.transfers.find((item) => item.id === reverseTransferButton.dataset.id);
+        const transfer = transferByIdentity(reverseTransferButton.dataset.id);
         if (!transfer || actor?.role !== "Master" || !transferWasSentByMaster(transfer)) return;
         confirmAction(`Reverse transfer ${transfer.id}? This will post an opposite ledger journal.`, async () => {
-          const currentTransfer = state.transfers.find((item) => item.id === transfer.id);
+          const currentTransfer = transferByIdentity(transferIdentity(transfer));
           if (!reverseMasterTransferOnce(currentTransfer, actor.name)) return;
           renderAll();
           await saveStateNow();
@@ -13346,7 +13883,7 @@
       const forwardTransferButton = event.target.closest(".forward-transfer-submit");
       if (forwardTransferButton) {
         const actor = selectedActor();
-        const transfer = state.transfers.find((item) => item.id === forwardTransferButton.dataset.id);
+        const transfer = transferByIdentity(forwardTransferButton.dataset.id);
         if (!transfer || actor?.role !== "Master" || transfer.state !== "Pending Approval" || !transferArrivedAtMaster(transfer)) return;
         const context = forwardTransferDraft(transfer);
         const receiver = context.targets.find((item) => item.id === context.draft.toActorId);
@@ -13358,7 +13895,7 @@
           return;
         }
         confirmAction(`Forward ${transfer.id} to ${receiver.name} for acceptance?`, async () => {
-          const currentTransfer = state.transfers.find((item) => item.id === transfer.id);
+          const currentTransfer = transferByIdentity(transferIdentity(transfer));
           if (!forwardTransferOnce(currentTransfer, { ...context.draft, payoutAmount: payoutMajor }, actor.name)) return;
           renderAll();
           await saveStateNow();
@@ -13369,10 +13906,10 @@
       const acceptForwardedTransferButton = event.target.closest(".accept-forwarded-transfer");
       if (acceptForwardedTransferButton) {
         const actor = selectedActor();
-        const transfer = state.transfers.find((item) => item.id === acceptForwardedTransferButton.dataset.id);
+        const transfer = transferByIdentity(acceptForwardedTransferButton.dataset.id);
         if (!transfer || !actor || transfer.state !== "Pending Acceptance") return;
         confirmAction(`Accept ${transfer.id} from ${transfer.from}?`, async () => {
-          const currentTransfer = state.transfers.find((item) => item.id === transfer.id);
+          const currentTransfer = transferByIdentity(transferIdentity(transfer));
           if (!respondToForwardedTransferOnce(currentTransfer, actor, true)) return;
           renderAll();
           await saveStateNow();
@@ -13383,10 +13920,10 @@
       const rejectForwardedTransferButton = event.target.closest(".reject-forwarded-transfer");
       if (rejectForwardedTransferButton) {
         const actor = selectedActor();
-        const transfer = state.transfers.find((item) => item.id === rejectForwardedTransferButton.dataset.id);
+        const transfer = transferByIdentity(rejectForwardedTransferButton.dataset.id);
         if (!transfer || !actor || transfer.state !== "Pending Acceptance") return;
         confirmAction(`Reject forwarded transfer ${transfer.id}?`, async () => {
-          const currentTransfer = state.transfers.find((item) => item.id === transfer.id);
+          const currentTransfer = transferByIdentity(transferIdentity(transfer));
           if (!respondToForwardedTransferOnce(currentTransfer, actor, false)) return;
           renderAll();
           await saveStateNow();
@@ -13397,7 +13934,7 @@
       const rejectTransferButton = event.target.closest(".reject-transfer");
       if (rejectTransferButton) {
         const actor = selectedActor();
-        const transfer = state.transfers.find((item) => item.id === rejectTransferButton.dataset.id);
+        const transfer = transferByIdentity(rejectTransferButton.dataset.id);
         if (!transfer || actor?.role !== "Master" || transfer.state !== "Pending Approval") return;
         transfer.state = "Rejected";
         transfer.rejectedBy = actor.name;
@@ -13410,7 +13947,7 @@
       const returnTransferButton = event.target.closest(".return-transfer");
       if (returnTransferButton) {
         const actor = selectedActor();
-        const transfer = state.transfers.find((item) => item.id === returnTransferButton.dataset.id);
+        const transfer = transferByIdentity(returnTransferButton.dataset.id);
         if (!transfer || actor?.role !== "Master" || transfer.state !== "Pending Approval") return;
         transfer.state = "Returned";
         transfer.returnedBy = actor.name;
@@ -13424,7 +13961,7 @@
       const target = event.target.closest(".approve-transfer");
       if (!target) return;
       const actor = selectedActor();
-      const transfer = state.transfers.find((item) => item.id === target.dataset.id);
+      const transfer = transferByIdentity(target.dataset.id);
       if (!transfer || actor?.role !== "Master" || transfer.state !== "Pending Approval" || processingTransferIds.has(transfer.id)) return;
       target.disabled = true;
       if (approveTransferOnce(transfer, actor.name)) {
@@ -13442,6 +13979,15 @@
     els.exportLedgerPdfButton.addEventListener("click", exportLedgerPdf);
     els.exportArchiveExcelButton.addEventListener("click", exportArchiveExcel);
     els.exportArchivePdfButton.addEventListener("click", exportArchivePdf);
+
+    els.closeMasterTransactionsButton.addEventListener("click", () => {
+      if (selectedActor()?.role !== "Master") return;
+      confirmAction("Close all completed transfers, journals, and withdrawals in this period? Their numbers will restart from 1.", async () => {
+        if (!closeMasterTransactions()) return;
+        renderAll();
+        await saveStateNow();
+      });
+    });
 
     document.getElementById("closeBalanceButton").addEventListener("click", () => {
       if (selectedActor()?.role !== "Master") return;
@@ -13483,6 +14029,9 @@
       renderMetrics();
       renderPendingActionNotifications();
       updateOrderFundingMode();
+      if (activeSearchDestination?.expiresAt > Date.now() && activeSearchDestination.result.destinationView === state.activeView) {
+        focusSearchDestination(activeSearchDestination.result, { remember: false });
+      }
       saveState();
     }
 
