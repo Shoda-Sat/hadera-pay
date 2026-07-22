@@ -26,6 +26,98 @@ export function isMasterView(session: UserSession): boolean {
   return session.role === "Master" && session.actorRole === "Master";
 }
 
+export interface ActionRequiredNotice {
+  key: string;
+  title: string;
+  body: string;
+  screen: "orders" | "transfers";
+  actionable: boolean;
+}
+
+function actionOrderReference(order: OrderRecord): string {
+  return order.brokerOrderNumber || order.agentOrderNumber || order.id;
+}
+
+export function actionRequiredNoticesFor(session: UserSession, state: WorkspaceState): ActionRequiredNotice[] {
+  const notices: ActionRequiredNotice[] = [];
+  if (isMasterView(session)) {
+    state.orders
+      .filter((order) => order.state === "Pending Forward")
+      .forEach((order) => notices.push({
+        key: `order:${order.id}:pending-forward:${order.updatedAt || order.sentAt || order.createdAt || ""}`,
+        title: "Order assignment required",
+        body: `${actionOrderReference(order)} from ${order.broker || "an Actor"} is waiting to be assigned.`,
+        screen: "orders",
+        actionable: true
+      }));
+    state.orders
+      .filter((order) => order.state === "Void Requested")
+      .forEach((order) => notices.push({
+        key: `order:${order.id}:void-request:${order.updatedAt || order.voidRequestedAt || ""}`,
+        title: "Cancelled order review required",
+        body: `${actionOrderReference(order)} is waiting for cancellation approval or rejection.`,
+        screen: "orders",
+        actionable: true
+      }));
+    state.transfers
+      .filter((transfer) => transfer.state === "Pending Approval")
+      .forEach((transfer) => notices.push({
+        key: `transfer:${transfer.id}:pending-approval:${transfer.updatedAt || transfer.sentAt || transfer.createdAt || ""}`,
+        title: "Transfer approval required",
+        body: `${transfer.id} from ${transfer.from || "an Actor"} is waiting for approval.`,
+        screen: "transfers",
+        actionable: true
+      }));
+  } else {
+    state.orders
+      .filter((order) => order.state === "Assigned" && (order.agentActorId === session.actorId || order.agent === session.actorName))
+      .forEach((order) => notices.push({
+        key: `order:${order.id}:assigned:${order.updatedAt || order.assignedAt || ""}`,
+        title: "Order payment required",
+        body: `${actionOrderReference(order)} is assigned to you for payment.`,
+        screen: "orders",
+        actionable: true
+      }));
+    state.orders
+      .filter((order) => order.state === "Returned" && (order.brokerActorId === session.actorId || order.broker === session.actorName))
+      .forEach((order) => notices.push({
+        key: `order:${order.id}:returned:${order.updatedAt || order.returnedAt || ""}`,
+        title: "Returned order needs modification",
+        body: `${actionOrderReference(order)} was returned for you to review and modify.`,
+        screen: "orders",
+        actionable: true
+      }));
+    state.orders
+      .filter((order) => order.state === "Cancelled" && (order.brokerActorId === session.actorId || order.broker === session.actorName))
+      .forEach((order) => notices.push({
+        key: `order:${order.id}:cancelled:${order.updatedAt || order.cancelledAt || ""}`,
+        title: "Order cancelled",
+        body: `${actionOrderReference(order)} was cancelled by Master.`,
+        screen: "orders",
+        actionable: false
+      }));
+    state.transfers
+      .filter((transfer) => transfer.state === "Pending Acceptance" && (transfer.toActorId === session.actorId || transfer.to === session.actorName))
+      .forEach((transfer) => notices.push({
+        key: `transfer:${transfer.id}:pending-acceptance:${transfer.updatedAt || transfer.forwardedAt || ""}`,
+        title: "Transfer receipt required",
+        body: `${transfer.id} from ${transfer.from || "an Actor"} is waiting for you to accept or reject it.`,
+        screen: "transfers",
+        actionable: true
+      }));
+    state.transfers
+      .filter((transfer) => transfer.state === "Returned" && (transfer.fromActorId === session.actorId || transfer.from === session.actorName || transfer.initiatedBy === session.actorName))
+      .forEach((transfer) => notices.push({
+        key: `transfer:${transfer.id}:returned:${transfer.updatedAt || transfer.returnedAt || ""}`,
+        title: "Returned transfer needs modification",
+        body: `${transfer.id} was returned for you to review and modify.`,
+        screen: "transfers",
+        actionable: true
+      }));
+  }
+  return notices;
+}
+
 export function actorCanInitiateOrders(role: ActorRecord["role"]): boolean {
   return role === "Broker" || role === "Special Broker";
 }

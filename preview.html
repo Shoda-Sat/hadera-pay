@@ -34,6 +34,17 @@
       background: var(--bg);
     }
 
+    html.auth-locked,
+    body.auth-locked {
+      height: 100%;
+      overflow: hidden;
+      overscroll-behavior: none;
+    }
+
+    body.auth-locked .shell {
+      display: none;
+    }
+
     button, input, select, textarea {
       font: inherit;
     }
@@ -49,8 +60,12 @@
       z-index: 60;
       display: grid;
       place-items: center;
+      min-height: 100vh;
+      min-height: 100dvh;
       padding: 20px;
       background: var(--bg);
+      overflow-y: auto;
+      overscroll-behavior: contain;
     }
 
     .auth-screen.hidden {
@@ -1888,6 +1903,39 @@
       pointer-events: none;
     }
 
+    .account-security-warning {
+      position: fixed;
+      top: 18px;
+      left: 50%;
+      z-index: 95;
+      width: min(560px, calc(100vw - 36px));
+      transform: translateX(-50%);
+      border: 1px solid #7f1d1d;
+      border-radius: 8px;
+      background: #b91c1c;
+      color: #ffffff;
+      box-shadow: var(--shadow);
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      animation: toastIn 0.18s ease-out;
+    }
+
+    .account-security-warning strong {
+      border-radius: 999px;
+      background: #ffffff;
+      color: #991b1b;
+      padding: 4px 8px;
+      font-size: 11px;
+      letter-spacing: 0.08em;
+    }
+
+    .account-security-warning span {
+      font-size: 13px;
+      font-weight: 800;
+    }
+
     .toast {
       border: 1px solid var(--line);
       border-left: 4px solid var(--accent);
@@ -2093,6 +2141,29 @@
     }
 
     @media (max-width: 520px) {
+      .auth-screen {
+        padding: max(12px, env(safe-area-inset-top)) 12px max(12px, env(safe-area-inset-bottom));
+      }
+
+      .auth-card {
+        width: 100%;
+      }
+
+      .auth-head {
+        padding: 18px;
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .auth-head-actions {
+        width: 100%;
+        justify-content: flex-start;
+      }
+
+      .auth-body {
+        padding: 18px;
+      }
+
       .topbar {
         display: grid;
         grid-template-columns: auto minmax(0, 1fr);
@@ -2130,7 +2201,7 @@
     }
   </style>
 </head>
-<body>
+<body class="auth-locked">
   <div class="drawer-shade" id="drawerShade"></div>
   <div class="confirm-shade" id="confirmShade" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
     <div class="confirm-box">
@@ -2178,6 +2249,10 @@
         </div>
       </form>
     </div>
+  </div>
+  <div class="account-security-warning hidden" id="accountSecurityWarning" role="alert" aria-live="assertive">
+    <strong>WARNING</strong>
+    <span>Another device is logged into your account.</span>
   </div>
   <div class="notification-stack" id="notificationStack" aria-live="polite"></div>
   <div class="auth-screen" id="authScreen">
@@ -3436,6 +3511,8 @@
     let sessionActivityPingPending = false;
     let sessionActivityPingTimer = null;
     let endingAuthSession = false;
+    let browserDeviceId = "";
+    let accountSecurityWarningTimer = null;
     const processingOrderIds = new Set();
     const pendingProofFiles = new Map();
     const pendingProofUploads = new Map();
@@ -3812,6 +3889,9 @@
         .filter((archive) => archive && typeof archive === "object")
         .map((archive) => ({
           ...archive,
+          actor: archive.kind === "master-transactions" || archive.actor === "Master Transactions"
+            ? "Transfer Transactions"
+            : archive.actor,
           orders: Array.isArray(archive.orders) ? archive.orders : [],
           receivables: Array.isArray(archive.receivables) ? archive.receivables : [],
           transfers: Array.isArray(archive.transfers) ? archive.transfers : [],
@@ -3922,12 +4002,27 @@
       }, 250);
     }
 
+    function clientDeviceId() {
+      if (browserDeviceId) return browserDeviceId;
+      const key = "haderapay.browser.device.v1";
+      try {
+        browserDeviceId = localStorage.getItem(key) || "";
+        if (!browserDeviceId) {
+          browserDeviceId = `web-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
+          localStorage.setItem(key, browserDeviceId);
+        }
+      } catch {
+        browserDeviceId ||= `web-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      }
+      return browserDeviceId;
+    }
+
     async function api(path, options = {}) {
       let response;
       try {
         response = await fetch(path, {
           method: options.method || "GET",
-          headers: { "content-type": "application/json" },
+          headers: { "content-type": "application/json", "x-haderapay-device-id": clientDeviceId() },
           body: options.body ? JSON.stringify(options.body) : undefined
         });
       } catch {
@@ -4285,6 +4380,7 @@
 
     async function refreshSharedState() {
       if (!currentAuth || !remoteStateReady) return;
+      refreshAccountDeviceWarning();
       if (settingsRateInputIsFocused()) return;
       const remote = await api("/api/app-state").catch(() => null);
       if (!mergeSharedState(remote?.state)) return;
@@ -4299,6 +4395,34 @@
     function startRemoteRefresh() {
       if (remoteRefreshTimer) clearInterval(remoteRefreshTimer);
       remoteRefreshTimer = setInterval(refreshSharedState, 3000);
+    }
+
+    function showAccountDeviceWarning(warning) {
+      if (accountSecurityWarningTimer) clearTimeout(accountSecurityWarningTimer);
+      accountSecurityWarningTimer = null;
+      const expiresAt = new Date(warning?.expiresAt || 0).getTime();
+      const remaining = expiresAt - Date.now();
+      if (!warning || !Number.isFinite(expiresAt) || remaining <= 0) {
+        els.accountSecurityWarning?.classList.add("hidden");
+        return;
+      }
+      const message = warning.message || "Another device is logged into your account.";
+      const messageElement = els.accountSecurityWarning?.querySelector("span");
+      if (messageElement) messageElement.textContent = message;
+      els.accountSecurityWarning?.classList.remove("hidden");
+      accountSecurityWarningTimer = setTimeout(() => {
+        els.accountSecurityWarning?.classList.add("hidden");
+        accountSecurityWarningTimer = null;
+      }, Math.min(60000, remaining));
+    }
+
+    async function refreshAccountDeviceWarning() {
+      if (!currentAuth || currentAuth.membership?.role === "Owner") {
+        showAccountDeviceWarning(null);
+        return;
+      }
+      const result = await api("/api/auth/device-warning").catch(() => null);
+      if (result) showAccountDeviceWarning(result.warning);
     }
 
     function authStorageKey(session) {
@@ -4438,12 +4562,15 @@
       remoteStateReady = false;
       if (remoteRefreshTimer) clearInterval(remoteRefreshTimer);
       remoteRefreshTimer = null;
+      showAccountDeviceWarning(null);
       stopInactivityWatch();
       lastSessionActivityPingAt = 0;
       sessionActivityPingPending = false;
       if (sessionActivityPingTimer) clearTimeout(sessionActivityPingTimer);
       sessionActivityPingTimer = null;
       els.authScreen.classList.remove("hidden");
+      document.documentElement.classList.add("auth-locked");
+      document.body.classList.add("auth-locked");
       els.accountBadge.textContent = "Not logged in";
       if (notify) showAuthError(els.loginError, `You were logged out after ${idleLabel} of inactivity.`);
       endingAuthSession = false;
@@ -4507,9 +4634,12 @@
       assignCurrentMasterTransactionCycle();
       ensureSessionActor();
       remoteStateReady = true;
+      refreshAccountDeviceWarning();
       startRemoteRefresh();
       startInactivityWatch();
       els.authScreen.classList.add("hidden");
+      document.documentElement.classList.remove("auth-locked");
+      document.body.classList.remove("auth-locked");
       renderAll();
       setView(viewFromLocation() || state.activeView, { historyMode: "replace" });
     }
@@ -4736,7 +4866,8 @@
       chatGroupMembers: document.getElementById("chatGroupMembers"),
       chatRoomTitle: document.getElementById("chatRoomTitle"),
       chatRoomMeta: document.getElementById("chatRoomMeta"),
-      notificationStack: document.getElementById("notificationStack")
+      notificationStack: document.getElementById("notificationStack"),
+      accountSecurityWarning: document.getElementById("accountSecurityWarning")
     };
 
     const decimalCurrencies = new Set(["USD", "EUR"]);
@@ -4836,8 +4967,8 @@
           .filter((order) => order.state === "Void Requested")
           .forEach((order) => notices.push({
             key: `order:${order.id}:void-request:${order.updatedAt || order.voidRequestedAt || ""}`,
-            title: "Void request needs review",
-            detail: `${orderDisplayNumber(order, actor)} is waiting for Master approval.`
+            title: "Cancelled order needs review",
+            detail: `${orderDisplayNumber(order, actor)} is waiting for cancellation approval or rejection.`
           }));
         state.transfers
           .filter((transfer) => transfer.state === "Pending Approval")
@@ -4860,6 +4991,13 @@
             key: `order:${order.id}:returned:${order.updatedAt || ""}`,
             title: "Order needs an update",
             detail: `${orderDisplayNumber(order, actor)} was returned for your review.`
+          }));
+        state.orders
+          .filter((order) => order.state === "Cancelled" && (order.brokerActorId === actor.id || order.broker === actor.name))
+          .forEach((order) => notices.push({
+            key: `order:${order.id}:cancelled:${order.updatedAt || order.cancelledAt || ""}`,
+            title: "Order cancelled",
+            detail: `${orderDisplayNumber(order, actor)} was cancelled by Master.`
           }));
         state.transfers
           .filter((transfer) => transfer.state === "Returned" && (transfer.from === actor.name || transfer.initiatedBy === actor.name))
@@ -11606,7 +11744,7 @@
       state.archives.unshift({
         id: archiveId,
         kind: "master-transactions",
-        actor: "Master Transactions",
+        actor: "Transfer Transactions",
         actorRole: "Master",
         actorCurrency: master?.currency || "USD",
         closedAt,
@@ -11615,10 +11753,10 @@
           ...line,
           masterTransactionClosedAt: closedAt,
           masterTransactionArchiveId: archiveId
-        }, "Master Transactions", closedAt)),
+        }, "Transfer Transactions", closedAt)),
         orders: [],
         receivables: [],
-        transfers: closedTransfers.map((transfer) => archiveTransferSnapshot(transfer, "Master Transactions", closedAt))
+        transfers: closedTransfers.map((transfer) => archiveTransferSnapshot(transfer, "Transfer Transactions", closedAt))
       });
 
       state.transferCounter = 0;

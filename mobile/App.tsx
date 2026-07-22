@@ -36,6 +36,7 @@ import {
 import type { LucideProps } from "lucide-react-native";
 import {
   canCreateOrders,
+  getAccountDeviceWarning,
   getLastSessionActivityAt,
   getCurrentSession,
   loadWorkspaceState,
@@ -50,6 +51,7 @@ import { BrandHeader, Button, Field, Panel, Pill, SelectRow, setUserActivityHand
 import type { PillTone } from "./src/components/ui";
 import { colors, radius, shadow, spacing } from "./src/theme";
 import { actingSessionFor, activeActors, calculableLedgerLines, isMasterView, orderRecordIsVoided, orderSortForSession, transferTargetsFor } from "./src/domain/workspace";
+import { notifyNewRequiredActions, subscribeToActionNotificationResponses } from "./src/notifications/actionNotifications";
 import {
   ActorsScreen,
   ChatScreen,
@@ -64,6 +66,7 @@ import {
   TransfersScreen
 } from "./src/screens/WorkspaceScreens";
 import type {
+  AccountDeviceWarning,
   ActorRecord,
   AppScreen,
   ArchiveRecord,
@@ -242,12 +245,14 @@ export default function App() {
   const [workspaceState, setWorkspaceState] = useState<WorkspaceState | null>(null);
   const [stateLoading, setStateLoading] = useState(false);
   const [stateError, setStateError] = useState("");
+  const [accountDeviceWarning, setAccountDeviceWarning] = useState<AccountDeviceWarning | null>(null);
   const [lastActivityAt, setLastActivityAt] = useState(Date.now());
   const historyRef = useRef<AppScreen[]>(["home"]);
   const contentScrollRef = useRef<ScrollView>(null);
   const lastActivityRef = useRef(Date.now());
   const lastServerActivityRef = useRef(0);
   const logoutInFlightRef = useRef(false);
+  const accountDeviceWarningTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const selectedActor = workspaceState?.actors.find((actor) => actor.id === selectedActorId);
   const actingSession = session ? actingSessionFor(session, selectedActor) : null;
   const quote = useMemo(() => calculateQuote(draft), [draft]);
@@ -297,6 +302,73 @@ export default function App() {
       mounted = false;
     };
   }, [session?.workspaceId]);
+
+  useEffect(() => {
+    if (!session || session.role === "Owner") return;
+    let mounted = true;
+    const timer = setInterval(() => {
+      if (AppState.currentState !== "active") return;
+      loadWorkspaceState()
+        .then((state) => {
+          if (mounted) setWorkspaceState(state);
+        })
+        .catch(() => undefined);
+    }, 10000);
+    return () => {
+      mounted = false;
+      clearInterval(timer);
+    };
+  }, [session?.workspaceId, session?.role]);
+
+  useEffect(() => {
+    if (!session || session.role === "Owner") {
+      setAccountDeviceWarning(null);
+      return;
+    }
+    let mounted = true;
+    const refreshWarning = () => {
+      getAccountDeviceWarning()
+        .then((warning) => {
+          if (!mounted) return;
+          if (accountDeviceWarningTimerRef.current) clearTimeout(accountDeviceWarningTimerRef.current);
+          accountDeviceWarningTimerRef.current = null;
+          const remaining = new Date(warning?.expiresAt || 0).getTime() - Date.now();
+          if (!warning || !Number.isFinite(remaining) || remaining <= 0) {
+            setAccountDeviceWarning(null);
+            return;
+          }
+          setAccountDeviceWarning(warning);
+          accountDeviceWarningTimerRef.current = setTimeout(() => {
+            if (mounted) setAccountDeviceWarning(null);
+            accountDeviceWarningTimerRef.current = null;
+          }, Math.min(60000, remaining));
+        })
+        .catch(() => undefined);
+    };
+    refreshWarning();
+    const interval = setInterval(() => {
+      if (AppState.currentState === "active") refreshWarning();
+    }, 3000);
+    return () => {
+      mounted = false;
+      clearInterval(interval);
+      if (accountDeviceWarningTimerRef.current) clearTimeout(accountDeviceWarningTimerRef.current);
+      accountDeviceWarningTimerRef.current = null;
+    };
+  }, [session?.role, session?.userId, session?.workspaceId]);
+
+  useEffect(() => {
+    if (!session || !workspaceState || session.role === "Owner") return;
+    void notifyNewRequiredActions(session, workspaceState).catch(() => undefined);
+  }, [session?.actorId, session?.role, session?.workspaceId, workspaceState]);
+
+  useEffect(() => {
+    if (!session || session.role === "Owner") return;
+    return subscribeToActionNotificationResponses((target) => {
+      if (historyRef.current[historyRef.current.length - 1] !== target) historyRef.current.push(target);
+      setScreen(target);
+    });
+  }, [session?.workspaceId, session?.role]);
 
   const orderFlowAllowed = canCreateOrders(actingSession);
   const currentScreen = !orderFlowAllowed && ["newOrder", "conversion", "confirmation"].includes(screen) ? "home" : screen;
@@ -358,6 +430,7 @@ export default function App() {
     logoutInFlightRef.current = true;
     setLoggingOut(true);
     setSession(null);
+    setAccountDeviceWarning(null);
     setWorkspaceState(null);
     setSubmittedOrder(null);
     setSelectedActorId("");
@@ -475,6 +548,12 @@ export default function App() {
             ])}
             loggingOut={loggingOut}
           />
+          {accountDeviceWarning ? (
+            <View style={styles.accountSecurityWarning} accessibilityRole="alert">
+              <Text style={styles.accountSecurityWarningLabel}>WARNING</Text>
+              <Text style={styles.accountSecurityWarningText}>{accountDeviceWarning.message || "Another device is logged into your account."}</Text>
+            </View>
+          ) : null}
           {stateError ? <Text style={styles.errorText}>{stateError}</Text> : null}
           {!workspaceState && stateLoading ? <View style={styles.loadingWrap}><ActivityIndicator color={colors.accent} /><Text style={styles.mutedText}>Loading workspace...</Text></View> : null}
           {workspaceState && actingSession.role !== "Owner" ? <NotificationsPanel session={actingSession} state={workspaceState} onNavigate={navigate} /> : null}
@@ -1526,6 +1605,34 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: spacing.sm
+  },
+  accountSecurityWarning: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+    borderWidth: 1,
+    borderColor: "#7f1d1d",
+    borderRadius: radius.md,
+    backgroundColor: "#b91c1c",
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    ...shadow
+  },
+  accountSecurityWarningLabel: {
+    borderRadius: 999,
+    backgroundColor: "#ffffff",
+    color: "#991b1b",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    fontSize: 10,
+    fontWeight: "900",
+    letterSpacing: 1
+  },
+  accountSecurityWarningText: {
+    flex: 1,
+    color: "#ffffff",
+    fontSize: 13,
+    fontWeight: "800"
   },
   screen: {
     gap: spacing.lg

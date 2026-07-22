@@ -6,4 +6,5 @@ server.out.log
 server.err.log
 *.log
 mobile/.expo/
+mobile/.codex-build-temp/
 mobile/android/

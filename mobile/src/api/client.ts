@@ -1,5 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import type {
+  AccountDeviceWarning,
   ActorRecord,
   ApiSession,
   ArchiveRecord,
@@ -26,8 +27,10 @@ const apiBaseUrl = (typeof process !== "undefined" && process?.env?.EXPO_PUBLIC_
   : defaultApiBaseUrl).replace(/\/+$/, "");
 const sessionCacheKey = "haderapay.mobile.session.v1";
 const sessionActivityCacheKey = "haderapay.mobile.activity.v1";
+const deviceIdCacheKey = "haderapay.mobile.device.v1";
 const workspaceCachePrefix = "haderapay.mobile.workspace.v1.";
 let activeSession: UserSession | null = null;
+let activeDeviceId: string | null = null;
 
 export const allowedIdleTimeoutSeconds = [10, 20, 30, 60, 300, 900, 1800, 3600, 7200] as const;
 
@@ -46,13 +49,33 @@ type ApiEnvelope<T> = T & {
   error?: string;
 };
 
+async function deviceId(): Promise<string> {
+  if (activeDeviceId) return activeDeviceId;
+  try {
+    activeDeviceId = await AsyncStorage.getItem(deviceIdCacheKey);
+  } catch {
+    activeDeviceId = null;
+  }
+  if (!activeDeviceId) {
+    activeDeviceId = `android-${Date.now()}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+    try {
+      await AsyncStorage.setItem(deviceIdCacheKey, activeDeviceId);
+    } catch {
+      // An in-memory ID still distinguishes this running app instance.
+    }
+  }
+  return activeDeviceId;
+}
+
 function safeCurrency(value: unknown, fallback: Currency = "USD"): Currency {
   return ["USD", "ETB", "EUR", "ERN"].includes(String(value)) ? value as Currency : fallback;
 }
 
 async function api<T>(path: string, options: ApiOptions = {}): Promise<ApiEnvelope<T>> {
+  const currentDeviceId = await deviceId();
   const headers = {
     Accept: "application/json",
+    "X-HaderaPay-Device-Id": currentDeviceId,
     ...(options.body ? { "Content-Type": "application/json" } : {}),
     ...(options.headers || {})
   };
@@ -322,6 +345,11 @@ export async function updateIdleTimeout(idleTimeoutSeconds: number): Promise<Use
 
 export async function reportSessionActivity(): Promise<void> {
   await api<{ ok: boolean }>("/api/auth/activity", { method: "POST" });
+}
+
+export async function getAccountDeviceWarning(): Promise<AccountDeviceWarning | null> {
+  const result = await api<{ warning: AccountDeviceWarning | null }>("/api/auth/device-warning");
+  return result.warning || null;
 }
 
 export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {

@@ -43,6 +43,7 @@ import {
 import { Button, Field, Panel, Pill, SelectRow, SummaryRow, type PillTone } from "../components/ui";
 import {
   activeActors,
+  actionRequiredNoticesFor,
   actorCanPayoutCurrency,
   actorCanReceivePayouts,
   actorForSession,
@@ -1705,12 +1706,21 @@ export function OwnerScreen({ offline }: { offline: boolean }) {
 }
 
 export function NotificationsPanel({ session, state, onNavigate }: { session: UserSession; state: WorkspaceState; onNavigate: (screen: AppScreen) => void }) {
-  const pendingOrders = isMasterView(session) ? state.orders.filter((order) => order.state === "Pending Forward" || order.state === "Void Requested").length : state.orders.filter((order) => order.state === "Assigned" && (order.agentActorId === session.actorId || order.agent === session.actorName)).length;
-  const pendingTransfers = isMasterView(session)
-    ? state.transfers.filter((transfer) => transfer.state === "Pending Approval").length
-    : state.transfers.filter((transfer) => transfer.state === "Pending Acceptance" && (transfer.toActorId === session.actorId || transfer.to === session.actorName)).length;
-  if (!pendingOrders && !pendingTransfers) return null;
-  return <Panel title="Action required" badge={String(pendingOrders + pendingTransfers)}>{pendingOrders ? <Pressable style={styles.noticeRow} onPress={() => onNavigate("orders")}><MessageSquare size={18} color={colors.warn} /><Text style={styles.noticeText}>{pendingOrders} order action{pendingOrders === 1 ? "" : "s"} pending</Text></Pressable> : null}{pendingTransfers ? <Pressable style={styles.noticeRow} onPress={() => onNavigate("transfers")}><MessageSquare size={18} color={colors.warn} /><Text style={styles.noticeText}>{pendingTransfers} transfer {isMasterView(session) ? "approval" : "acceptance"}{pendingTransfers === 1 ? "" : "s"} pending</Text></Pressable> : null}</Panel>;
+  const notices = actionRequiredNoticesFor(session, state).filter((notice) => notice.actionable);
+  if (!notices.length) return null;
+  return (
+    <Panel title="Action required" badge={String(notices.length)}>
+      {notices.map((notice) => (
+        <Pressable key={notice.key} style={styles.noticeRow} onPress={() => onNavigate(notice.screen)}>
+          <MessageSquare size={18} color={colors.warn} />
+          <View style={styles.recordMain}>
+            <Text style={styles.noticeText}>{notice.title}</Text>
+            <Text style={styles.muted}>{notice.body}</Text>
+          </View>
+        </Pressable>
+      ))}
+    </Panel>
+  );
 }
 
 const styles = StyleSheet.create({

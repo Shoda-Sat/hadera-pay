@@ -22,6 +22,13 @@ export type FundingType = "cash" | "credit";
 export type MembershipRole = "Owner" | "Master" | "Actor";
 export type ActorRole = "Owner" | "Master" | "Broker" | "Agent" | "Special Broker" | "Special Agent";
 
+export interface AccountDeviceWarning {
+  id: string;
+  occurredAt: string;
+  expiresAt: string;
+  message: string;
+}
+
 export interface UserSession {
   loginStartedAt?: string;
   userId: string;

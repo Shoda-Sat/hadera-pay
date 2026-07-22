@@ -17,6 +17,7 @@ const allowedSessionIdleSeconds = new Set([10, 20, 30, 60, 300, 900, 1800, 3600,
 const defaultSessionIdleSeconds = 7200;
 const loginLockMs = 1000 * 60 * 60;
 const loginAttemptWindowMs = 1000 * 60 * 60;
+const deviceLoginWarningMs = 1000 * 60;
 const loginOperationLocks = new Map();
 const subscriptionPlans = new Map([
   ["one_day", { label: "1 day", days: 1 }],
@@ -341,6 +342,13 @@ function parseCookies(request) {
     }));
 }
 
+function requestDeviceId(request) {
+  return String(request.headers["x-haderapay-device-id"] || "")
+    .trim()
+    .replace(/[^a-zA-Z0-9._:-]/g, "")
+    .slice(0, 128);
+}
+
 async function readJson(request) {
   const chunks = [];
   for await (const chunk of request) chunks.push(chunk);
@@ -425,6 +433,35 @@ function publicSessionForRecord(db, session) {
 
 function publicSession(db, sessionId) {
   return publicSessionForRecord(db, activeSessionRecord(db, sessionId));
+}
+
+function sessionsShareDevice(left, right) {
+  if (!left || !right) return false;
+  if (left.deviceId && right.deviceId) return left.deviceId === right.deviceId;
+  return left.id === right.id;
+}
+
+function accountDeviceLoginWarning(db, currentSession, now = Date.now()) {
+  if (!currentSession || currentSession.userId === "__owner") return null;
+  const accountSessions = db.sessions.filter((session) =>
+    session.userId === currentSession.userId &&
+    session.workspaceId === currentSession.workspaceId &&
+    !sessionIsExpired(session, now)
+  );
+  if (!accountSessions.some((session) => !sessionsShareDevice(session, currentSession))) return null;
+  const latestSession = accountSessions.reduce((latest, session) => {
+    const latestAt = new Date(latest?.createdAt || 0).getTime() || 0;
+    const sessionAt = new Date(session?.createdAt || 0).getTime() || 0;
+    return sessionAt > latestAt ? session : latest;
+  }, currentSession);
+  const occurredAtMs = new Date(latestSession.createdAt || 0).getTime();
+  if (!Number.isFinite(occurredAtMs) || occurredAtMs <= 0 || now - occurredAtMs >= deviceLoginWarningMs) return null;
+  return {
+    id: `device-login:${latestSession.id}`,
+    occurredAt: new Date(occurredAtMs).toISOString(),
+    expiresAt: new Date(occurredAtMs + deviceLoginWarningMs).toISOString(),
+    message: "Another device is logged into your account."
+  };
 }
 
 function workspaceActors(db, workspaceId) {
@@ -766,6 +803,9 @@ function normalizeArchiveSnapshots(archives = []) {
     .filter((archive) => archive && typeof archive === "object")
     .map((archive) => ({
       ...archive,
+      actor: archive.kind === "master-transactions" || archive.actor === "Master Transactions"
+        ? "Transfer Transactions"
+        : archive.actor,
       orders: Array.isArray(archive.orders) ? archive.orders : [],
       receivables: Array.isArray(archive.receivables) ? archive.receivables : [],
       transfers: Array.isArray(archive.transfers) ? archive.transfers : [],
@@ -1039,9 +1079,14 @@ async function requireSession(request, response, db, { touch = true } = {}) {
     sendJson(response, 403, { error: "This workspace is inactive." });
     return null;
   }
+  const currentDeviceId = requestDeviceId(request);
+  const deviceIdAdded = Boolean(sessionRecord && !sessionRecord.deviceId && currentDeviceId);
+  if (deviceIdAdded) sessionRecord.deviceId = currentDeviceId;
   if (touch) {
     touchSession(sessionRecord);
     setSessionCookie(response, sessionRecord);
+    await saveDb(db);
+  } else if (deviceIdAdded) {
     await saveDb(db);
   }
   return session;
@@ -1055,7 +1100,7 @@ function requireOwner(session, response) {
   return true;
 }
 
-function createSession(db, userId, workspaceId) {
+function createSession(db, userId, workspaceId, deviceId = "") {
   const now = Date.now();
   const timestamp = new Date(now).toISOString();
   const idleTimeoutSeconds = accountIdleTimeoutSeconds(db, userId);
@@ -1063,6 +1108,7 @@ function createSession(db, userId, workspaceId) {
     id: id("sess"),
     userId,
     workspaceId,
+    deviceId,
     createdAt: timestamp,
     lastActivityAt: timestamp,
     idleTimeoutSeconds,
@@ -1087,6 +1133,7 @@ async function handleApi(request, response, url) {
     const sessionRecord = activeSessionRecord(db, sessionId);
     const session = publicSessionForRecord(db, sessionRecord);
     if (sessionRecord && session) {
+      if (!sessionRecord.deviceId) sessionRecord.deviceId = requestDeviceId(request);
       touchSession(sessionRecord);
       setSessionCookie(response, sessionRecord);
       await saveDb(db);
@@ -1162,7 +1209,7 @@ async function handleApi(request, response, url) {
     db.users.push(user);
     db.memberships.push(membership);
     clearLoginAttempts(db, email);
-    const session = createSession(db, user.id, workspace.id);
+    const session = createSession(db, user.id, workspace.id, requestDeviceId(request));
     await saveDb(db);
     setSessionCookie(response, session);
     sendJson(response, 200, { session: publicSession(db, session.id) });
@@ -1213,7 +1260,7 @@ async function handleApi(request, response, url) {
       }
       clearLoginAttempts(loginDb, rawLogin);
       if (ownerMatches) {
-        const session = createSession(loginDb, "__owner", "__owner");
+        const session = createSession(loginDb, "__owner", "__owner", requestDeviceId(request));
         await saveDb(loginDb);
         setSessionCookie(response, session);
         sendJson(response, 200, { session: publicSession(loginDb, session.id) });
@@ -1238,7 +1285,7 @@ async function handleApi(request, response, url) {
         await saveDb(loginDb);
         return sendJson(response, 402, { error: "This workspace subscription has expired." });
       }
-      const session = createSession(loginDb, user.id, membership.workspaceId);
+      const session = createSession(loginDb, user.id, membership.workspaceId, requestDeviceId(request));
       await saveDb(loginDb);
       setSessionCookie(response, session);
       sendJson(response, 200, { session: publicSession(loginDb, session.id) });
@@ -1254,9 +1301,15 @@ async function handleApi(request, response, url) {
     return;
   }
 
-  const backgroundRead = method === "GET" && url.pathname === "/api/app-state";
+  const backgroundRead = method === "GET" && ["/api/app-state", "/api/auth/device-warning"].includes(url.pathname);
   const session = await requireSession(request, response, db, { touch: !backgroundRead });
   if (!session) return;
+
+  if (url.pathname === "/api/auth/device-warning" && method === "GET") {
+    const sessionId = parseCookies(request).hp_session;
+    sendJson(response, 200, { warning: accountDeviceLoginWarning(db, activeSessionRecord(db, sessionId)) });
+    return;
+  }
 
   if (url.pathname === "/api/auth/activity" && method === "POST") {
     sendJson(response, 200, { ok: true });
