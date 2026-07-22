@@ -11,7 +11,10 @@ const dataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path
 const dbPath = path.join(dataDir, "auth-db.json");
 const inviteTtlMs = 1000 * 60 * 60;
 const ownerUser = process.env.OWNER_USER ?? "Owner";
-const ownerPassword = process.env.OWNER_PASSWORD ?? "1453@Siem#";
+const ownerPassword = process.env.OWNER_PASSWORD;
+if (typeof ownerPassword !== "string" || ownerPassword.length < 12) {
+  throw new Error("OWNER_PASSWORD is required and must contain at least 12 characters.");
+}
 let saveQueue = Promise.resolve();
 const allowedSessionIdleSeconds = new Set([10, 20, 30, 60, 300, 900, 1800, 3600, 7200]);
 const defaultSessionIdleSeconds = 7200;

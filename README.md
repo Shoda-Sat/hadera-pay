@@ -1,5 +1,20 @@
 # HaderaPay Ledger Architecture
 
+## Required server secrets
+
+The server does not contain a default owner password. Set `OWNER_PASSWORD` before starting it. The value must contain at least 12 characters. `OWNER_USER` is optional and defaults to `Owner`.
+
+For a Render deployment, open the web service's **Environment** page and add `OWNER_PASSWORD` as a secret environment variable. Use a newly generated password that has never appeared in source control. Do not put the password in this repository or in a committed `.env` file.
+
+For local PowerShell development, set the value only for the current terminal session before starting the server:
+
+```powershell
+$env:OWNER_PASSWORD = "your-new-password-of-at-least-12-characters"
+npm start
+```
+
+If the owner password has already been changed from inside HaderaPay, the database contains its secure hash and that password remains the login credential. The `OWNER_PASSWORD` environment value is still required as a secure bootstrap credential for a new database.
+
 This starter implements the core of a multi-tier payment routing and settlement system around an immutable double-entry ledger.
 
 The design has one non-negotiable rule: financial truth lives in `journal_entries` and `ledger_lines`. Actor balances are derived by summing ledger lines. There is no mutable `balance` column on users, wallets, orders, or transfers.

@@ -1,6 +1,8 @@
 node_modules/
 .npm-cache/
 .pnpm-store/
+.env
+.env.*
 data/
 server.out.log
 server.err.log
