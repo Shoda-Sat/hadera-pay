@@ -2835,6 +2835,8 @@
                     <option value="date-asc">Date - Oldest first</option>
                     <option value="reference-asc">Order / Transfer No. - Ascending</option>
                     <option value="reference-desc">Order / Transfer No. - Descending</option>
+                    <option value="journal-asc">Journal No. - Ascending</option>
+                    <option value="journal-desc">Journal No. - Descending</option>
                   </select>
                 </div>
               </div>
@@ -3000,6 +3002,8 @@
                     <option value="date-asc">Date - Oldest first</option>
                     <option value="reference-asc">Order / Transfer No. - Ascending</option>
                     <option value="reference-desc">Order / Transfer No. - Descending</option>
+                    <option value="journal-asc">Journal No. - Ascending</option>
+                    <option value="journal-desc">Journal No. - Descending</option>
                   </select>
                 </div>
                 <div class="field">
@@ -3027,7 +3031,7 @@
                 </div>
                 <div class="field">
                   <label for="archiveSearch">Search</label>
-                  <input id="archiveSearch" placeholder="Name, order, transfer, remarks">
+                  <input id="archiveSearch" placeholder="Name, journal, order, transfer, remarks">
                 </div>
                 <div class="field full">
                   <label>PDF columns</label>
@@ -3035,6 +3039,10 @@
                     <label class="currency-check">
                       <input id="archivePdfDirection" type="checkbox" checked>
                       Direction
+                    </label>
+                    <label class="currency-check">
+                      <input id="archivePdfJournal" type="checkbox" checked>
+                      Journal No.
                     </label>
                     <label class="currency-check">
                       <input id="archivePdfEur" type="checkbox" checked>
@@ -3056,7 +3064,7 @@
             <div class="panel-body table-wrap">
               <table>
                 <thead>
-                    <tr><th>Date</th><th>Type</th><th>Reference</th><th>Direction</th><th>Amount</th><th>Paid Out</th><th>Status</th></tr>
+                    <tr><th>Date</th><th>Type</th><th>Reference</th><th>Journal No.</th><th>Direction</th><th>Amount</th><th>Paid Out</th><th>Status</th></tr>
                 </thead>
                 <tbody id="archiveRows"></tbody>
               </table>
@@ -4620,6 +4628,7 @@
       exportArchiveExcelButton: document.getElementById("exportArchiveExcelButton"),
       exportArchivePdfButton: document.getElementById("exportArchivePdfButton"),
       archivePdfDirection: document.getElementById("archivePdfDirection"),
+      archivePdfJournal: document.getElementById("archivePdfJournal"),
       archivePdfEur: document.getElementById("archivePdfEur"),
       archivePdfActor: document.getElementById("archivePdfActor"),
       archivePdfTime: document.getElementById("archivePdfTime"),
@@ -5500,6 +5509,8 @@
         orderId: order?.id || existing?.orderId || "",
         brokerOrderNumber: brokerOrderNumberForOrder(order) || existing?.brokerOrderNumber || "",
         agentOrderNumber: agentOrderNumberForOrder(order, order?.agent) || existing?.agentOrderNumber || "",
+        journal: existing?.journal || order?.journal || "",
+        voidJournal: existing?.voidJournal || order?.voidJournal || "",
         borrower: input.broker,
         borrowerActorId: borrower?.id || "",
         currency: input.sourceCurrency,
@@ -8012,21 +8023,24 @@
       sensitivity: "base"
     });
 
-    function sortedTransactionRows(rows, sortValue, getDate, getReference) {
-      const sortByReference = String(sortValue || "date-desc").startsWith("reference-");
-      const descending = String(sortValue || "date-desc").endsWith("-desc");
+    function sortedTransactionRows(rows, sortValue, getDate, getReference, getJournal = () => "") {
+      const normalizedSort = String(sortValue || "date-desc");
+      const sortByReference = normalizedSort.startsWith("reference-");
+      const sortByJournal = normalizedSort.startsWith("journal-");
+      const descending = normalizedSort.endsWith("-desc");
       return rows
         .map((item, index) => ({ item, index }))
         .sort((left, right) => {
           let comparison = 0;
-          if (sortByReference) {
-            const leftReference = String(getReference(left.item) || "").trim();
-            const rightReference = String(getReference(right.item) || "").trim();
-            if (!leftReference || !rightReference) {
-              if (!leftReference && !rightReference) return left.index - right.index;
-              return leftReference ? -1 : 1;
+          if (sortByReference || sortByJournal) {
+            const getSortText = sortByJournal ? getJournal : getReference;
+            const leftText = String(getSortText(left.item) || "").trim();
+            const rightText = String(getSortText(right.item) || "").trim();
+            if (!leftText || !rightText) {
+              if (!leftText && !rightText) return left.index - right.index;
+              return leftText ? -1 : 1;
             }
-            comparison = transactionReferenceCollator.compare(leftReference, rightReference);
+            comparison = transactionReferenceCollator.compare(leftText, rightText);
           } else {
             const leftTime = new Date(getDate(left.item) || "").getTime();
             const rightTime = new Date(getDate(right.item) || "").getTime();
@@ -8056,7 +8070,8 @@
         unsortedLines,
         els.ledgerTransactionSort?.value || "date-desc",
         (line) => line.postedAt,
-        (line) => ledgerReferenceNumber(line, actor, ledgerActor)
+        (line) => ledgerReferenceNumber(line, actor, ledgerActor),
+        (line) => line.journal
       );
       return {
         actor,
@@ -8904,6 +8919,7 @@
       const orderedRecords = orderedArchiveExportRecords(records);
       const pdfMode = options.pdfMode === true;
       const includeDirection = !pdfMode || options.includeDirection !== false;
+      const includeJournal = !pdfMode || options.includeJournal !== false;
       const includeEur = !pdfMode || options.includeEur !== false;
       const includeActor = !pdfMode || options.includeActor !== false;
       const includeTime = pdfMode && options.includeTime !== false;
@@ -8934,6 +8950,7 @@
         row["Closed Statement"] = `${archiveMonthLabel(archiveMonthKey(record.closedAt))} / ${record.archiveId}`;
         row.Type = record.exportType || record.type;
         row.Reference = record.reference;
+        if (includeJournal) row["Journal No."] = record.journal || "";
         if (includeDirection) row.Direction = record.direction;
         if (pdfMode) row.Position = record.position || "";
         row.Details = record.details;
@@ -9000,6 +9017,7 @@
       const options = {
         pdfMode: true,
         includeDirection: els.archivePdfDirection.checked,
+        includeJournal: els.archivePdfJournal.checked,
         includeEur: els.archivePdfEur.checked,
         includeActor: els.archivePdfActor.checked,
         includeTime: els.archivePdfTime.checked
@@ -9009,6 +9027,7 @@
       const omittedEurColumn = !options.includeEur && presentCurrencies.length > 1 && presentCurrencies.includes("EUR");
       const detailsWidth = 32
         + (!options.includeDirection ? 18 : 0)
+        + (!options.includeJournal ? 14 : 0)
         + (omittedEurColumn ? 11 : 0)
         + (!options.includeActor ? 16 : 0)
         + (!options.includeTime ? 10 : 0);
@@ -9017,7 +9036,7 @@
         title,
         rows,
         `${safeFilename(title)}.pdf`,
-        { Date: 12, Time: 10, Details: detailsWidth, Direction: 18, Position: 20 }
+        { Date: 12, Time: 10, "Journal No.": 14, Details: detailsWidth, Direction: 18, Position: 20 }
       );
     }
 
@@ -9148,6 +9167,8 @@
       receivable.voided = true;
       receivable.voidedAt = voidedAt;
       receivable.voidedBy = actorName;
+      receivable.journal ||= order.journal || "";
+      receivable.voidJournal = order.voidJournal || receivable.voidJournal || "";
       receivable.updatedAt = voidedAt;
     }
 
@@ -10621,6 +10642,10 @@
         : "";
     }
 
+    function joinedJournalNumbers(...values) {
+      return Array.from(new Set(values.map((value) => String(value || "").trim()).filter(Boolean))).join(" / ");
+    }
+
     function archiveRecordRows(archive, viewer, filters) {
       const rows = [];
       const addRow = (row, searchValues) => {
@@ -10631,6 +10656,7 @@
           actor: archive.actor,
           baseCurrency: archiveStatementBaseCurrency(archive),
           closedAt: archive.closedAt,
+          journal: "",
           status: "Locked",
           ...row
         });
@@ -10667,6 +10693,7 @@
           ? { name: archive.actor, role: archive.actorRole || "Agent" }
           : viewer;
         const reference = orderDisplayNumber(order, archiveOrderViewer);
+        const journal = joinedJournalNumbers(order.journal, order.voidJournal);
         const direction = `${order.broker || ""} -> ${order.agent || ""}`;
         const details = [
           order.senderName ? `Sender: ${order.senderName}` : "",
@@ -10683,6 +10710,7 @@
           date,
           type: "Order",
           reference,
+          journal,
           searchTarget: orderSearchTargetKey(order),
           direction,
           details,
@@ -10704,8 +10732,7 @@
           order.accountNumber,
           order.remarks,
           order.state,
-          order.journal,
-          order.voidJournal,
+          journal,
           direction,
           details,
           paidOut,
@@ -10713,6 +10740,12 @@
         ]);
       });
       (archive.receivables || []).forEach((receivable) => {
+        const linkedOrder = (archive.orders || []).find((order) =>
+          order.id === receivable.orderId ||
+          order.internalOrderId === receivable.orderId ||
+          order.brokerOrderNumber === receivable.brokerOrderNumber
+        );
+        const journal = joinedJournalNumbers(receivable.journal, receivable.voidJournal, linkedOrder?.journal, linkedOrder?.voidJournal);
         const payments = receivable.payments || [];
         const lastPayment = payments.slice().sort((a, b) => new Date(b.paidAt || 0).getTime() - new Date(a.paidAt || 0).getTime())[0];
         const date = receivable.archivedAt || lastPayment?.paidAt || archive.closedAt;
@@ -10728,6 +10761,7 @@
           date,
           type: "Receivable",
           reference: receivable.brokerOrderNumber || receivable.orderId || receivable.id,
+          journal,
           searchTarget: receivableSearchTargetKey(receivable),
           direction,
           details,
@@ -10744,12 +10778,14 @@
           receivable.accountNumber,
           receivable.phoneNumber,
           receivable.remarks,
+          journal,
           direction,
           details
         ]);
       });
       (archive.transfers || []).forEach((transfer) => {
         const date = transfer.sentAt || transfer.createdAt || transfer.postedAt || archive.closedAt;
+        const journal = joinedJournalNumbers(transfer.journal, transfer.reversalJournal);
         const direction = `${transfer.from || ""} -> ${transfer.to || ""}`;
         const completeDetails = transfer.details || [
           transfer.remarks ? `Remarks: ${transfer.remarks}` : "",
@@ -10765,6 +10801,7 @@
           date,
           type: "Transfer",
           reference: transfer.id,
+          journal,
           searchTarget: transferSearchTargetKey(transfer),
           direction,
           details,
@@ -10776,8 +10813,7 @@
           transfer.to,
           transfer.remarks,
           transfer.state,
-          transfer.journal,
-          transfer.reversalJournal,
+          journal,
           direction,
           details
         ]);
@@ -10790,6 +10826,7 @@
           date,
           type: line.source === "JOURNAL" ? "Journal" : line.source === "WITHDRAWAL" ? "Withdrawal" : "Ledger",
           reference,
+          journal: line.journal || "",
           searchTarget: ledgerSearchTargetKey(line),
           direction: line.direction || "",
           details,
@@ -10826,7 +10863,8 @@
           archiveRecordRows(archive, actor, filters),
           els.archiveTransactionSort?.value || "date-desc",
           (record) => record.date,
-          (record) => record.reference
+          (record) => record.reference,
+          (record) => record.journal
         ));
     }
 
@@ -10867,20 +10905,21 @@
       renderArchiveBalanceSummary(byActor, filters);
       let recordCount = 0;
       const rows = Object.entries(byActor).flatMap(([actorName, archives]) => {
-        const actorRows = [`<tr><td colspan="7"><strong>${escapeHtml(actorName)}</strong></td></tr>`];
+        const actorRows = [`<tr><td colspan="8"><strong>${escapeHtml(actorName)}</strong></td></tr>`];
         sortedArchiveStatements(archives)
           .forEach((archive) => {
             const records = sortedTransactionRows(
               archiveRecordRows(archive, actor, filters),
               els.archiveTransactionSort?.value || "date-desc",
               (record) => record.date,
-              (record) => record.reference
+              (record) => record.reference,
+              (record) => record.journal
             );
             if (!records.length) return;
             recordCount += records.length;
             actorRows.push(`
               <tr>
-                <td colspan="7"><strong>${escapeHtml(archiveMonthLabel(archiveMonthKey(archive.closedAt)))} closed statement</strong> - ${escapeHtml(displayDate(archive.closedAt))} - ${escapeHtml(archive.id || "")}</td>
+                <td colspan="8"><strong>${escapeHtml(archiveMonthLabel(archiveMonthKey(archive.closedAt)))} closed statement</strong> - ${escapeHtml(displayDate(archive.closedAt))} - ${escapeHtml(archive.id || "")}</td>
               </tr>
             `);
             records.forEach((record) => {
@@ -10892,6 +10931,7 @@
                   <td>${escapeHtml(displayDate(record.date))}</td>
                   <td>${escapeHtml(record.type)}</td>
                   <td><strong>${escapeHtml(record.reference)}</strong></td>
+                  <td>${escapeHtml(record.journal || "")}</td>
                   <td>${escapeHtml(description)}</td>
                   <td>${lockedAmount(record.currency, record.amountMinor)}</td>
                   <td>${escapeHtml(record.paidOut || "")}</td>
@@ -10904,7 +10944,7 @@
       });
       els.archiveRows.innerHTML = rows.length
         ? rows.join("")
-        : '<tr><td colspan="7">No closed transactions archived yet.</td></tr>';
+        : '<tr><td colspan="8">No closed transactions archived yet.</td></tr>';
       els.exportArchiveExcelButton.disabled = recordCount === 0;
       els.exportArchivePdfButton.disabled = recordCount === 0;
     }
@@ -11304,6 +11344,11 @@
       const payoutAmountMinor = Number(order.payoutAmountMinor || sourceAmountMinor);
       const payerStatement = payingActorStatement(order);
       const postedAt = new Date().toISOString();
+      const receivable = receivableForOrder(order);
+      if (receivable) {
+        receivable.journal = journalId;
+        receivable.updatedAt = postedAt;
+      }
       const lines = [
         { journal: journalId, orderId: order.id, source: "ORDER_PAYMENT", account: `${order.broker} ACTOR_CLEARING`, direction: "Debit", currency: sourceCurrency, amountMinor: sourceAmountMinor, postedAt },
         { journal: journalId, orderId: order.id, source: "ORDER_PAYMENT", account: `${order.broker} ACTOR_CLEARING`, direction: "Debit", currency: sourceCurrency, amountMinor: commissionMinor, postedAt },
@@ -11378,6 +11423,8 @@
         orderId: receivable.orderId || "",
         brokerOrderNumber: receivable.brokerOrderNumber || receivable.orderId || "",
         agentOrderNumber: receivable.agentOrderNumber || "",
+        journal: receivable.journal || "",
+        voidJournal: receivable.voidJournal || "",
         actor: actorName,
         borrower: receivable.borrower || actorName,
         borrowerActorId: receivable.borrowerActorId || "",
