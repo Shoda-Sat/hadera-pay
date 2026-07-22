@@ -3,6 +3,14 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
+import {
+  DeleteObjectCommand,
+  GetObjectCommand,
+  HeadObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const port = Number(process.env.PORT ?? 4173);
@@ -15,6 +23,55 @@ const ownerPassword = process.env.OWNER_PASSWORD;
 if (typeof ownerPassword !== "string" || ownerPassword.length < 12) {
   throw new Error("OWNER_PASSWORD is required and must contain at least 12 characters.");
 }
+const maxJsonBodyBytes = 12 * 1024 * 1024;
+const r2AccountId = String(process.env.R2_ACCOUNT_ID || "").trim();
+const r2BucketName = String(process.env.R2_BUCKET_NAME || "").trim();
+const r2AccessKeyId = String(process.env.R2_ACCESS_KEY_ID || "").trim();
+const r2SecretAccessKey = String(process.env.R2_SECRET_ACCESS_KEY || "");
+const r2Endpoint = String(process.env.R2_ENDPOINT || (r2AccountId ? `https://${r2AccountId}.r2.cloudflarestorage.com` : "")).replace(/\/+$/, "");
+const r2Configured = Boolean(r2BucketName && r2AccessKeyId && r2SecretAccessKey && r2Endpoint);
+const r2Client = r2Configured
+  ? new S3Client({
+    region: "auto",
+    endpoint: r2Endpoint,
+    credentials: { accessKeyId: r2AccessKeyId, secretAccessKey: r2SecretAccessKey },
+    requestChecksumCalculation: "WHEN_REQUIRED",
+    responseChecksumValidation: "WHEN_REQUIRED",
+  })
+  : null;
+const signedUploadSeconds = 5 * 60;
+const signedDownloadSeconds = 2 * 60;
+const attachmentRules = new Map([
+  ["payment-proof", {
+    maxBytes: 8 * 1024 * 1024,
+    mimeTypes: new Set([
+      "image/jpeg",
+      "image/png",
+      "application/pdf",
+      "application/vnd.ms-excel",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ]),
+  }],
+  ["chat-photo", {
+    maxBytes: 5 * 1024 * 1024,
+    mimeTypes: new Set(["image/jpeg", "image/png", "image/webp"]),
+  }],
+  ["chat-voice", {
+    maxBytes: 5 * 1024 * 1024,
+    mimeTypes: new Set(["audio/aac", "audio/mp4", "audio/mpeg", "audio/ogg", "audio/wav", "audio/webm"]),
+  }],
+  ["chat-file", {
+    maxBytes: 8 * 1024 * 1024,
+    mimeTypes: new Set([
+      "image/jpeg",
+      "image/png",
+      "image/webp",
+      "application/pdf",
+      "application/vnd.ms-excel",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ]),
+  }],
+]);
 let saveQueue = Promise.resolve();
 const allowedSessionIdleSeconds = new Set([10, 20, 30, 60, 300, 900, 1800, 3600, 7200]);
 const defaultSessionIdleSeconds = 7200;
@@ -51,6 +108,7 @@ const blankDb = () => ({
   invites: [],
   sessions: [],
   appStates: {},
+  files: [],
   ownerPasswordHash: "",
   ownerIdleTimeoutSeconds: defaultSessionIdleSeconds,
   loginAttempts: {},
@@ -120,6 +178,7 @@ function mergeDatabase(existingDb, incomingDb) {
     invites: mergeRecordsById(existingDb.invites, incomingDb.invites),
     sessions: mergeSessionsById(existingDb.sessions, incomingDb.sessions),
     appStates: mergeAppStates(existingDb.appStates, incomingDb.appStates),
+    files: mergeRecordsById(existingDb.files, incomingDb.files),
     loginAttempts: { ...(incomingDb.loginAttempts || {}) },
   };
 }
@@ -153,6 +212,217 @@ async function saveDb(db, options = {}) {
 
 function id(prefix) {
   return `${prefix}_${crypto.randomBytes(8).toString("hex")}`;
+}
+
+function httpError(statusCode, message) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
+}
+
+function requireR2() {
+  if (!r2Client) throw httpError(503, "File storage is not configured. Check the R2 environment variables in Render.");
+  return r2Client;
+}
+
+function normalizedMimeType(value) {
+  return String(value || "application/octet-stream").split(";", 1)[0].trim().toLowerCase() || "application/octet-stream";
+}
+
+function safeAttachmentFileName(value, fallback = "attachment") {
+  const cleaned = String(value || fallback)
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+/, "")
+    .slice(0, 140);
+  return cleaned || fallback;
+}
+
+function safeObjectSegment(value, fallback) {
+  return String(value || fallback).replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 100) || fallback;
+}
+
+function publicFileRecord(file) {
+  return {
+    id: file.id,
+    fileName: file.fileName,
+    mimeType: file.mimeType,
+    size: Number(file.size || file.expectedSize || 0),
+    purpose: file.purpose,
+    createdAt: file.createdAt,
+  };
+}
+
+function attachmentRule(purpose, mimeType, size) {
+  const rule = attachmentRules.get(purpose);
+  if (!rule) throw httpError(400, "This attachment type is not supported.");
+  const normalizedType = normalizedMimeType(mimeType);
+  if (!rule.mimeTypes.has(normalizedType)) throw httpError(400, "This file format is not supported for the selected attachment.");
+  if (!Number.isSafeInteger(size) || size <= 0) throw httpError(400, "The attachment is empty or its size is unavailable.");
+  if (size > rule.maxBytes) throw httpError(413, `The attachment exceeds the ${Math.round(rule.maxBytes / 1024 / 1024)} MB limit.`);
+  return { ...rule, mimeType: normalizedType };
+}
+
+function sessionCanUseChat(state, session, chatId) {
+  const chat = (state?.chatConversations || []).find((item) => item?.id === chatId);
+  const actorName = String(session?.membership?.actorName || "");
+  return Boolean(chat && actorName && (chat.members || []).includes(actorName));
+}
+
+function sessionCanUseOrder(state, session, orderId, { payment = false } = {}) {
+  const order = (state?.orders || []).find((item) => item?.id === orderId);
+  if (!order) return false;
+  if (session?.membership?.role === "Master") return true;
+  const actorId = String(session?.membership?.actorId || "");
+  const actorName = String(session?.membership?.actorName || "");
+  const payerMatches = (actorId && order.agentActorId === actorId) || (actorName && order.agent === actorName);
+  if (payment) return order.state === "Assigned" && payerMatches;
+  return payerMatches || (actorName && order.broker === actorName);
+}
+
+function validateAttachmentContext(db, session, purpose, contextId) {
+  const state = db.appStates[session.workspace.id] || {};
+  if (purpose === "payment-proof") {
+    if (!contextId || !sessionCanUseOrder(state, session, contextId, { payment: true })) {
+      throw httpError(403, "Only the assigned payer can attach a payment proof to this order.");
+    }
+    return;
+  }
+  if (!contextId || !sessionCanUseChat(state, session, contextId)) {
+    throw httpError(403, "You do not have access to this chat.");
+  }
+}
+
+function sessionCanAccessFile(db, session, file) {
+  if (!file || file.workspaceId !== session?.workspace?.id || file.status !== "active") return false;
+  const state = db.appStates[session.workspace.id] || {};
+  if ((file.contextIds || []).some((contextId) => sessionCanUseChat(state, session, contextId))) return true;
+  if (file.purpose === "payment-proof") return sessionCanUseOrder(state, session, file.contextId);
+  return sessionCanUseChat(state, session, file.contextId);
+}
+
+function newFileRecord(session, { purpose, contextId, fileName, mimeType, size, status = "pending" }) {
+  const fileId = id("file");
+  const now = new Date();
+  const safeName = safeAttachmentFileName(fileName);
+  const workspaceSegment = safeObjectSegment(session.workspace.id, "workspace");
+  const purposeSegment = safeObjectSegment(purpose, "attachment");
+  return {
+    id: fileId,
+    workspaceId: session.workspace.id,
+    uploaderUserId: session.user.id,
+    uploaderActorId: session.membership.actorId || "",
+    purpose,
+    contextId,
+    contextIds: [contextId],
+    fileName: safeName,
+    mimeType: normalizedMimeType(mimeType),
+    expectedSize: size,
+    size: status === "active" ? size : 0,
+    status,
+    key: `workspaces/${workspaceSegment}/${purposeSegment}/${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, "0")}/${fileId}-${safeName}`,
+    createdAt: now.toISOString(),
+    completedAt: status === "active" ? now.toISOString() : "",
+  };
+}
+
+function parseAttachmentDataUrl(value) {
+  const match = String(value || "").match(/^data:([^;,]+)(?:;[^,]*)?;base64,([a-zA-Z0-9+/=\s]+)$/);
+  if (!match) return null;
+  const body = Buffer.from(match[2].replace(/\s/g, ""), "base64");
+  return body.length ? { mimeType: normalizedMimeType(match[1]), body } : null;
+}
+
+function legacyAttachmentCount(state) {
+  const chatCount = (state?.chatConversations || []).reduce((total, chat) => total + (chat?.messages || [])
+    .filter((message) => String(message?.media || "").startsWith("data:")).length, 0);
+  const proofCount = (state?.orders || []).filter((order) => String(order?.paymentProof?.dataUri || "").startsWith("data:")).length;
+  return chatCount + proofCount;
+}
+
+async function uploadLegacyAttachment(db, session, input) {
+  const parsed = parseAttachmentDataUrl(input.dataUrl);
+  if (!parsed) throw new Error("The embedded attachment is not a valid Base64 file.");
+  attachmentRule(input.purpose, parsed.mimeType, parsed.body.length);
+  const file = newFileRecord(session, {
+    purpose: input.purpose,
+    contextId: input.contextId,
+    fileName: input.fileName,
+    mimeType: parsed.mimeType,
+    size: parsed.body.length,
+    status: "active",
+  });
+  const result = await requireR2().send(new PutObjectCommand({
+    Bucket: r2BucketName,
+    Key: file.key,
+    Body: parsed.body,
+    ContentType: file.mimeType,
+  }));
+  file.etag = String(result.ETag || "").replace(/^"|"$/g, "");
+  db.files.push(file);
+  return file;
+}
+
+async function migrateLegacyAttachments(db, session, limit) {
+  const state = db.appStates[session.workspace.id] || {};
+  let attempted = 0;
+  let migrated = 0;
+  let failed = 0;
+  for (const chat of state.chatConversations || []) {
+    for (const message of chat?.messages || []) {
+      if (attempted >= limit) break;
+      if (!String(message?.media || "").startsWith("data:")) continue;
+      attempted += 1;
+      try {
+        const purpose = message.kind === "voice" ? "chat-voice" : message.kind === "photo" ? "chat-photo" : "chat-file";
+        const file = await uploadLegacyAttachment(db, session, {
+          purpose,
+          contextId: chat.id,
+          fileName: message.fileName || `${message.kind || "attachment"}-${message.id}`,
+          dataUrl: message.media,
+        });
+        message.attachmentId = file.id;
+        message.fileName = file.fileName;
+        message.mimeType = file.mimeType;
+        message.fileSize = file.size;
+        message.media = "";
+        migrated += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+    if (attempted >= limit) break;
+  }
+  if (attempted < limit) {
+    for (const order of state.orders || []) {
+      if (attempted >= limit) break;
+      const proof = order?.paymentProof;
+      if (!String(proof?.dataUri || "").startsWith("data:")) continue;
+      attempted += 1;
+      try {
+        const file = await uploadLegacyAttachment(db, session, {
+          purpose: "payment-proof",
+          contextId: order.id,
+          fileName: proof.fileName || `${order.id}-payment-proof`,
+          dataUrl: proof.dataUri,
+        });
+        order.paymentProof = {
+          ...proof,
+          dataUri: "",
+          attachmentId: file.id,
+          fileName: file.fileName,
+          mimeType: file.mimeType,
+          size: file.size,
+        };
+        migrated += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+  }
+  db.appStates[session.workspace.id] = state;
+  if (migrated > 0) await saveDb(db);
+  return { attempted, migrated, failed, remaining: legacyAttachmentCount(state), state };
 }
 
 function inviteCode() {
@@ -354,7 +624,16 @@ function requestDeviceId(request) {
 
 async function readJson(request) {
   const chunks = [];
-  for await (const chunk of request) chunks.push(chunk);
+  let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > maxJsonBodyBytes) {
+      const error = new Error("The request is too large.");
+      error.statusCode = 413;
+      throw error;
+    }
+    chunks.push(chunk);
+  }
   if (chunks.length === 0) return {};
   return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
 }
@@ -985,7 +1264,7 @@ function stripRestrictedCreditReminders(state, session) {
   };
 }
 
-function sanitizeIncomingWorkspaceState(state, session) {
+function sanitizeIncomingWorkspaceState(state, session, db) {
   if (!state || typeof state !== "object") return {};
   const sanitized = { ...state };
   if (session?.membership?.role !== "Master") delete sanitized.chatHistoryResetAt;
@@ -995,6 +1274,41 @@ function sanitizeIncomingWorkspaceState(state, session) {
       const { creditReminder, ...allowedReceivable } = receivable;
       return allowedReceivable;
     });
+  }
+  const storedFiles = new Map((db?.files || [])
+    .filter((file) => file?.workspaceId === session?.workspace?.id && file?.status === "active")
+    .map((file) => [file.id, file]));
+  if (Array.isArray(state.orders)) {
+    sanitized.orders = state.orders.map((order) => {
+      const proof = order?.paymentProof;
+      if (!proof?.attachmentId) return order;
+      const file = storedFiles.get(proof.attachmentId);
+      if (file?.purpose === "payment-proof" && file.contextId === order.id) return order;
+      const { attachmentId, size, ...allowedProof } = proof;
+      return { ...order, paymentProof: allowedProof };
+    });
+  }
+  if (Array.isArray(state.chatConversations)) {
+    sanitized.chatConversations = state.chatConversations.map((chat) => ({
+      ...chat,
+      messages: (chat?.messages || []).map((message) => {
+        if (!message?.attachmentId) return message;
+        const file = storedFiles.get(message.attachmentId);
+        const chatFileMatches = file && ["chat-photo", "chat-voice", "chat-file"].includes(file.purpose) && (file.contextIds || [file.contextId]).includes(chat.id);
+        const proofFileMatches = file?.purpose === "payment-proof" && file.contextId === message.orderId;
+        if (chatFileMatches) return message;
+        if (proofFileMatches) {
+          if (session?.membership?.role === "Master") file.contextIds = Array.from(new Set([...(file.contextIds || [file.contextId]), chat.id]));
+          return message;
+        }
+        if (file && session?.membership?.role === "Master" && sessionCanUseChat(state, session, chat.id)) {
+          file.contextIds = Array.from(new Set([...(file.contextIds || [file.contextId]), chat.id]));
+          return message;
+        }
+        const { attachmentId, fileSize, ...allowedMessage } = message;
+        return allowedMessage;
+      }),
+    }));
   }
   return sanitized;
 }
@@ -1304,9 +1618,118 @@ async function handleApi(request, response, url) {
     return;
   }
 
-  const backgroundRead = method === "GET" && ["/api/app-state", "/api/auth/device-warning"].includes(url.pathname);
+  const backgroundRead = method === "GET" && (
+    ["/api/app-state", "/api/auth/device-warning", "/api/files/status"].includes(url.pathname) ||
+    /^\/api\/files\/[^/]+\/download-url$/.test(url.pathname)
+  );
   const session = await requireSession(request, response, db, { touch: !backgroundRead });
   if (!session) return;
+
+  if (url.pathname === "/api/files/status" && method === "GET") {
+    const state = db.appStates[session.workspace.id] || {};
+    sendJson(response, 200, {
+      configured: r2Configured,
+      storedFiles: (db.files || []).filter((file) => file.workspaceId === session.workspace.id && file.status === "active").length,
+      pendingFiles: (db.files || []).filter((file) => file.workspaceId === session.workspace.id && file.status === "pending").length,
+      legacyAttachments: legacyAttachmentCount(state),
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/files/upload-url" && method === "POST") {
+    const client = requireR2();
+    const body = await readJson(request);
+    const purpose = String(body.purpose || "");
+    const contextId = String(body.contextId || body.orderId || body.chatId || "");
+    const fileName = safeAttachmentFileName(body.fileName);
+    const size = Number(body.size);
+    const rule = attachmentRule(purpose, body.mimeType, size);
+    validateAttachmentContext(db, session, purpose, contextId);
+    const file = newFileRecord(session, { purpose, contextId, fileName, mimeType: rule.mimeType, size });
+    const uploadUrl = await getSignedUrl(client, new PutObjectCommand({
+      Bucket: r2BucketName,
+      Key: file.key,
+      ContentType: file.mimeType,
+    }), { expiresIn: signedUploadSeconds });
+    db.files.push(file);
+    await saveDb(db);
+    sendJson(response, 200, {
+      uploadUrl,
+      uploadHeaders: { "Content-Type": file.mimeType },
+      expiresIn: signedUploadSeconds,
+      file: publicFileRecord(file),
+    });
+    return;
+  }
+
+  const completeFileMatch = url.pathname.match(/^\/api\/files\/([^/]+)\/complete$/);
+  if (completeFileMatch && method === "POST") {
+    const client = requireR2();
+    const fileId = decodeURIComponent(completeFileMatch[1]);
+    const file = (db.files || []).find((item) => item.id === fileId && item.workspaceId === session.workspace.id);
+    if (!file || file.status !== "pending") return sendJson(response, 404, { error: "This pending upload is no longer available." });
+    if (file.uploaderUserId !== session.user.id && session.membership.role !== "Master") {
+      return sendJson(response, 403, { error: "Only the uploader or Master can complete this upload." });
+    }
+    let head;
+    try {
+      head = await client.send(new HeadObjectCommand({ Bucket: r2BucketName, Key: file.key }));
+    } catch {
+      throw httpError(409, "The file has not finished uploading to R2. Try again.");
+    }
+    const actualSize = Number(head.ContentLength || 0);
+    const actualType = normalizedMimeType(head.ContentType || file.mimeType);
+    const rule = attachmentRules.get(file.purpose);
+    if (!actualSize || actualSize !== Number(file.expectedSize) || actualSize > Number(rule?.maxBytes || 0) || actualType !== file.mimeType) {
+      await client.send(new DeleteObjectCommand({ Bucket: r2BucketName, Key: file.key })).catch(() => {});
+      db.files = db.files.filter((item) => item.id !== file.id);
+      await saveDb(db, { replace: true });
+      throw httpError(400, "The uploaded file did not match its approved size or format and was removed.");
+    }
+    file.status = "active";
+    file.size = actualSize;
+    file.completedAt = new Date().toISOString();
+    file.etag = String(head.ETag || "").replace(/^"|"$/g, "");
+    await saveDb(db);
+    sendJson(response, 200, { file: publicFileRecord(file) });
+    return;
+  }
+
+  const downloadFileMatch = url.pathname.match(/^\/api\/files\/([^/]+)\/download-url$/);
+  if (downloadFileMatch && method === "GET") {
+    const client = requireR2();
+    const fileId = decodeURIComponent(downloadFileMatch[1]);
+    const file = (db.files || []).find((item) => item.id === fileId);
+    if (!sessionCanAccessFile(db, session, file)) return sendJson(response, 404, { error: "This attachment is unavailable." });
+    const downloadUrl = await getSignedUrl(client, new GetObjectCommand({
+      Bucket: r2BucketName,
+      Key: file.key,
+      ResponseContentType: file.mimeType,
+      ResponseContentDisposition: `inline; filename="${safeAttachmentFileName(file.fileName)}"`,
+    }), { expiresIn: signedDownloadSeconds });
+    sendJson(response, 200, {
+      downloadUrl,
+      expiresIn: signedDownloadSeconds,
+      file: publicFileRecord(file),
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/files/migrate" && method === "POST") {
+    if (session.membership.role !== "Master") return sendJson(response, 403, { error: "Only Master can migrate existing attachments." });
+    requireR2();
+    const body = await readJson(request);
+    const limit = Math.min(25, Math.max(1, Number(body.limit) || 10));
+    const result = await migrateLegacyAttachments(db, session, limit);
+    sendJson(response, 200, {
+      attempted: result.attempted,
+      migrated: result.migrated,
+      failed: result.failed,
+      remaining: result.remaining,
+      state: stripRestrictedCreditReminders(result.state, session),
+    });
+    return;
+  }
 
   if (url.pathname === "/api/auth/device-warning" && method === "GET") {
     const sessionId = parseCookies(request).hp_session;
@@ -1624,7 +2047,7 @@ async function handleApi(request, response, url) {
 
   if (url.pathname === "/api/app-state" && method === "PUT") {
     const body = await readJson(request);
-    const incomingState = sanitizeIncomingWorkspaceState(body.state || {}, session);
+    const incomingState = sanitizeIncomingWorkspaceState(body.state || {}, session, db);
     db.appStates[session.workspace.id] = mergeWorkspaceState(db, session.workspace.id, incomingState);
     await saveDb(db);
     sendJson(response, 200, { ok: true });
@@ -1659,7 +2082,10 @@ const server = http.createServer(async (request, response) => {
     response.end(body);
   } catch (error) {
     if (request.url?.startsWith("/api/")) {
-      sendJson(response, 500, { error: error instanceof Error ? error.message : "Server error." });
+      const statusCode = Number(error?.statusCode);
+      sendJson(response, Number.isInteger(statusCode) && statusCode >= 400 && statusCode <= 599 ? statusCode : 500, {
+        error: error instanceof Error ? error.message : "Server error.",
+      });
       return;
     }
     response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });

@@ -177,7 +177,9 @@ export interface OrderRecord {
 }
 
 export interface PaymentProofRecord {
-  dataUri: string;
+  dataUri?: string;
+  attachmentId?: string;
+  size?: number;
   fileName: string;
   attachedAt: string;
   mediaType?: "image" | "document";
@@ -314,8 +316,11 @@ export interface ChatMessageRecord {
   text: string;
   kind?: "text" | "photo" | "voice" | "file";
   media?: string;
+  attachmentId?: string;
   fileName?: string;
   mimeType?: string;
+  fileSize?: number;
+  orderId?: string;
   orderNumber?: string;
   forwardedFrom?: string;
   replyTo?: string;

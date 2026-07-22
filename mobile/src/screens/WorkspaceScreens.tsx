@@ -34,10 +34,14 @@ import {
   extendOwnerSubscription,
   loadOwnerMasters,
   loadInvites,
+  getR2AttachmentDownload,
+  getR2StorageStatus,
+  migrateR2Attachments,
   removeWorkspaceActor,
   resetWorkspaceActorData,
   resetWorkspaceData,
   setOwnerMasterActive,
+  uploadR2Attachment,
   updateIdleTimeout
 } from "../api/client";
 import { Button, Field, Panel, Pill, SelectRow, SummaryRow, type PillTone } from "../components/ui";
@@ -214,7 +218,7 @@ async function paymentProofAssetSize(asset: DocumentPicker.DocumentPickerAsset):
   return info.exists && "size" in info ? Number(info.size || 0) : 0;
 }
 
-async function compressPaymentProofImage(asset: DocumentPicker.DocumentPickerAsset, onStatus: (status: string) => void): Promise<string> {
+async function compressPaymentProofImage(asset: DocumentPicker.DocumentPickerAsset, onStatus: (status: string) => void): Promise<{ uri: string; size: number }> {
   const dimensions = await imageDimensions(asset.uri);
   let width = dimensions.width;
   let height = dimensions.height;
@@ -233,7 +237,8 @@ async function compressPaymentProofImage(asset: DocumentPicker.DocumentPickerAss
       { compress: quality, format: ImageManipulator.SaveFormat.JPEG, base64: true }
     );
     if (!result.base64) throw new Error("The selected image could not be compressed.");
-    if (base64ByteLength(result.base64) <= paymentProofImageTargetBytes) return result.base64;
+    const compressedSize = base64ByteLength(result.base64);
+    if (compressedSize <= paymentProofImageTargetBytes) return { uri: result.uri, size: compressedSize };
     if (quality > 0.48) quality = Math.max(0.48, quality - 0.12);
     else {
       width = Math.max(1, Math.round(width * 0.8));
@@ -257,16 +262,29 @@ async function preparePaymentProof(
   if (kind === "document" && size > maxPaymentProofDocumentBytes) throw new Error("Choose a PDF or Excel file under 8 MB.");
   const shouldCompress = kind === "image" && size > paymentProofImageTargetBytes;
   onStatus(shouldCompress ? "Compressing image..." : "Preparing attachment...");
-  const base64 = shouldCompress
+  const prepared = shouldCompress
     ? await compressPaymentProofImage(asset, onStatus)
-    : await FileSystem.readAsStringAsync(asset.uri, { encoding: FileSystem.EncodingType.Base64 });
-  if (!base64) throw new Error("The selected file could not be prepared.");
-  if (kind === "document" && base64ByteLength(base64) > maxPaymentProofDocumentBytes) throw new Error("Choose a PDF or Excel file under 8 MB.");
+    : { uri: asset.uri, size };
+  if (!prepared.uri || !prepared.size) throw new Error("The selected file could not be prepared.");
+  if (kind === "document" && prepared.size > maxPaymentProofDocumentBytes) throw new Error("Choose a PDF or Excel file under 8 MB.");
+  onStatus("Uploading securely...");
+  const mimeType = shouldCompress ? "image/jpeg" : paymentProofMimeType(asset.name, asset.mimeType || "");
+  const fileName = safePaymentProofName(order, session, asset.name, shouldCompress);
+  const storedFile = await uploadR2Attachment({
+    uri: prepared.uri,
+    purpose: "payment-proof",
+    contextId: order.id,
+    fileName,
+    mimeType,
+    size: prepared.size
+  });
   return {
-    dataUri: `data:${shouldCompress ? "image/jpeg" : paymentProofMimeType(asset.name, asset.mimeType || "")};base64,${base64}`,
-    fileName: safePaymentProofName(order, session, asset.name, shouldCompress),
+    dataUri: "",
+    attachmentId: storedFile.id,
+    size: storedFile.size,
+    fileName: storedFile.fileName,
     mediaType: kind,
-    mimeType: shouldCompress ? "image/jpeg" : paymentProofMimeType(asset.name, asset.mimeType || ""),
+    mimeType: storedFile.mimeType,
     orderNumber: orderNumber(order, session),
     compressed: shouldCompress
   };
@@ -1041,6 +1059,21 @@ function detectedChatAudioMimeType(message: ChatMessageRecord, declaredType: str
 }
 
 async function cacheChatAttachment(message: ChatMessageRecord): Promise<{ uri: string; mimeType: string; fileName: string }> {
+  if (!message.media && !message.attachmentId) throw new Error("This attachment is no longer available.");
+  if (message.attachmentId) {
+    const mimeType = message.mimeType || "application/octet-stream";
+    const fileName = chatAttachmentFileName(message, mimeType);
+    const cacheDirectory = FileSystem.cacheDirectory;
+    if (!cacheDirectory) throw new Error("Temporary file storage is unavailable.");
+    const cacheKey = String(message.attachmentId).replace(/[^a-z0-9_-]+/gi, "-");
+    const uri = `${cacheDirectory}chat-r2-${cacheKey}-${message.fileSize || 0}-${fileName}`;
+    const existing = await FileSystem.getInfoAsync(uri);
+    if (!existing.exists) {
+      const attachment = await getR2AttachmentDownload(message.attachmentId);
+      await FileSystem.downloadAsync(attachment.downloadUrl, uri);
+    }
+    return { uri, mimeType, fileName };
+  }
   if (!message.media) throw new Error("This attachment is no longer available.");
   const separator = message.media.indexOf(",");
   if (!message.media.startsWith("data:") || separator < 0) throw new Error("This attachment cannot be opened on this device.");
@@ -1057,6 +1090,23 @@ async function cacheChatAttachment(message: ChatMessageRecord): Promise<{ uri: s
     await FileSystem.writeAsStringAsync(uri, message.media.slice(separator + 1), { encoding: FileSystem.EncodingType.Base64 });
   }
   return { uri, mimeType, fileName };
+}
+
+function ChatPhoto({ message }: { message: ChatMessageRecord }) {
+  const [uri, setUri] = useState(message.media || "");
+  useEffect(() => {
+    let active = true;
+    if (message.media || !message.attachmentId) {
+      setUri(message.media || "");
+      return () => { active = false; };
+    }
+    setUri("");
+    getR2AttachmentDownload(message.attachmentId)
+      .then((attachment) => { if (active) setUri(attachment.downloadUrl); })
+      .catch(() => { if (active) setUri(""); });
+    return () => { active = false; };
+  }, [message.attachmentId, message.media]);
+  return uri ? <Image source={{ uri }} resizeMode="contain" style={styles.messageImage} /> : <Text style={styles.muted}>Loading photo...</Text>;
 }
 
 function formatVoiceTime(seconds: number): string {
@@ -1086,7 +1136,7 @@ function VoiceMessagePlayer({ message }: { message: ChatMessageRecord }) {
     return () => {
       active = false;
     };
-  }, [message.id, message.media, player]);
+  }, [message.id, message.media, message.attachmentId, player]);
 
   const togglePlayback = async () => {
     if (!ready || failed) return;
@@ -1232,9 +1282,9 @@ export function ChatScreen({ session, state, offline, onState, onRefresh, onScro
                     </View>
                   ) : null}
                   <Text style={styles.messageText}>{chatMessageSummary(item)}</Text>
-                  {item.media && item.kind === "photo" ? <Image source={{ uri: item.media }} resizeMode="contain" style={styles.messageImage} /> : null}
-                  {item.media && item.kind === "voice" ? <VoiceMessagePlayer message={item} /> : null}
-                  {item.media ? (
+                  {(item.media || item.attachmentId) && item.kind === "photo" ? <ChatPhoto message={item} /> : null}
+                  {(item.media || item.attachmentId) && item.kind === "voice" ? <VoiceMessagePlayer message={item} /> : null}
+                  {item.media || item.attachmentId ? (
                     <Pressable
                       accessibilityRole="button"
                       accessibilityLabel={`Open ${item.fileName || "attachment"}`}
@@ -1552,6 +1602,7 @@ export function SettingsScreen({ session, state, offline, onState, onSessionTime
   const resettableActors = activeActors(state).filter((actor) => actor.role !== "Master");
   const [resetActorName, setResetActorName] = useState(resettableActors[0]?.name || "");
   const selectedResetActorName = resettableActors.some((actor) => actor.name === resetActorName) ? resetActorName : resettableActors[0]?.name || "";
+  const [storageStatus, setStorageStatus] = useState<{ configured: boolean; storedFiles: number; pendingFiles: number; legacyAttachments: number } | null>(null);
   const master = isMasterView(session);
   const saveTimeout = async () => {
     if (offline) return Alert.alert("Offline", "Reconnect before changing the automatic logout time.");
@@ -1576,6 +1627,34 @@ export function SettingsScreen({ session, state, offline, onState, onSessionTime
   const saveStatementRate = async (currency: Currency) => { if (offline) return Alert.alert("Offline", "Reconnect before saving rates."); setBusy(`rate-${currency}`); const draft = statementRates[currency]; try { onState(await updateMasterRateSetting(currency, { enabled: draft.enabled, divider: Number(draft.divider), percent: Number(draft.percent) })); } catch (error) { Alert.alert("Income statement rate", errorMessage(error)); } finally { setBusy(""); } };
   const saveUsdAgentRate = async (actorId: string) => { if (offline) return Alert.alert("Offline", "Reconnect before saving rates."); setBusy(`usd-agent-rate-${actorId}`); const draft = usdAgentRates[actorId] || { divider: "1", percent: "0" }; try { onState(await updateUsdAgentIncomeRate(actorId, { divider: Number(draft.divider), percent: Number(draft.percent) })); } catch (error) { Alert.alert("USD Agent payout rate", errorMessage(error)); } finally { setBusy(""); } };
   const updateActor = async (actorId: string, input: Parameters<typeof updateActorOrderSettings>[1]) => { if (offline) return Alert.alert("Offline", "Reconnect before changing permissions."); setBusy(actorId); try { onState(await updateActorOrderSettings(actorId, input)); } catch (error) { Alert.alert("Permissions", errorMessage(error)); } finally { setBusy(""); } };
+  const checkFileStorage = async () => {
+    if (offline) return Alert.alert("Offline", "Reconnect before checking private file storage.");
+    setBusy("r2-status");
+    try { setStorageStatus(await getR2StorageStatus()); } catch (error) { Alert.alert("Private file storage", errorMessage(error)); } finally { setBusy(""); }
+  };
+  const migrateFileStorage = async () => {
+    if (offline) return Alert.alert("Offline", "Reconnect before moving existing attachments.");
+    setBusy("r2-migrate");
+    let migrated = 0;
+    let failed = 0;
+    let latestState: WorkspaceState | null = null;
+    try {
+      for (let batch = 0; batch < 50; batch += 1) {
+        const result = await migrateR2Attachments(10);
+        migrated += result.migrated;
+        failed += result.failed;
+        latestState = result.state;
+        if (!result.remaining || !result.migrated) break;
+      }
+      if (latestState) onState(latestState);
+      setStorageStatus(await getR2StorageStatus());
+      Alert.alert("R2 migration complete", `${migrated} attachment${migrated === 1 ? "" : "s"} moved${failed ? `; ${failed} need attention` : ""}.`);
+    } catch (error) {
+      Alert.alert("Private file storage", errorMessage(error));
+    } finally {
+      setBusy("");
+    }
+  };
   const reset = () => {
     if (resetPermit !== "MASTER-RESET") return Alert.alert("Master reset", "Enter MASTER-RESET to continue.");
     Alert.alert(resetScope === "wipe" ? "Wipe all workspace data?" : "Erase financial data?", resetScope === "wipe" ? "This removes data, actors, actor accounts, and invite codes." : "This erases financial records but keeps actors.", [
@@ -1617,6 +1696,13 @@ export function SettingsScreen({ session, state, offline, onState, onSessionTime
       <Panel title="Reset password"><Field label="Current password" value={currentPassword} onChangeText={setCurrentPassword} secureTextEntry /><Field label="New password" value={newPassword} onChangeText={setNewPassword} secureTextEntry /><Button label="Update password" loading={busy === "password"} disabled={offline} onPress={change} /></Panel>
       <Panel title="Time Out" badge="Automatic logout"><SelectRow label="Inactive for" options={timeoutOptions} value={timeoutLabel} onChange={setTimeoutLabel} /><Button label="Save Time Out" loading={busy === "timeout"} disabled={offline} onPress={saveTimeout} /></Panel>
       {master ? <>
+        <Panel title="Private file storage" badge={storageStatus?.configured === false ? "Not configured" : "Cloudflare R2"}>
+          <Text style={styles.muted}>{storageStatus ? `${storageStatus.storedFiles} stored files · ${storageStatus.legacyAttachments} existing attachments to move` : "Check R2 and move older embedded attachments out of the JSON database."}</Text>
+          <View style={styles.rowButtons}>
+            <Button label="Check storage" variant="secondary" loading={busy === "r2-status"} disabled={offline || Boolean(busy)} onPress={checkFileStorage} style={styles.flexButton} />
+            <Button label="Move existing" loading={busy === "r2-migrate"} disabled={offline || Boolean(busy) || storageStatus?.configured === false || storageStatus?.legacyAttachments === 0} onPress={migrateFileStorage} style={styles.flexButton} />
+          </View>
+        </Panel>
         <Panel title="Buying rates" badge="Income statement"><Field label="EUR to USD" value={buying.eurToUsd} onChangeText={(value) => setBuying({ ...buying, eurToUsd: value })} keyboardType="decimal-pad" /><Field label="USD to ETB" value={buying.usdToEtb} onChangeText={(value) => setBuying({ ...buying, usdToEtb: value })} keyboardType="decimal-pad" /><Field label="USD to ERN" value={buying.usdToErn} onChangeText={(value) => setBuying({ ...buying, usdToErn: value })} keyboardType="decimal-pad" /><Button label="Save buying rates" loading={busy === "buying"} disabled={offline} onPress={saveRates} /></Panel>
         <Panel title="Income statement rates" badge="Future orders only">
           {supportedCurrencies.map((currency) => {

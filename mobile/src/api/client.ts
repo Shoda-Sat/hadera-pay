@@ -1,4 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as FileSystem from "expo-file-system";
 import type {
   AccountDeviceWarning,
   ActorRecord,
@@ -98,6 +99,65 @@ async function api<T>(path: string, options: ApiOptions = {}): Promise<ApiEnvelo
     throw new Error(data.error || "HaderaPay could not complete this request.");
   }
   return data;
+}
+
+export interface StoredAttachment {
+  id: string;
+  fileName: string;
+  mimeType: string;
+  size: number;
+  purpose: "payment-proof" | "chat-photo" | "chat-voice" | "chat-file";
+  createdAt: string;
+}
+
+export async function uploadR2Attachment(input: {
+  uri: string;
+  purpose: StoredAttachment["purpose"];
+  contextId: string;
+  fileName: string;
+  mimeType: string;
+  size: number;
+}): Promise<StoredAttachment> {
+  const mimeType = input.mimeType.split(";", 1)[0].trim().toLowerCase() || "application/octet-stream";
+  const pending = await api<{
+    uploadUrl: string;
+    uploadHeaders: Record<string, string>;
+    file: StoredAttachment;
+  }>("/api/files/upload-url", {
+    method: "POST",
+    body: {
+      purpose: input.purpose,
+      contextId: input.contextId,
+      fileName: input.fileName,
+      mimeType,
+      size: input.size
+    }
+  });
+  const uploadResponse = await FileSystem.uploadAsync(pending.uploadUrl, input.uri, {
+    httpMethod: "PUT",
+    uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+    headers: pending.uploadHeaders || { "Content-Type": mimeType }
+  });
+  if (uploadResponse.status < 200 || uploadResponse.status >= 300) {
+    throw new Error("R2 rejected the attachment upload. Check the bucket access settings.");
+  }
+  const completed = await api<{ file: StoredAttachment }>(`/api/files/${encodeURIComponent(pending.file.id)}/complete`, { method: "POST" });
+  return completed.file;
+}
+
+export async function getR2AttachmentDownload(attachmentId: string): Promise<{ downloadUrl: string; file: StoredAttachment }> {
+  return api<{ downloadUrl: string; file: StoredAttachment }>(`/api/files/${encodeURIComponent(attachmentId)}/download-url`);
+}
+
+export async function getR2StorageStatus(): Promise<{ configured: boolean; storedFiles: number; pendingFiles: number; legacyAttachments: number }> {
+  return api<{ configured: boolean; storedFiles: number; pendingFiles: number; legacyAttachments: number }>("/api/files/status");
+}
+
+export async function migrateR2Attachments(limit = 10): Promise<{ attempted: number; migrated: number; failed: number; remaining: number; state: WorkspaceState }> {
+  return api<{ attempted: number; migrated: number; failed: number; remaining: number; state: WorkspaceState }>("/api/files/migrate", {
+    method: "POST",
+    body: { limit }
+  });
 }
 
 async function readCache<T>(key: string): Promise<T | null> {

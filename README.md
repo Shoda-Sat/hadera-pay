@@ -15,6 +15,24 @@ npm start
 
 If the owner password has already been changed from inside HaderaPay, the database contains its secure hash and that password remains the login credential. The `OWNER_PASSWORD` environment value is still required as a secure bootstrap credential for a new database.
 
+## Private file storage
+
+HaderaPay stores new payment proofs, chat photos, and voice messages in a private Cloudflare R2 bucket. The web and Android clients upload directly through five-minute signed upload URLs, and authenticated downloads use two-minute signed URLs. R2 credentials must exist only in the server environment:
+
+- `R2_ACCOUNT_ID`
+- `R2_ACCESS_KEY_ID`
+- `R2_SECRET_ACCESS_KEY`
+- `R2_BUCKET_NAME`
+- `R2_ENDPOINT` (for example, `https://ACCOUNT_ID.r2.cloudflarestorage.com`)
+
+Keep public bucket access disabled. The R2 token should have Object Read & Write access to only the HaderaPay bucket. The web origin must be included in the bucket's CORS policy for `PUT`, `GET`, and `HEAD` requests.
+
+New payment images are limited to 1 MB after client compression, payment documents to 8 MB, chat photos to 5 MB, and voice messages to 5 MB or five minutes. The server independently verifies the uploaded size and content type before activating each file.
+
+Master can open **Settings > Private File Storage** in either client to verify the connection and move older Base64 attachments out of `auth-db.json` in small batches. Existing embedded attachments remain readable until they are migrated.
+
+R2 is object storage, not the financial database. Accounts, orders, transfers, journals, and reports remain in the application database and should eventually be migrated to PostgreSQL.
+
 This starter implements the core of a multi-tier payment routing and settlement system around an immutable double-entry ledger.
 
 The design has one non-negotiable rule: financial truth lives in `journal_entries` and `ledger_lines`. Actor balances are derived by summing ledger lines. There is no mutable `balance` column on users, wallets, orders, or transfers.

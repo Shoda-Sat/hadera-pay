@@ -3307,6 +3307,21 @@
               </form>
             </div>
             </div>
+            <div class="panel span-12 settings-category" data-master-settings>
+              <div class="panel-header">
+                <div class="settings-heading">
+                  <h2>Private File Storage</h2>
+                  <small>New attachments use Cloudflare R2. Move older embedded attachments out of the JSON database in small verified batches.</small>
+                </div>
+                <span id="r2StorageStatus" class="state-pill">Checking...</span>
+              </div>
+              <div class="panel-body">
+                <div class="actions">
+                  <button class="btn secondary" id="r2RefreshButton" type="button">Check storage</button>
+                  <button class="btn primary" id="r2MigrateButton" type="button">Move existing attachments</button>
+                </div>
+              </div>
+            </div>
             <div class="panel span-12 settings-category" data-settings-panel="actorAccess" data-master-settings>
             <div class="panel-header">
               <div class="settings-heading">
@@ -3532,6 +3547,10 @@
     const paymentProofImageTargetBytes = 1024 * 1024;
     const maxPaymentProofImageSourceBytes = 24 * 1024 * 1024;
     const maxPaymentProofDocumentBytes = 8 * 1024 * 1024;
+    const maxChatPhotoBytes = 5 * 1024 * 1024;
+    const maxChatVoiceBytes = 5 * 1024 * 1024;
+    const maxChatVoiceDurationMs = 5 * 60 * 1000;
+    const attachmentDownloadCache = new Map();
     const paymentProofAccept = ".jpg,.jpeg,.png,.pdf,.xls,.xlsx,image/jpeg,image/png,application/pdf,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
     const supportedCurrencies = ["USD", "ETB", "EUR", "ERN"];
 
@@ -4040,6 +4059,59 @@
         throw new Error(message || "Request failed.");
       }
       return data;
+    }
+
+    function normalizedUploadMimeType(value) {
+      return String(value || "application/octet-stream").split(";", 1)[0].trim().toLowerCase() || "application/octet-stream";
+    }
+
+    function inferredUploadMimeType(fileName, mimeType) {
+      const normalized = normalizedUploadMimeType(mimeType);
+      if (normalized !== "application/octet-stream") return normalized;
+      const extension = String(fileName || "").toLowerCase().match(/\.[^.]+$/)?.[0] || "";
+      return ({
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+        ".pdf": "application/pdf",
+        ".xls": "application/vnd.ms-excel",
+        ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      })[extension] || normalized;
+    }
+
+    async function uploadAttachmentToR2(blob, { purpose, contextId, fileName, mimeType }, onStatus = () => {}) {
+      if (!blob?.size) throw new Error("The selected attachment is empty.");
+      const contentType = normalizedUploadMimeType(mimeType || blob.type);
+      onStatus("Requesting secure upload...");
+      const pending = await api("/api/files/upload-url", {
+        method: "POST",
+        body: { purpose, contextId, fileName, mimeType: contentType, size: blob.size }
+      });
+      onStatus("Uploading securely...");
+      const uploadResponse = await fetch(pending.uploadUrl, {
+        method: "PUT",
+        headers: pending.uploadHeaders || { "Content-Type": contentType },
+        body: blob
+      });
+      if (!uploadResponse.ok) throw new Error("R2 rejected the attachment upload. Check the bucket CORS policy and try again.");
+      onStatus("Verifying upload...");
+      const completed = await api(`/api/files/${encodeURIComponent(pending.file.id)}/complete`, { method: "POST" });
+      return completed.file;
+    }
+
+    async function r2AttachmentDownload(attachmentId) {
+      if (!attachmentId) throw new Error("This attachment is unavailable.");
+      const cached = attachmentDownloadCache.get(attachmentId);
+      if (cached && cached.expiresAt > Date.now()) return cached.promise;
+      const promise = api(`/api/files/${encodeURIComponent(attachmentId)}/download-url`)
+        .then((result) => ({ url: result.downloadUrl, file: result.file }))
+        .catch((error) => {
+          attachmentDownloadCache.delete(attachmentId);
+          throw error;
+        });
+      attachmentDownloadCache.set(attachmentId, { promise, expiresAt: Date.now() + 90 * 1000 });
+      return promise;
     }
 
     function replaceState(nextState) {
@@ -4787,6 +4859,9 @@
       actorResetPermit: document.getElementById("actorResetPermit"),
       actorResetError: document.getElementById("actorResetError"),
       actorResetButton: document.getElementById("actorResetButton"),
+      r2StorageStatus: document.getElementById("r2StorageStatus"),
+      r2RefreshButton: document.getElementById("r2RefreshButton"),
+      r2MigrateButton: document.getElementById("r2MigrateButton"),
       subscriptionRows: document.getElementById("subscriptionRows"),
       subscriptionError: document.getElementById("subscriptionError"),
       inviteRows: document.getElementById("inviteRows"),
@@ -6490,7 +6565,7 @@
       if (!message) return "";
       if (message.kind === "photo") return message.text || "Photo";
       if (message.kind === "voice") return "Voice message";
-      if (message.media) return message.text || message.fileName || "Attachment";
+      if (message.media || message.attachmentId) return message.text || message.fileName || "Attachment";
       return message.text || "";
     }
 
@@ -6533,7 +6608,25 @@
 
     function renderMessageBody(message) {
       const text = message.text ? `<div>${escapeHtml(message.text)}</div>` : "";
-      if (!message.media) return `<div>${escapeHtml(message.text || "")}</div>`;
+      if (!message.media && !message.attachmentId) return `<div>${escapeHtml(message.text || "")}</div>`;
+      if (message.attachmentId) {
+        const attachmentId = escapeHtml(message.attachmentId);
+        const fileName = escapeHtml(message.fileName || (message.kind === "voice" ? "voice-message.webm" : "attachment"));
+        if (message.kind === "voice") {
+          return `
+            ${text}
+            <div class="voice-message">
+              <audio controls preload="metadata" playsinline data-r2-attachment="${attachmentId}">Your device cannot play this voice message.</audio>
+              <a class="attachment-link" href="#" data-r2-attachment="${attachmentId}" download="${fileName}">Download voice message</a>
+            </div>
+          `;
+        }
+        return `
+          ${text}
+          ${message.kind === "photo" ? `<img data-r2-attachment="${attachmentId}" alt="Shared attachment" hidden>` : ""}
+          <a class="attachment-link" href="#" data-r2-attachment="${attachmentId}" download="${fileName}">Open attachment</a>
+        `;
+      }
       if (message.kind === "voice") {
         const media = normalizedVoiceMedia(message.media);
         const fileName = escapeHtml(message.fileName || `voice-message.${audioFileExtension(detectedAudioMimeType(media))}`);
@@ -6650,20 +6743,24 @@
         }).join("")
         : '<div class="empty">No messages yet.</div>';
       els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
+      hydrateChatAttachments().catch(() => {});
     }
 
-    function sendChatMessage({ text = "", kind = "text", media = "", fileName = "", mimeType = "" }) {
-      const chat = selectedChat();
+    function sendChatMessage({ chatId = "", text = "", kind = "text", media = "", attachmentId = "", fileName = "", mimeType = "", fileSize = 0, orderId = "" }) {
+      const chat = chatId ? state.chatConversations.find((item) => item.id === chatId) : selectedChat();
       const actor = selectedActor();
-      if (!chat || !actor || (!text.trim() && !media)) return;
+      if (!chat || !actor || (!text.trim() && !media && !attachmentId)) return;
       chat.messages.push({
         id: nextMessageId(),
         from: actor.name,
         text: text.trim(),
         kind,
         media,
+        attachmentId,
         fileName,
         mimeType,
+        fileSize,
+        orderId,
         replyTo: state.chatReplyTo || "",
         reactions: {},
         readBy: [actor.name],
@@ -6672,7 +6769,7 @@
       state.chatReplyTo = "";
       els.chatText.value = "";
       const recipients = (chat.members || []).filter((member) => member !== actor.name).join(", ");
-      notifyEvent("New message", recipients ? `${actor.name} to ${recipients}: ${messageSummary({ text, kind, media })}` : `${actor.name}: ${messageSummary({ text, kind, media })}`);
+      notifyEvent("New message", recipients ? `${actor.name} to ${recipients}: ${messageSummary({ text, kind, media, attachmentId })}` : `${actor.name}: ${messageSummary({ text, kind, media, attachmentId })}`);
       renderChat();
       saveState();
     }
@@ -6796,13 +6893,13 @@
         onStatus("Compressing image...");
         preparedFile = await compressPaymentProofImage(file, onProgress);
       }
-      onStatus("Preparing attachment...");
-      const media = await readFileAsDataUrl(preparedFile, (percent) => onProgress(80 + Math.round(percent * 0.2)));
+      onStatus("Attachment ready for secure upload...");
+      onProgress(100);
       return {
-        media,
+        blob: preparedFile,
         fileName: paymentProofFileName(orderId, file.name, shouldCompress),
         mediaType: kind,
-        mimeType: preparedFile.type || file.type || "application/octet-stream",
+        mimeType: shouldCompress ? "image/jpeg" : inferredUploadMimeType(file.name, preparedFile.type || file.type),
         orderNumber: paymentProofOrderNumber(orderId),
         compressed: shouldCompress
       };
@@ -6836,7 +6933,7 @@
       const upload = {
         status: "uploading",
         fileName: paymentProofFileName(orderId, file.name),
-        media: "",
+        proof: null,
         promise: null
       };
       upload.promise = preparePaymentProof(file, orderId, (percent) => {
@@ -6849,7 +6946,7 @@
         if (currentProgress) currentProgress.textContent = status;
       }).then((proof) => {
         upload.status = "ready";
-        upload.media = proof.media;
+        upload.proof = proof;
         upload.fileName = proof.fileName;
         const currentProgress = document.querySelector(`.proof-progress[data-id="${orderId}"]`);
         if (currentProgress) currentProgress.textContent = `${proof.compressed ? "Compressed and ready" : "File ready"}: ${upload.fileName}`;
@@ -6867,26 +6964,34 @@
     async function paymentProofForOrder(orderId, actionBox) {
       const progress = actionBox?.querySelector(".proof-progress");
       const upload = pendingProofUploads.get(orderId);
-      if (upload?.status === "ready" && upload.media) {
-        if (progress) progress.textContent = `File ready: ${upload.fileName}`;
-        return upload.promise;
-      }
-      if (upload?.status === "uploading" && upload.promise) {
+      let preparedProof = null;
+      if (upload?.status === "ready" && upload.proof) {
+        preparedProof = upload.proof;
+      } else if (upload?.status === "uploading" && upload.promise) {
         if (progress) progress.textContent = "Waiting for attachment...";
-        return upload.promise;
-      }
-      if (upload?.status === "error") {
+        preparedProof = await upload.promise;
+      } else if (upload?.status === "error") {
         throw new Error("Could not attach the payment proof. Try another supported file.");
       }
-      const proofFile = pendingProofFiles.get(orderId) || actionBox?.querySelector(".payment-proof-input")?.files?.[0] || null;
-      if (!proofFile) return null;
-      if (progress) progress.textContent = "Preparing 0%";
-      return preparePaymentProof(
-        proofFile,
-        orderId,
-        (percent) => { if (progress) progress.textContent = `Preparing ${percent}%`; },
-        (status) => { if (progress) progress.textContent = status; }
-      );
+      if (!preparedProof) {
+        const proofFile = pendingProofFiles.get(orderId) || actionBox?.querySelector(".payment-proof-input")?.files?.[0] || null;
+        if (!proofFile) return null;
+        if (progress) progress.textContent = "Preparing 0%";
+        preparedProof = await preparePaymentProof(
+          proofFile,
+          orderId,
+          (percent) => { if (progress) progress.textContent = `Preparing ${percent}%`; },
+          (status) => { if (progress) progress.textContent = status; }
+        );
+      }
+      const storedFile = await uploadAttachmentToR2(preparedProof.blob, {
+        purpose: "payment-proof",
+        contextId: orderId,
+        fileName: preparedProof.fileName,
+        mimeType: preparedProof.mimeType
+      }, (status) => { if (progress) progress.textContent = status; });
+      const { blob, ...proofMetadata } = preparedProof;
+      return { ...proofMetadata, attachmentId: storedFile.id, size: storedFile.size, media: "" };
     }
 
     function setChatRecordButtonState(mode) {
@@ -6961,7 +7066,7 @@
     }
 
     function sendPaymentProofToMaster(order, actor, proof) {
-      if (!proof?.media || !actor) return;
+      if ((!proof?.media && !proof?.attachmentId) || !actor) return;
       const chat = directChatWithMaster(actor.name);
       if (!chat) return;
       const displayNumber = proof.orderNumber || orderDisplayNumber(order, actor);
@@ -6970,8 +7075,12 @@
         from: actor.name,
         text: `Payment proof for order ${displayNumber}. Paid ${money(order.payoutCurrency || order.sourceCurrency || "USD", order.payoutAmountMinor || order.sourceAmountMinor || 0)}.`,
         kind: proof.mediaType === "image" ? "photo" : "file",
-        media: proof.media,
+        media: proof.media || "",
+        attachmentId: proof.attachmentId || "",
         fileName: proof.fileName || `${displayNumber}-payment-proof`,
+        mimeType: proof.mimeType || "application/octet-stream",
+        fileSize: Number(proof.size || 0),
+        orderId: order.id,
         orderNumber: displayNumber,
         replyTo: "",
         reactions: {},
@@ -7435,6 +7544,21 @@
           <td><span class="muted">Controls Income Statement Base USD column</span></td>
         </tr>
       `;
+    }
+
+    async function hydrateChatAttachments() {
+      const elements = Array.from(els.chatMessages?.querySelectorAll("[data-r2-attachment]") || []);
+      const attachmentIds = Array.from(new Set(elements.map((element) => element.dataset.r2Attachment).filter(Boolean)));
+      await Promise.allSettled(attachmentIds.map(async (attachmentId) => {
+        const attachment = await r2AttachmentDownload(attachmentId);
+        elements.filter((element) => element.dataset.r2Attachment === attachmentId).forEach((element) => {
+          if (element.tagName === "A") element.href = attachment.url;
+          else {
+            element.src = attachment.url;
+            element.hidden = false;
+          }
+        });
+      }));
     }
 
     function renderSettingsCollapses() {
@@ -12013,6 +12137,7 @@
       order.returnedReason = "";
       order.returnedAt = "";
       sendPaymentProofToMaster(order, actor, proof);
+      if (proof) order.paymentProof = { ...proof, media: "", attachedAt: paidAt };
       pendingProofFiles.delete(order.id);
       pendingProofUploads.delete(order.id);
       state.orderState = "Paid";
@@ -12094,6 +12219,7 @@
       document.querySelectorAll(".nav button").forEach((button) => button.classList.toggle("active", button.dataset.view === viewId));
       els.pageTitle.textContent = title;
       els.pageSubtitle.textContent = subtitle;
+      if (viewId === "settings" && signedInAsMaster()) refreshR2StorageStatus();
     }
 
     function setView(viewId, { historyMode = "push" } = {}) {
@@ -12127,6 +12253,8 @@
     let pendingForwardSourceChatId = "";
     let chatRecorder = null;
     let chatAudioChunks = [];
+    let chatRecordingTimeout = null;
+    let chatRecordingChatId = "";
     let orderConversionTouches = [];
     let transferConversionTouches = [];
     let journalConversionTouches = [];
@@ -12803,15 +12931,36 @@
     });
 
     els.chatPhotoButton.addEventListener("click", () => els.chatPhotoInput.click());
-    els.chatPhotoInput.addEventListener("change", () => {
+    els.chatPhotoInput.addEventListener("change", async () => {
       const file = els.chatPhotoInput.files?.[0];
       if (!file) return;
-      const reader = new FileReader();
-      reader.onload = () => {
-        sendChatMessage({ kind: "photo", media: String(reader.result || "") });
+      const chat = selectedChat();
+      const mimeType = inferredUploadMimeType(file.name, file.type);
+      try {
+        if (!chat) throw new Error("Choose a chat before attaching a photo.");
+        if (!["image/jpeg", "image/png", "image/webp"].includes(mimeType)) throw new Error("Choose a JPG, PNG, or WebP photo.");
+        if (file.size > maxChatPhotoBytes) throw new Error("Choose a chat photo under 5 MB.");
+        els.chatPhotoButton.disabled = true;
+        const storedFile = await uploadAttachmentToR2(file, {
+          purpose: "chat-photo",
+          contextId: chat.id,
+          fileName: file.name || `chat-photo-${Date.now()}`,
+          mimeType
+        });
+        sendChatMessage({
+          chatId: chat.id,
+          kind: "photo",
+          attachmentId: storedFile.id,
+          fileName: storedFile.fileName,
+          mimeType: storedFile.mimeType,
+          fileSize: storedFile.size
+        });
+      } catch (error) {
+        notifyEvent("Photo upload failed", error.message || "The photo could not be uploaded.");
+      } finally {
         els.chatPhotoInput.value = "";
-      };
-      reader.readAsDataURL(file);
+        els.chatPhotoButton.disabled = false;
+      }
     });
 
     els.chatRecordButton.addEventListener("click", async () => {
@@ -12836,6 +12985,12 @@
       const preferredMimeType = ["audio/mp4", "audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/webm"]
         .find((mimeType) => MediaRecorder.isTypeSupported?.(mimeType)) || "";
       chatAudioChunks = [];
+      chatRecordingChatId = selectedChat()?.id || "";
+      if (!chatRecordingChatId) {
+        stream.getTracks().forEach((track) => track.stop());
+        notifyEvent("Choose a chat", "Open a chat before recording a voice message.");
+        return;
+      }
       const recorder = preferredMimeType
         ? new MediaRecorder(stream, { mimeType: preferredMimeType })
         : new MediaRecorder(stream);
@@ -12844,13 +12999,19 @@
         if (event.data.size > 0) chatAudioChunks.push(event.data);
       };
       recorder.onerror = () => {
+        clearTimeout(chatRecordingTimeout);
+        chatRecordingTimeout = null;
         stream.getTracks().forEach((track) => track.stop());
         chatRecorder = null;
         setChatRecordButtonState("unavailable");
         notifyEvent("Voice recording failed", "Please try recording the message again.");
         setTimeout(() => setChatRecordButtonState("idle"), 1200);
       };
-      recorder.onstop = () => {
+      recorder.onstop = async () => {
+        clearTimeout(chatRecordingTimeout);
+        chatRecordingTimeout = null;
+        const recordingChatId = chatRecordingChatId;
+        chatRecordingChatId = "";
         stream.getTracks().forEach((track) => track.stop());
         chatRecorder = null;
         const mimeType = chatAudioChunks.find((chunk) => chunk.type)?.type || recorder.mimeType || preferredMimeType || "audio/webm";
@@ -12859,16 +13020,33 @@
           notifyEvent("Voice recording is empty", "Please try recording the message again.");
           return;
         }
-        const reader = new FileReader();
-        reader.onload = () => sendChatMessage({
-          kind: "voice",
-          media: String(reader.result || ""),
-          fileName: `voice-message-${Date.now()}.${audioFileExtension(mimeType)}`,
-          mimeType
-        });
-        reader.readAsDataURL(blob);
+        if (blob.size > maxChatVoiceBytes) {
+          notifyEvent("Voice message is too large", "Record a voice message under 5 MB.");
+          return;
+        }
+        try {
+          const storedFile = await uploadAttachmentToR2(blob, {
+            purpose: "chat-voice",
+            contextId: recordingChatId,
+            fileName: `voice-message-${Date.now()}.${audioFileExtension(mimeType)}`,
+            mimeType
+          });
+          sendChatMessage({
+            chatId: recordingChatId,
+            kind: "voice",
+            attachmentId: storedFile.id,
+            fileName: storedFile.fileName,
+            mimeType: storedFile.mimeType,
+            fileSize: storedFile.size
+          });
+        } catch (error) {
+          notifyEvent("Voice upload failed", error.message || "The voice message could not be uploaded.");
+        }
       };
       recorder.start();
+      chatRecordingTimeout = setTimeout(() => {
+        if (chatRecorder?.state === "recording") chatRecorder.stop();
+      }, maxChatVoiceDurationMs);
       setChatRecordButtonState("recording");
     });
 
@@ -12942,6 +13120,66 @@
       renderTrialBalance();
       saveState();
     });
+
+    async function refreshR2StorageStatus() {
+      if (!els.r2StorageStatus || !signedInAsMaster()) return null;
+      els.r2StorageStatus.textContent = "Checking...";
+      try {
+        const status = await api("/api/files/status");
+        els.r2StorageStatus.textContent = status.configured
+          ? `${status.storedFiles} stored · ${status.legacyAttachments} to move`
+          : "R2 not configured";
+        els.r2StorageStatus.className = `state-pill ${status.configured ? "good" : "warn"}`;
+        els.r2MigrateButton.disabled = !status.configured || status.legacyAttachments === 0;
+        return status;
+      } catch (error) {
+        els.r2StorageStatus.textContent = error.message || "Storage check failed";
+        els.r2StorageStatus.className = "state-pill warn";
+        return null;
+      }
+    }
+
+    async function migrateExistingAttachments() {
+      if (!signedInAsMaster() || els.r2MigrateButton.disabled) return;
+      els.r2MigrateButton.disabled = true;
+      els.r2RefreshButton.disabled = true;
+      clearTimeout(saveTimer);
+      let latestState = null;
+      let totalMigrated = 0;
+      let totalFailed = 0;
+      try {
+        for (let batch = 0; batch < 50; batch += 1) {
+          els.r2StorageStatus.textContent = `Moving files... ${totalMigrated}`;
+          const result = await api("/api/files/migrate", { method: "POST", body: { limit: 10 } });
+          latestState = result.state || latestState;
+          totalMigrated += Number(result.migrated || 0);
+          totalFailed += Number(result.failed || 0);
+          if (!result.remaining || !result.migrated) break;
+        }
+        if (latestState) {
+          replaceState({
+            ...structuredClone(defaultState),
+            ...latestState,
+            actors: normalizeActors(Array.isArray(latestState.actors) ? latestState.actors : structuredClone(defaultState.actors)),
+            receivables: Array.isArray(latestState.receivables) ? latestState.receivables : [],
+            transfers: normalizeTransfers(Array.isArray(latestState.transfers) ? latestState.transfers : []),
+            masterBankEntries: normalizeMasterBankEntries(latestState.masterBankEntries)
+          });
+          ensureSessionActor();
+          try { localStorage.setItem(storageKey, JSON.stringify(state)); } catch {}
+          renderAll();
+        }
+        notifyEvent("R2 migration complete", `${totalMigrated} attachment${totalMigrated === 1 ? "" : "s"} moved${totalFailed ? `; ${totalFailed} need attention` : ""}.`);
+      } catch (error) {
+        notifyEvent("R2 migration stopped", error.message || "Existing attachments could not be moved.");
+      } finally {
+        els.r2RefreshButton.disabled = false;
+        await refreshR2StorageStatus();
+      }
+    }
+
+    els.r2RefreshButton?.addEventListener("click", refreshR2StorageStatus);
+    els.r2MigrateButton?.addEventListener("click", migrateExistingAttachments);
 
     document.getElementById("settings")?.addEventListener("click", (event) => {
       const settingsToggle = event.target.closest("[data-settings-toggle]");
