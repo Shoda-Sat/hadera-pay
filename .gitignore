@@ -7,4 +7,5 @@ server.err.log
 *.log
 mobile/.expo/
 mobile/.codex-build-temp/
+downloads/haderapay-android.apk
 mobile/android/
