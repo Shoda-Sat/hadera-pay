@@ -3090,11 +3090,11 @@
                 </div>
                 <div class="field">
                   <label for="archiveDateFrom">Date from</label>
-                  <input id="archiveDateFrom" type="date">
+                  <input id="archiveDateFrom" type="text" inputmode="numeric" maxlength="10" placeholder="DD/MM/YYYY" aria-label="Date from in day month year format">
                 </div>
                 <div class="field">
                   <label for="archiveDateTo">Date to</label>
-                  <input id="archiveDateTo" type="date">
+                  <input id="archiveDateTo" type="text" inputmode="numeric" maxlength="10" placeholder="DD/MM/YYYY" aria-label="Date to in day month year format">
                 </div>
                 <div class="field">
                   <label for="archiveAmountMin">Amount min</label>
@@ -5072,7 +5072,7 @@
           .forEach((order) => notices.push({
             key: `order:${order.id}:cancelled:${order.updatedAt || order.cancelledAt || ""}`,
             title: "Order cancelled",
-            detail: `${orderDisplayNumber(order, actor)} was cancelled by Master.`
+            detail: `${orderDisplayNumber(order, actor)} was cancelled by ${order.cancelledBy || "Master"}.`
           }));
         state.transfers
           .filter((transfer) => transfer.state === "Returned" && (transfer.from === actor.name || transfer.initiatedBy === actor.name))
@@ -7204,6 +7204,7 @@
         if (order.broker === oldName) order.broker = name;
         if (order.agent === oldName) order.agent = name;
         if (order.returnedBy === oldName) order.returnedBy = name;
+        if (order.cancelledBy === oldName) order.cancelledBy = name;
         if (order.voidRequestedBy === oldName) order.voidRequestedBy = name;
       });
       state.transfers.forEach((transfer) => {
@@ -7839,6 +7840,8 @@
         orderDetailItem("commission", viewerCanSeeOrderField(viewer, "commission") ? `Commission: ${money(commissionCurrency, commissionMinor)}${commissionPercent ? ` (${escapeHtml(formatRate(commissionPercent))}%)` : ""}` : ""),
         orderDetailItem("sentAt", order.sentAt || order.createdAt ? `Sent: ${escapeHtml(displayDate(order.sentAt || order.createdAt))}` : ""),
         orderDetailItem("paidAt", order.paidAt ? `Paid: ${escapeHtml(displayDate(order.paidAt))}` : ""),
+        orderDetailItem("cancelledBy", order.cancelledBy ? `Cancelled by: ${escapeHtml(order.cancelledBy)}` : ""),
+        orderDetailItem("cancelledAt", order.cancelledAt ? `Cancelled: ${escapeHtml(displayDate(order.cancelledAt))}` : ""),
         orderDetailItem("manualSpecialPayoutDivider", masterCanSeePayoutRates && order.manualSpecialPayoutDivider ? `Manual divisor: ${escapeHtml(formatRate(order.manualSpecialPayoutDivider))}` : ""),
         orderDetailItem("manualSpecialPayoutPercent", masterCanSeePayoutRates && order.manualSpecialPayoutPercent ? `Manual %: ${escapeHtml(formatRate(order.manualSpecialPayoutPercent))}` : ""),
         orderDetailItem("forwardedPayoutDivider", masterCanSeePayoutRates && Number.isFinite(Number(order.forwardedPayoutDivider)) ? `Forwarded payout divisor: ${escapeHtml(formatRate(order.forwardedPayoutDivider))}` : ""),
@@ -8014,7 +8017,12 @@
         `;
       }
       if (canModify) {
-        return `<button class="btn secondary edit-returned-order" data-id="${order.id}" type="button">Modify</button>`;
+        return `
+          <div class="order-actions">
+            <button class="btn secondary edit-returned-order" data-id="${order.id}" type="button">Modify</button>
+            <button class="btn danger cancel-order" data-id="${order.id}" type="button">Cancel</button>
+          </div>
+        `;
       }
       return "";
     }
@@ -8163,12 +8171,14 @@
 
     function displayDate(value) {
       const date = value ? new Date(value) : new Date();
-      return Number.isNaN(date.getTime()) ? "" : date.toLocaleString();
+      if (Number.isNaN(date.getTime())) return "";
+      return `${String(date.getDate()).padStart(2, "0")}/${String(date.getMonth() + 1).padStart(2, "0")}/${date.getFullYear()} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}:${String(date.getSeconds()).padStart(2, "0")}`;
     }
 
     function displayDateOnly(value) {
       const date = value ? new Date(value) : new Date();
-      return Number.isNaN(date.getTime()) ? "" : date.toLocaleDateString();
+      if (Number.isNaN(date.getTime())) return "";
+      return `${String(date.getDate()).padStart(2, "0")}/${String(date.getMonth() + 1).padStart(2, "0")}/${date.getFullYear()}`;
     }
 
     function displayTimeOnly(value) {
@@ -8197,7 +8207,25 @@
     function archiveMonthLabel(monthKey) {
       const [year, month] = String(monthKey || "").split("-").map(Number);
       if (!year || !month) return "";
-      return new Date(year, month - 1, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+      return `${String(month).padStart(2, "0")}/${year}`;
+    }
+
+    function parseDayFirstDateInput(value, endOfDay = false) {
+      const match = String(value || "").trim().match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+      if (!match) return null;
+      const day = Number(match[1]);
+      const month = Number(match[2]);
+      const year = Number(match[3]);
+      const date = new Date(year, month - 1, day, endOfDay ? 23 : 0, endOfDay ? 59 : 0, endOfDay ? 59 : 0, endOfDay ? 999 : 0);
+      if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) return null;
+      return date.getTime();
+    }
+
+    function formatDayFirstDateEntry(value) {
+      const digits = String(value || "").replace(/\D/g, "").slice(0, 8);
+      if (digits.length <= 2) return digits;
+      if (digits.length <= 4) return `${digits.slice(0, 2)}/${digits.slice(2)}`;
+      return `${digits.slice(0, 2)}/${digits.slice(2, 4)}/${digits.slice(4)}`;
     }
 
     function archiveFilterValues() {
@@ -8209,8 +8237,8 @@
         actor,
         month,
         preset,
-        from: month ? null : closedWindow ? closedWindow.from : els.archiveDateFrom.value ? new Date(`${els.archiveDateFrom.value}T00:00:00`).getTime() : null,
-        to: month ? null : closedWindow ? closedWindow.to : els.archiveDateTo.value ? new Date(`${els.archiveDateTo.value}T23:59:59`).getTime() : null,
+        from: month ? null : closedWindow ? closedWindow.from : parseDayFirstDateInput(els.archiveDateFrom.value),
+        to: month ? null : closedWindow ? closedWindow.to : parseDayFirstDateInput(els.archiveDateTo.value, true),
         minMinor: parseMoney(els.archiveAmountMin.value),
         maxMinor: parseMoney(els.archiveAmountMax.value),
         search: text(els.archiveSearch?.value || "").toLowerCase()
@@ -9379,7 +9407,10 @@
       const activeOrders = visibleOrders
         .filter((order) => !["Voided", "Cancelled"].includes(order.state) && order.locked !== true)
         .sort(orderSortForActor(actor));
-      const orderbookOrders = (actor?.role === "Master" ? visibleOrders : activeOrders).slice().sort(orderSortForActor(actor));
+      const brokerCancelledOrders = actor?.role === "Master"
+        ? []
+        : visibleOrders.filter((order) => order.state === "Cancelled" && order.broker === actor?.name);
+      const orderbookOrders = (actor?.role === "Master" ? visibleOrders : [...activeOrders, ...brokerCancelledOrders]).slice().sort(orderSortForActor(actor));
       const rowsForOrders = (orders) => orders.map((order) => {
         const payoutAgent = payingAgentLabel(order);
         const stateLabel = actor?.role === "Master" && order.state === "Assigned" && payoutAgent !== "Unassigned"
@@ -12636,6 +12667,12 @@
       saveState();
     });
 
+    [els.archiveDateFrom, els.archiveDateTo].forEach((input) => {
+      input.addEventListener("input", () => {
+        input.value = formatDayFirstDateEntry(input.value);
+      });
+    });
+
     [els.archiveActorFilter, els.archiveMonthFilter, els.archiveTransactionSort, els.archiveDatePreset, els.archiveDateFrom, els.archiveDateTo, els.archiveAmountMin, els.archiveAmountMax, els.archiveSearch].forEach((input) => {
       input.addEventListener("input", renderArchive);
       input.addEventListener("change", renderArchive);
@@ -14116,16 +14153,25 @@
       if (cancelButton) {
         const actor = selectedActor();
         const order = state.orders.find((item) => item.id === cancelButton.dataset.id);
-        if (!order || actor?.role !== "Master" || order.state !== "Pending Forward") return;
+        const masterCanCancel = actor?.role === "Master" && order?.state === "Pending Forward";
+        const brokerCanCancel = ["Broker", "Special Broker"].includes(actor?.role) && order?.state === "Returned" && order.broker === actor.name;
+        if (!order || (!masterCanCancel && !brokerCanCancel)) return;
         const orderNumber = orderDisplayNumber(order, actor);
-        confirmAction(`Cancel order ${orderNumber}? This order will not be forwarded.`, () => {
+        const confirmation = brokerCanCancel
+          ? `Cancel returned order ${orderNumber}? It will remain in your Orders list as Cancelled.`
+          : `Cancel order ${orderNumber}? This order will not be forwarded and the sender will see it as Cancelled.`;
+        confirmAction(confirmation, () => {
           const currentOrder = state.orders.find((item) => item.id === order.id);
-          if (!currentOrder || currentOrder.state !== "Pending Forward") return;
+          const masterStillCanCancel = actor.role === "Master" && currentOrder?.state === "Pending Forward";
+          const brokerStillCanCancel = ["Broker", "Special Broker"].includes(actor.role) && currentOrder?.state === "Returned" && currentOrder.broker === actor.name;
+          if (!currentOrder || (!masterStillCanCancel && !brokerStillCanCancel)) return;
           currentOrder.state = "Cancelled";
-          currentOrder.returnedBy = "";
+          if (masterStillCanCancel) currentOrder.returnedBy = "";
+          currentOrder.cancelledBy = actor.name;
           currentOrder.cancelledAt = new Date().toISOString();
           currentOrder.updatedAt = currentOrder.cancelledAt;
           currentOrder.agent = "Cancelled";
+          currentOrder.agentActorId = "";
           state.orderState = "Cancelled";
           els.orderState.textContent = "Cancelled";
           els.orderState.className = "state-pill danger";

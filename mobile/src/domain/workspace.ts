@@ -92,7 +92,7 @@ export function actionRequiredNoticesFor(session: UserSession, state: WorkspaceS
       .forEach((order) => notices.push({
         key: `order:${order.id}:cancelled:${order.updatedAt || order.cancelledAt || ""}`,
         title: "Order cancelled",
-        body: `${actionOrderReference(order)} was cancelled by Master.`,
+        body: `${actionOrderReference(order)} was cancelled by ${order.cancelledBy || "Master"}.`,
         screen: "orders",
         actionable: false
       }));
@@ -505,12 +505,18 @@ export async function returnOrder(orderId: string, actorName = "Master"): Promis
   });
 }
 
-export async function cancelOrder(orderId: string): Promise<WorkspaceState> {
+export async function cancelOrder(orderId: string, actorName = "Master"): Promise<WorkspaceState> {
   return updateWorkspaceState((state) => {
     const order = state.orders.find((item) => item.id === orderId);
-    if (!order || order.state !== "Pending Forward") return;
+    const actor = activeActors(state).find((item) => item.name === actorName);
+    const masterCanCancel = actor?.role === "Master" && order?.state === "Pending Forward";
+    const brokerCanCancel = ["Broker", "Special Broker"].includes(actor?.role || "") && order?.state === "Returned" && order.broker === actorName;
+    if (!order || (!masterCanCancel && !brokerCanCancel)) throw new Error("This order can no longer be cancelled.");
     order.state = "Cancelled";
+    if (masterCanCancel) order.returnedBy = "";
     order.agent = "Cancelled";
+    order.agentActorId = "";
+    order.cancelledBy = actorName;
     order.cancelledAt = new Date().toISOString();
     order.updatedAt = order.cancelledAt;
   });

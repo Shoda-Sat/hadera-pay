@@ -1,5 +1,6 @@
 import * as DocumentPicker from "expo-document-picker";
 import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
+import Constants from "expo-constants";
 import * as FileSystem from "expo-file-system";
 import * as ImageManipulator from "expo-image-manipulator";
 import * as Sharing from "expo-sharing";
@@ -109,6 +110,7 @@ import type {
   UserSession,
   WorkspaceState
 } from "../types";
+import { formatDate, formatDateTime } from "../utils/date";
 import { compactAmount, inputAmount, majorFromMinor, parseAmount, reconcileOrderConversion } from "../utils/money";
 import type { OrderConversionField } from "../utils/money";
 
@@ -293,7 +295,7 @@ async function preparePaymentProof(
 function visibleOrders(session: UserSession, state: WorkspaceState): OrderRecord[] {
   return state.orders
     .filter((order) => isMasterView(session) || order.broker === session.actorName || order.agent === session.actorName || order.agentActorId === session.actorId)
-    .filter((order) => isMasterView(session) || (!["Cancelled", "Voided"].includes(order.state) && order.locked !== true))
+    .filter((order) => isMasterView(session) || (order.state !== "Voided" && order.locked !== true && (order.state !== "Cancelled" || order.broker === session.actorName)))
     .slice()
     .sort(orderSortForSession(session));
 }
@@ -390,9 +392,13 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
   };
 
   const confirmCancel = (order: OrderRecord) => {
-    Alert.alert("Cancel order?", `${orderNumber(order, session)} will not be forwarded.`, [
+    const returnedBrokerCancellation = order.state === "Returned" && order.broker === session.actorName;
+    const message = returnedBrokerCancellation
+      ? `${orderNumber(order, session)} will remain in your Orders list as Cancelled.`
+      : `${orderNumber(order, session)} will not be forwarded, and the sender will see it as Cancelled.`;
+    Alert.alert(returnedBrokerCancellation ? "Cancel returned order?" : "Cancel order?", message, [
       { text: "Keep order", style: "cancel" },
-      { text: "Cancel order", style: "destructive", onPress: () => run(`cancel-${order.id}`, () => cancelOrder(order.id)) }
+      { text: "Cancel order", style: "destructive", onPress: () => run(`cancel-${order.id}`, () => cancelOrder(order.id, session.actorName)) }
     ]);
   };
 
@@ -424,7 +430,7 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
 
   return (
     <View style={styles.screen}>
-      <ScreenTitle title="Orders" subtitle={isMasterView(session) ? "Forward, review, and void orders" : "Your active orderbook"} />
+      <ScreenTitle title="Orders" subtitle={isMasterView(session) ? "Forward, review, and void orders" : "Active and cancelled orders"} />
       <OfflineGuard offline={offline} />
       <View style={styles.rowButtons}>
         {["Broker", "Special Broker"].includes(session.actorRole) ? (
@@ -462,6 +468,8 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
                 <SummaryRow label="Rate" value={String(order.rate)} />
                 <SummaryRow label="Commission" value={`${order.commissionPercent || 0}%`} />
                 <SummaryRow label="Funding" value={order.fundingType === "credit" ? "Credit" : "Cash"} />
+                {order.cancelledBy ? <SummaryRow label="Cancelled by" value={order.cancelledBy} /> : null}
+                {order.cancelledAt ? <SummaryRow label="Cancelled" value={formatDateTime(order.cancelledAt)} /> : null}
               </View>
             ) : null}
             {isMasterView(session) && order.state === "Pending Forward" ? (
@@ -505,7 +513,12 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
               </View>
             ) : null}
             {isPayer && order.state === "Paid" ? <Button label="Request Void" variant="danger" disabled={offline} onPress={() => confirmVoidRequest(order)} /> : null}
-            {["Broker", "Special Broker"].includes(session.actorRole) && order.state === "Returned" && order.broker === session.actorName ? <Button label="Modify returned order" icon={<Pencil size={17} color={colors.ink} />} variant="secondary" onPress={() => onEditReturnedOrder(order)} /> : null}
+            {["Broker", "Special Broker"].includes(session.actorRole) && order.state === "Returned" && order.broker === session.actorName ? (
+              <View style={styles.rowButtons}>
+                <Button label="Modify" icon={<Pencil size={17} color={colors.ink} />} variant="secondary" disabled={offline || busy !== ""} onPress={() => onEditReturnedOrder(order)} style={styles.flexButton} />
+                <Button label="Cancel" variant="danger" disabled={offline || busy !== ""} loading={busy === `cancel-${order.id}`} onPress={() => confirmCancel(order)} style={styles.flexButton} />
+              </View>
+            ) : null}
             {isMasterView(session) && order.state === "Void Requested" ? (
               <View style={styles.rowButtons}>
                 <Button label="Approve void" variant="danger" disabled={offline} onPress={() => confirmVoidDecision(order, true)} style={styles.flexButton} />
@@ -571,7 +584,7 @@ export function PendingCancelledScreen({ session, state, offline, onState, onNav
             <SummaryRow label="Amount" value={`${compactAmount(order.sourceCurrency, majorFromMinor(order.sourceAmountMinor, order.sourceCurrency))} to ${compactAmount(order.payoutCurrency, majorFromMinor(order.payoutAmountMinor, order.payoutCurrency))}`} />
             <SummaryRow label="State" value={stateLabel} />
             <Button label="Remind Actor" variant="secondary" disabled={offline || !payer || busy !== ""} loading={busy === order.id} onPress={() => sendReminder(order)} />
-            {!payer ? <Text style={styles.muted}>No payout actor is available for this order.</Text> : order.lastReminderAt ? <Text style={styles.muted}>Last reminder: {new Date(order.lastReminderAt).toLocaleString()}</Text> : null}
+            {!payer ? <Text style={styles.muted}>No payout actor is available for this order.</Text> : order.lastReminderAt ? <Text style={styles.muted}>Last reminder: {formatDateTime(order.lastReminderAt)}</Text> : null}
           </Panel>
         );
       }) : <Panel><Text style={styles.muted}>No assigned, returned, voided, or cancelled orders.</Text></Panel>}
@@ -964,7 +977,7 @@ export function SearchScreen({ session, state, onNavigate }: CommonProps) {
     (archive.receivables || []).forEach((item) => addReceivable(item, "Archived Receivable", archive.closedAt));
     Object.entries(archive.balances || {}).filter(([, minor]) => Number(minor || 0) !== 0).forEach(([currency, minor]) => {
       const amount = `${Number(minor) >= 0 ? "+" : "-"}${compactAmount(currency as Currency, majorFromMinor(Math.abs(Number(minor)), currency as Currency))}`;
-      const details = `${archive.actor || "Actor"} - ${Number(minor) > 0 ? "Owes Master" : "Master owes"} - Closed ${new Date(archive.closedAt || 0).toLocaleString()}`;
+      const details = `${archive.actor || "Actor"} - ${Number(minor) > 0 ? "Owes Master" : "Master owes"} - Closed ${formatDateTime(archive.closedAt)}`;
       rawResults.push({ key: `archive:${archive.id}:${currency}`, groupKey: `single:${singleIndex++}`, kind: "archive", type: "Closed Balance", reference: archive.id || "Report", actor: archive.actor || "", participants: uniqueSearchNames([archive.actor]), amount, status: "Locked", details, time: new Date(archive.closedAt || 0).getTime() || 0, screen: "archive", searchText: [archive.id, archive.actor, currency, amount, details].join(" ").toLocaleLowerCase() });
     });
   });
@@ -1302,7 +1315,7 @@ export function ChatScreen({ session, state, offline, onState, onRefresh, onScro
                       ))}
                     </View>
                   ) : null}
-                  <Text style={styles.messageTime}>{new Date(item.createdAt).toLocaleString()}</Text>
+                  <Text style={styles.messageTime}>{formatDateTime(item.createdAt)}</Text>
                   <View style={styles.messageActions}>
                     <Pressable
                       accessibilityRole="button"
@@ -1456,7 +1469,7 @@ export function LedgerScreen({ session, state, onState }: CommonProps) {
       `Master Bank Account - ${selectedBankMonth}`,
       line(["Date", "Type", "Reference", "Details", "Currency", "Money In", "Money Out", "Running Balance"]),
       ...bankRows.map((entry) => line([
-        new Date(entry.postedAt).toLocaleString(),
+        formatDateTime(entry.postedAt),
         entry.type,
         entry.reference || entry.id,
         entry.details,
@@ -1488,7 +1501,7 @@ export function LedgerScreen({ session, state, onState }: CommonProps) {
             const details = [voided ? "VOIDED - Excluded from all calculations" : "", line.details || line.source || ""].filter(Boolean).join(" - ");
             return (
               <View key={`${line.journal}-${index}`} style={[styles.ledgerRow, voided && styles.ledgerVoidRow]}>
-                <Text style={[styles.colDate, voided && styles.ledgerVoidText]}>{line.postedAt ? new Date(line.postedAt).toLocaleDateString() : "-"}</Text>
+                <Text style={[styles.colDate, voided && styles.ledgerVoidText]}>{formatDate(line.postedAt)}</Text>
                 <Text style={[styles.colRef, voided && styles.ledgerVoidText]}>{String(line.journal || line.orderId || line.transferId || "-")}</Text>
                 <Text style={[styles.colDirection, voided && styles.ledgerVoidText]}>{line.direction}</Text>
                 <Text style={[styles.colAmount, voided && styles.ledgerVoidText]}>{compactAmount(line.currency, majorFromMinor(line.amountMinor, line.currency))}</Text>
@@ -1535,7 +1548,7 @@ export function LedgerScreen({ session, state, onState }: CommonProps) {
               {bankRows.length ? bankRows.slice().reverse().map((entry) => {
                 const moneyIn = entry.direction === "Credit";
                 return <View key={entry.id} style={styles.bankStatementRow}>
-                  <View style={styles.bankStatementHead}><Text style={styles.primaryLine}>{entry.type}</Text><Text style={styles.muted}>{new Date(entry.postedAt).toLocaleString()}</Text></View>
+                  <View style={styles.bankStatementHead}><Text style={styles.primaryLine}>{entry.type}</Text><Text style={styles.muted}>{formatDateTime(entry.postedAt)}</Text></View>
                   <Text style={styles.bankReference}>{entry.reference || entry.id}</Text>
                   {entry.details ? <Text style={styles.muted}>{entry.details}</Text> : null}
                   <View style={styles.bankAmountGrid}>
@@ -1759,6 +1772,7 @@ export function SettingsScreen({ session, state, offline, onState, onSessionTime
         </Panel>
         <Panel title="Master reset" badge="Permanent"><Field label="Permit phrase" value={resetPermit} onChangeText={setResetPermit} autoCapitalize="characters" placeholder="MASTER-RESET" /><SelectRow label="Reset scope" options={["data", "wipe"]} value={resetScope} onChange={setResetScope} /><Text style={styles.muted}>{resetScope === "wipe" ? "Wipe data and all linked actors." : "Erase financial data and keep actors."}</Text><Button label={resetScope === "wipe" ? "Wipe data and actors" : "Erase data"} variant="danger" loading={busy === "reset"} disabled={offline} onPress={reset} /></Panel>
       </> : null}
+      <Text style={styles.versionText}>Android app version {Constants.expoConfig?.version || "unknown"}</Text>
     </View>
   );
 }
@@ -1788,7 +1802,7 @@ export function OwnerScreen({ offline }: { offline: boolean }) {
     setBusy(id);
     try { await task(); await refresh(); } catch (error) { Alert.alert("Subscription", errorMessage(error)); } finally { setBusy(""); }
   };
-  return <View style={styles.screen}><ScreenTitle title="Owner" subtitle="Create Masters and manage access" /><OfflineGuard offline={offline} /><Button label="Refresh subscriptions" icon={<RefreshCw size={17} color={colors.ink} />} variant="secondary" loading={busy === "refresh"} onPress={refresh} /><Panel title="Create Master"><Field label="Master name" value={name} onChangeText={setName} /><Field label="Email" value={email} onChangeText={setEmail} autoCapitalize="none" keyboardType="email-address" /><Field label="Password" value={password} onChangeText={setPassword} secureTextEntry /><SelectRow label="Base currency" options={supportedCurrencies} value={currency} onChange={setCurrency} /><Text style={styles.fieldLabel}>Subscription</Text><View style={styles.choiceWrap}>{(plans.length ? plans : [{ id: "one_month", label: "One month" }]).map((item) => <Pressable key={item.id} onPress={() => setPlan(item.id)} style={[styles.choice, plan === item.id && styles.choiceActive]}><Text style={[styles.choiceText, plan === item.id && styles.choiceTextActive]}>{item.label}</Text></Pressable>)}</View><Button label="Create Master" loading={busy === "create"} disabled={offline} onPress={create} /></Panel><Panel title="Master subscriptions" badge={String(users.length)}>{users.map((user) => <View key={user.userId} style={styles.recordRow}><View style={styles.recordMain}><Text style={styles.primaryLine}>{user.name}</Text><Text style={styles.muted}>{user.email} - {user.workspace} - {user.currency || "USD"}</Text><Text style={styles.muted}>{user.active ? (user.expired ? "Expired" : "Active") : "Inactive"} - {new Date(user.expiresAt || 0).toLocaleDateString()}</Text></View><View style={styles.rowButtons}><Button label={user.active ? "Deactivate" : "Activate"} variant={user.active ? "danger" : "secondary"} disabled={offline} loading={busy === `active-${user.userId}`} onPress={() => change(`active-${user.userId}`, () => setOwnerMasterActive(user.userId, !user.active))} style={styles.flexButton} /><Button label="Add time" disabled={offline} loading={busy === `extend-${user.userId}`} onPress={() => change(`extend-${user.userId}`, () => extendOwnerSubscription(user.userId, user.plan || plan, "extend"))} style={styles.flexButton} /><Button label="Restart" variant="secondary" disabled={offline} loading={busy === `reset-${user.userId}`} onPress={() => change(`reset-${user.userId}`, () => extendOwnerSubscription(user.userId, user.plan || plan, "reset"))} style={styles.flexButton} /></View></View>)}</Panel></View>;
+  return <View style={styles.screen}><ScreenTitle title="Owner" subtitle="Create Masters and manage access" /><OfflineGuard offline={offline} /><Button label="Refresh subscriptions" icon={<RefreshCw size={17} color={colors.ink} />} variant="secondary" loading={busy === "refresh"} onPress={refresh} /><Panel title="Create Master"><Field label="Master name" value={name} onChangeText={setName} /><Field label="Email" value={email} onChangeText={setEmail} autoCapitalize="none" keyboardType="email-address" /><Field label="Password" value={password} onChangeText={setPassword} secureTextEntry /><SelectRow label="Base currency" options={supportedCurrencies} value={currency} onChange={setCurrency} /><Text style={styles.fieldLabel}>Subscription</Text><View style={styles.choiceWrap}>{(plans.length ? plans : [{ id: "one_month", label: "One month" }]).map((item) => <Pressable key={item.id} onPress={() => setPlan(item.id)} style={[styles.choice, plan === item.id && styles.choiceActive]}><Text style={[styles.choiceText, plan === item.id && styles.choiceTextActive]}>{item.label}</Text></Pressable>)}</View><Button label="Create Master" loading={busy === "create"} disabled={offline} onPress={create} /></Panel><Panel title="Master subscriptions" badge={String(users.length)}>{users.map((user) => <View key={user.userId} style={styles.recordRow}><View style={styles.recordMain}><Text style={styles.primaryLine}>{user.name}</Text><Text style={styles.muted}>{user.email} - {user.workspace} - {user.currency || "USD"}</Text><Text style={styles.muted}>{user.active ? (user.expired ? "Expired" : "Active") : "Inactive"} - {formatDate(user.expiresAt)}</Text></View><View style={styles.rowButtons}><Button label={user.active ? "Deactivate" : "Activate"} variant={user.active ? "danger" : "secondary"} disabled={offline} loading={busy === `active-${user.userId}`} onPress={() => change(`active-${user.userId}`, () => setOwnerMasterActive(user.userId, !user.active))} style={styles.flexButton} /><Button label="Add time" disabled={offline} loading={busy === `extend-${user.userId}`} onPress={() => change(`extend-${user.userId}`, () => extendOwnerSubscription(user.userId, user.plan || plan, "extend"))} style={styles.flexButton} /><Button label="Restart" variant="secondary" disabled={offline} loading={busy === `reset-${user.userId}`} onPress={() => change(`reset-${user.userId}`, () => extendOwnerSubscription(user.userId, user.plan || plan, "reset"))} style={styles.flexButton} /></View></View>)}</Panel></View>;
 }
 
 export function NotificationsPanel({ session, state, onNavigate }: { session: UserSession; state: WorkspaceState; onNavigate: (screen: AppScreen) => void }) {
@@ -1816,6 +1830,7 @@ const styles = StyleSheet.create({
   subtitle: { color: colors.muted, fontSize: 13 },
   offlineText: { color: colors.warn, fontWeight: "800", backgroundColor: colors.warnSoft, borderRadius: radius.md, padding: spacing.md },
   muted: { color: colors.muted, fontSize: 12, lineHeight: 18 },
+  versionText: { color: colors.muted, fontSize: 10, textAlign: "center", marginTop: spacing.sm, marginBottom: spacing.sm },
   primaryLine: { color: colors.ink, fontWeight: "900", flexShrink: 1 },
   amountLine: { color: colors.accent, fontSize: 17, fontWeight: "900" },
   sectionLabel: { color: colors.ink, fontSize: 14, fontWeight: "900" },

@@ -85,6 +85,7 @@ const subscriptionPlans = new Map([
   ["one_week", { label: "1 week", days: 7 }],
   ["one_month", { label: "1 month", days: 30 }],
   ["three_months", { label: "3 months", days: 90 }],
+  ["six_months", { label: "6 months", days: 180 }],
   ["one_year", { label: "1 year", days: 365 }],
 ]);
 
@@ -895,6 +896,7 @@ function recordTimestamp(item = {}) {
     new Date(item.paidOutAt || 0).getTime(),
     new Date(item.rejectedAt || 0).getTime(),
     new Date(item.returnedAt || 0).getTime(),
+    new Date(item.cancelledAt || 0).getTime(),
     new Date(item.sentAt || 0).getTime(),
     new Date(item.createdAt || 0).getTime(),
     0

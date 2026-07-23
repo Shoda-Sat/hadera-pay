@@ -154,6 +154,7 @@ export interface OrderRecord {
   voidedAt?: string;
   excludedFromCalculations?: boolean;
   assignedAt?: string;
+  cancelledBy?: string;
   cancelledAt?: string;
   lastReminderAt?: string;
   lastReminderBy?: string;

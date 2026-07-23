@@ -81,6 +81,7 @@ import type {
   UserSession,
   WorkspaceState
 } from "./src/types";
+import { formatDateTime, formatMonthYear } from "./src/utils/date";
 import { calculateQuote, compactAmount, currencies, formatAmount, inputAmount, majorFromMinor, reconcileOrderConversion } from "./src/utils/money";
 import type { OrderConversionField } from "./src/utils/money";
 
@@ -188,14 +189,11 @@ function archiveMonthKey(value: string | undefined): string {
 }
 
 function archiveMonthLabel(monthKey: string): string {
-  const [year, month] = monthKey.split("-").map(Number);
-  if (!year || !month) return "Unknown month";
-  return new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric" }).format(new Date(year, month - 1, 1));
+  return formatMonthYear(monthKey);
 }
 
 function archiveClosedLabel(value: string | undefined): string {
-  const date = new Date(value || "");
-  return Number.isNaN(date.getTime()) ? "Unknown close time" : date.toLocaleString();
+  return formatDateTime(value, "Unknown close time");
 }
 
 function visibleArchivesFor(session: UserSession, workspaceState: WorkspaceState | null): ArchiveRecord[] {
@@ -779,7 +777,7 @@ function AppTopBar({
       </Pressable>
       <View style={styles.topBrand}>
         <Text style={styles.topBrandName}>HaderaPay</Text>
-        <Text style={styles.topBrandSub} numberOfLines={1}>{session.actorName} - {session.actorRole}{offline && lastSyncedAt ? ` - synced ${new Date(lastSyncedAt).toLocaleString()}` : ""}</Text>
+        <Text style={styles.topBrandSub} numberOfLines={1}>{session.actorName} - {session.actorRole}{offline && lastSyncedAt ? ` - synced ${formatDateTime(lastSyncedAt)}` : ""}</Text>
       </View>
       <View style={styles.sessionTools}>
         {offline ? <Pill label="Offline" tone="warn" /> : null}
@@ -1410,7 +1408,7 @@ function ConfirmationScreen({
           <View style={styles.successIcon}>
             <CheckCircle2 size={44} color={colors.good} />
           </View>
-          <SummaryRow label="Created" value={new Date(submittedOrder.createdAt).toLocaleString()} />
+          <SummaryRow label="Created" value={formatDateTime(submittedOrder.createdAt)} />
           <SummaryRow label="Next step" value="Master approval" strong />
           <Button label="Back to dashboard" onPress={onHome} icon={<LayoutDashboard size={17} color="#ffffff" />} />
         </Panel>
