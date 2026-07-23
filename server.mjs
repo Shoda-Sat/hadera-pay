@@ -78,6 +78,7 @@ const defaultSessionIdleSeconds = 7200;
 const loginLockMs = 1000 * 60 * 60;
 const loginAttemptWindowMs = 1000 * 60 * 60;
 const deviceLoginWarningMs = 1000 * 60;
+const subscriptionExpiryWarningMs = 5 * 24 * 60 * 60 * 1000;
 const loginOperationLocks = new Map();
 const subscriptionPlans = new Map([
   ["one_day", { label: "1 day", days: 1 }],
@@ -451,8 +452,19 @@ function subscriptionPlan(planId) {
   return subscriptionPlans.get(planId) || subscriptionPlans.get("one_month");
 }
 
+function subscriptionExpiryStatus(expiresAt, now = Date.now()) {
+  const expiresAtMs = new Date(expiresAt || 0).getTime();
+  const remainingMs = expiresAtMs - now;
+  const expired = !Number.isFinite(expiresAtMs) || remainingMs <= 0;
+  return {
+    expired,
+    expiresSoon: !expired && remainingMs <= subscriptionExpiryWarningMs,
+    daysRemaining: expired ? 0 : Math.max(1, Math.ceil(remainingMs / (24 * 60 * 60 * 1000))),
+  };
+}
+
 function subscriptionExpired(expiresAt) {
-  return new Date(expiresAt || 0).getTime() <= Date.now();
+  return subscriptionExpiryStatus(expiresAt).expired;
 }
 
 function ensureMasterSubscriptions(db) {
@@ -477,13 +489,14 @@ function ensureMasterSubscriptions(db) {
 
 function workspaceOwnerSubscription(db, workspace) {
   const owner = db.users.find((user) => user.id === workspace?.ownerUserId);
+  const expiryStatus = subscriptionExpiryStatus(owner?.subscriptionExpiresAt);
   return {
     ownerUserId: owner?.id || "",
     ownerName: owner?.name || "Master",
     active: owner?.active !== false,
     inactive: owner?.active === false,
     expiresAt: owner?.subscriptionExpiresAt || "",
-    expired: subscriptionExpired(owner?.subscriptionExpiresAt),
+    ...expiryStatus,
   };
 }
 
@@ -507,6 +520,7 @@ function masterSubscriptionRows(db) {
       const user = db.users.find((item) => item.id === membership.userId);
       const workspace = db.workspaces.find((item) => item.id === membership.workspaceId);
       if (!user) return null;
+      const expiryStatus = subscriptionExpiryStatus(user?.subscriptionExpiresAt);
       return {
         userId: user.id,
         name: user.name || "Unknown",
@@ -516,7 +530,7 @@ function masterSubscriptionRows(db) {
         plan: user?.subscriptionPlan || "one_month",
         active: user?.active !== false,
         expiresAt: user?.subscriptionExpiresAt || "",
-        expired: subscriptionExpired(user?.subscriptionExpiresAt),
+        ...expiryStatus,
       };
     })
     .filter(Boolean)
@@ -1735,7 +1749,10 @@ async function handleApi(request, response, url) {
 
   if (url.pathname === "/api/auth/device-warning" && method === "GET") {
     const sessionId = parseCookies(request).hp_session;
-    sendJson(response, 200, { warning: accountDeviceLoginWarning(db, activeSessionRecord(db, sessionId)) });
+    sendJson(response, 200, {
+      warning: accountDeviceLoginWarning(db, activeSessionRecord(db, sessionId)),
+      subscription: session.subscription,
+    });
     return;
   }
 
@@ -1862,6 +1879,63 @@ async function handleApi(request, response, url) {
     targetUser.active = body.active === true;
     await saveDb(db);
     sendJson(response, 200, { ok: true, user: { id: targetUser.id, active: targetUser.active } });
+    return;
+  }
+
+  if (url.pathname === "/api/owner/masters" && method === "DELETE") {
+    if (!requireOwner(session, response)) return;
+    const body = await readJson(request);
+    const userId = String(body.userId || "");
+    const targetUser = db.users.find((user) => user.id === userId);
+    const targetMembership = db.memberships.find((membership) => membership.userId === userId && membership.role === "Master");
+    const workspaceIds = db.workspaces
+      .filter((workspace) => workspace.ownerUserId === userId)
+      .map((workspace) => workspace.id);
+    if (!targetUser || !targetMembership || !workspaceIds.length) {
+      return sendJson(response, 404, { error: "Master user was not found." });
+    }
+
+    const relatedMemberships = db.memberships.filter((membership) => workspaceIds.includes(membership.workspaceId));
+    const relatedInvites = db.invites.filter((invite) => workspaceIds.includes(invite.workspaceId));
+    const relatedUserIds = new Set([
+      userId,
+      ...relatedMemberships.map((membership) => membership.userId),
+      ...relatedInvites.map((invite) => invite.acceptedByUserId).filter(Boolean),
+    ]);
+    const relatedUsers = db.users.filter((user) => relatedUserIds.has(user.id));
+    const relatedFiles = (db.files || []).filter((file) => workspaceIds.includes(file.workspaceId));
+
+    if (relatedFiles.some((file) => file.key) && !r2Client) {
+      return sendJson(response, 503, { error: "Private file storage must be available before this Master can be removed." });
+    }
+    if (relatedFiles.length) {
+      const deletionResults = await Promise.allSettled(relatedFiles
+        .filter((file) => file.key)
+        .map((file) => r2Client.send(new DeleteObjectCommand({ Bucket: r2BucketName, Key: file.key }))));
+      if (deletionResults.some((result) => result.status === "rejected")) {
+        return sendJson(response, 502, { error: "Stored files could not be removed. No account records were deleted; please try again." });
+      }
+    }
+
+    db.users = db.users.filter((user) => !relatedUserIds.has(user.id));
+    db.workspaces = db.workspaces.filter((workspace) => !workspaceIds.includes(workspace.id));
+    db.memberships = db.memberships.filter((membership) => !workspaceIds.includes(membership.workspaceId));
+    db.invites = db.invites.filter((invite) => !workspaceIds.includes(invite.workspaceId));
+    db.sessions = db.sessions.filter((item) => !workspaceIds.includes(item.workspaceId) && !relatedUserIds.has(item.userId));
+    db.files = (db.files || []).filter((file) => !workspaceIds.includes(file.workspaceId));
+    workspaceIds.forEach((workspaceId) => delete db.appStates[workspaceId]);
+    relatedUsers.forEach((user) => clearLoginAttempts(db, user.email));
+    await saveDb(db, { replace: true });
+    sendJson(response, 200, {
+      ok: true,
+      removed: {
+        master: targetUser.name,
+        workspaces: workspaceIds.length,
+        users: relatedUserIds.size,
+        actors: relatedMemberships.filter((membership) => membership.role !== "Master").length,
+        files: relatedFiles.length,
+      },
+    });
     return;
   }
 

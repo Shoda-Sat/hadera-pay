@@ -1936,6 +1936,44 @@
       font-weight: 800;
     }
 
+    .subscription-expiry-warning {
+      position: fixed;
+      top: 78px;
+      left: 50%;
+      z-index: 94;
+      width: min(560px, calc(100vw - 36px));
+      transform: translateX(-50%);
+      border: 1px solid #f59e0b;
+      border-radius: 8px;
+      background: #fff7ed;
+      color: #9a3412;
+      box-shadow: var(--shadow);
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      animation: toastIn 0.18s ease-out;
+    }
+
+    .subscription-expiry-warning strong {
+      border-radius: 999px;
+      background: #f59e0b;
+      color: #ffffff;
+      padding: 4px 8px;
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      white-space: nowrap;
+    }
+
+    .subscription-expiry-warning span {
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .subscription-master-expiring {
+      color: #c2410c;
+    }
+
     .toast {
       border: 1px solid var(--line);
       border-left: 4px solid var(--accent);
@@ -2253,6 +2291,10 @@
   <div class="account-security-warning hidden" id="accountSecurityWarning" role="alert" aria-live="assertive">
     <strong>WARNING</strong>
     <span>Another device is logged into your account.</span>
+  </div>
+  <div class="subscription-expiry-warning hidden" id="subscriptionExpiryWarning" role="status" aria-live="polite">
+    <strong>EXPIRY NOTICE</strong>
+    <span>Your subscription expires soon.</span>
   </div>
   <div class="notification-stack" id="notificationStack" aria-live="polite"></div>
   <div class="auth-screen" id="authScreen">
@@ -4494,7 +4536,13 @@
         return;
       }
       const result = await api("/api/auth/device-warning").catch(() => null);
-      if (result) showAccountDeviceWarning(result.warning);
+      if (result) {
+        showAccountDeviceWarning(result.warning);
+        if (currentAuth && result.subscription) {
+          currentAuth = { ...currentAuth, subscription: result.subscription };
+          renderSubscriptionExpiryWarning();
+        }
+      }
     }
 
     function authStorageKey(session) {
@@ -4942,7 +4990,8 @@
       chatRoomTitle: document.getElementById("chatRoomTitle"),
       chatRoomMeta: document.getElementById("chatRoomMeta"),
       notificationStack: document.getElementById("notificationStack"),
-      accountSecurityWarning: document.getElementById("accountSecurityWarning")
+      accountSecurityWarning: document.getElementById("accountSecurityWarning"),
+      subscriptionExpiryWarning: document.getElementById("subscriptionExpiryWarning")
     };
 
     const decimalCurrencies = new Set(["USD", "EUR"]);
@@ -5026,6 +5075,50 @@
     }
 
     const shownPendingNotificationKeys = new Set();
+    const subscriptionPlanDrafts = new Map();
+    let shownSubscriptionExpiryKey = "";
+
+    function selectedSubscriptionPlan(user) {
+      const draft = subscriptionPlanDrafts.get(user.userId);
+      if (!draft) return user.plan;
+      if (draft.expiresAt > Date.now()) return draft.plan;
+      subscriptionPlanDrafts.delete(user.userId);
+      return user.plan;
+    }
+
+    function rememberSubscriptionPlan(userId, plan) {
+      const expiresAt = Date.now() + 10000;
+      subscriptionPlanDrafts.set(userId, { plan, expiresAt });
+      setTimeout(() => {
+        const current = subscriptionPlanDrafts.get(userId);
+        if (current?.expiresAt === expiresAt) subscriptionPlanDrafts.delete(userId);
+      }, 10000);
+    }
+
+    function renderSubscriptionExpiryWarning() {
+      const subscription = currentAuth?.subscription;
+      const expiryTime = new Date(subscription?.expiresAt || 0).getTime();
+      const remaining = expiryTime - Date.now();
+      const visible = currentAuth?.membership?.role === "Master" &&
+        Number.isFinite(expiryTime) &&
+        remaining > 0 &&
+        remaining <= 5 * 24 * 60 * 60 * 1000;
+      if (!visible) {
+        els.subscriptionExpiryWarning?.classList.add("hidden");
+        shownSubscriptionExpiryKey = "";
+        return;
+      }
+      const daysRemaining = Math.max(1, Math.ceil(remaining / (24 * 60 * 60 * 1000)));
+      const detail = `Your subscription expires in ${daysRemaining} day${daysRemaining === 1 ? "" : "s"} on ${displayDate(subscription.expiresAt)}. Renew soon to keep uninterrupted access.`;
+      const messageElement = els.subscriptionExpiryWarning?.querySelector("span");
+      if (messageElement) messageElement.textContent = detail;
+      els.subscriptionExpiryWarning?.classList.remove("hidden");
+      const warningKey = String(subscription.expiresAt || "");
+      if (shownSubscriptionExpiryKey !== warningKey) {
+        shownSubscriptionExpiryKey = warningKey;
+        notifyEvent("Subscription expires soon", detail);
+      }
+    }
 
     function pendingActionNotificationsFor(actor) {
       if (!actor) return [];
@@ -7603,13 +7696,14 @@
           if (plans.some((plan) => plan.id === current)) els.ownerMasterPlan.value = current;
         }
         els.subscriptionRows.innerHTML = users.length ? users.map((user) => {
-          const planOptions = plans.map((plan) => `<option value="${escapeHtml(plan.id)}" ${plan.id === user.plan ? "selected" : ""}>${escapeHtml(plan.label)}</option>`).join("");
+          const selectedPlan = selectedSubscriptionPlan(user);
+          const planOptions = plans.map((plan) => `<option value="${escapeHtml(plan.id)}" ${plan.id === selectedPlan ? "selected" : ""}>${escapeHtml(plan.label)}</option>`).join("");
           const isActive = user.active !== false;
-          const statusLabel = isActive ? (user.expired ? "Expired" : "Active") : "Inactive";
-          const statusClass = isActive && !user.expired ? "good" : "danger";
+          const statusLabel = isActive ? (user.expired ? "Expired" : user.expiresSoon ? "Expires soon" : "Active") : "Inactive";
+          const statusClass = isActive && user.expiresSoon ? "warn" : isActive && !user.expired ? "good" : "danger";
           return `
             <tr>
-              <td><strong>${escapeHtml(user.name)}</strong><br><span class="muted">${escapeHtml(user.email)}</span></td>
+              <td><strong class="${user.expiresSoon ? "subscription-master-expiring" : ""}">${escapeHtml(user.name)}</strong><br><span class="muted">${escapeHtml(user.email)}</span></td>
               <td>${escapeHtml(user.workspace || "Workspace")}</td>
               <td><strong>${escapeHtml(user.currency || "USD")}</strong></td>
               <td>
@@ -7629,6 +7723,7 @@
                 <div class="setting-inline">
                   <button class="btn primary extend-subscription" data-mode="extend" data-user-id="${escapeHtml(user.userId)}" type="button">Add Time</button>
                   <button class="btn secondary extend-subscription" data-mode="reset" data-user-id="${escapeHtml(user.userId)}" type="button">Set From Now</button>
+                  <button class="btn danger remove-master" data-user-id="${escapeHtml(user.userId)}" data-user-name="${escapeHtml(user.name)}" type="button">Remove</button>
                 </div>
               </td>
             </tr>
@@ -12408,6 +12503,26 @@
     });
 
     els.subscriptionRows.addEventListener("click", async (event) => {
+      const removeButton = event.target.closest(".remove-master");
+      if (removeButton && signedInAsOwner()) {
+        const userId = removeButton.dataset.userId;
+        const userName = removeButton.dataset.userName || "this Master";
+        confirmAction(
+          `WARNING: Permanently remove ${userName}? This deletes the Master account, its workspace, every related Actor account, all transactions, messages, files, and other records. This cannot be undone.`,
+          async () => {
+            try {
+              const result = await api("/api/owner/masters", { method: "DELETE", body: { userId } });
+              subscriptionPlanDrafts.delete(userId);
+              notifyEvent("Master removed", `${result.removed?.master || userName} and all related workspace records were deleted.`);
+              await renderSubscriptions();
+            } catch (error) {
+              els.subscriptionError.textContent = error.message;
+              els.subscriptionError.classList.add("visible");
+            }
+          }
+        );
+        return;
+      }
       const button = event.target.closest(".extend-subscription");
       if (!button || !signedInAsOwner()) return;
       const userId = button.dataset.userId;
@@ -12418,6 +12533,7 @@
           method: "POST",
           body: { userId, plan, mode: button.dataset.mode || "extend" }
         });
+        subscriptionPlanDrafts.delete(userId);
         notifyEvent("Subscription updated", button.dataset.mode === "reset" ? "Access starts again from today." : "Time was added before expiry.");
         await renderSubscriptions();
       } catch (error) {
@@ -12427,6 +12543,11 @@
     });
 
     els.subscriptionRows.addEventListener("change", async (event) => {
+      const planSelect = event.target.closest(".subscription-plan");
+      if (planSelect && signedInAsOwner()) {
+        rememberSubscriptionPlan(planSelect.dataset.userId, planSelect.value);
+        return;
+      }
       const checkbox = event.target.closest(".master-active-toggle");
       if (!checkbox || !signedInAsOwner()) return;
       const userId = checkbox.dataset.userId;
@@ -14481,6 +14602,7 @@
       renderPermissionSettings();
       renderVisibilityPermissions();
       renderAccountTimeoutSettings();
+      renderSubscriptionExpiryWarning();
       renderSettingsCollapses();
       renderSubscriptions();
       renderFixedRateSettings();
