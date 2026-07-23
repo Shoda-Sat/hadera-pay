@@ -117,6 +117,7 @@ export async function uploadR2Attachment(input: {
   fileName: string;
   mimeType: string;
   size: number;
+  onProgress?: (percent: number) => void;
 }): Promise<StoredAttachment> {
   const mimeType = input.mimeType.split(";", 1)[0].trim().toLowerCase() || "application/octet-stream";
   const pending = await api<{
@@ -133,14 +134,21 @@ export async function uploadR2Attachment(input: {
       size: input.size
     }
   });
-  const uploadResponse = await FileSystem.uploadAsync(pending.uploadUrl, input.uri, {
+  input.onProgress?.(0);
+  const uploadTask = FileSystem.createUploadTask(pending.uploadUrl, input.uri, {
     httpMethod: "PUT",
     uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
     headers: pending.uploadHeaders || { "Content-Type": mimeType }
+  }, ({ totalBytesSent, totalBytesExpectedToSend }) => {
+    if (totalBytesExpectedToSend <= 0) return;
+    input.onProgress?.(Math.min(99, Math.round(totalBytesSent / totalBytesExpectedToSend * 100)));
   });
+  const uploadResponse = await uploadTask.uploadAsync();
+  if (!uploadResponse) throw new Error("The attachment upload was interrupted. Check your connection and try again.");
   if (uploadResponse.status < 200 || uploadResponse.status >= 300) {
     throw new Error("R2 rejected the attachment upload. Check the bucket access settings.");
   }
+  input.onProgress?.(100);
   const completed = await api<{ file: StoredAttachment }>(`/api/files/${encodeURIComponent(pending.file.id)}/complete`, { method: "POST" });
   return completed.file;
 }

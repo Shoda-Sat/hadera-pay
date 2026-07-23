@@ -16,6 +16,7 @@ import {
   Pause,
   Paperclip,
   Pencil,
+  Phone,
   Play,
   Plus,
   RefreshCw,
@@ -166,7 +167,7 @@ function orderNumber(order: OrderRecord, session: UserSession): string {
   return order.brokerOrderNumber || order.id;
 }
 
-const paymentProofImageTargetBytes = 1024 * 1024;
+const paymentProofImageTargetBytes = 80 * 1024;
 const maxPaymentProofImageSourceBytes = 24 * 1024 * 1024;
 const maxPaymentProofDocumentBytes = 8 * 1024 * 1024;
 const paymentProofMimeTypes = [
@@ -230,9 +231,9 @@ async function compressPaymentProofImage(asset: DocumentPicker.DocumentPickerAss
     width = Math.max(1, Math.round(width * scale));
     height = Math.max(1, Math.round(height * scale));
   }
-  let quality = 0.84;
-  for (let attempt = 0; attempt < 12; attempt += 1) {
-    onStatus(`Compressing image ${Math.min(95, Math.round((attempt + 1) / 12 * 100))}%`);
+  let quality = 0.76;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    onStatus(`Compressing image ${Math.min(95, Math.round((attempt + 1) / 20 * 100))}%`);
     const result = await ImageManipulator.manipulateAsync(
       asset.uri,
       [{ resize: { width, height } }],
@@ -241,14 +242,14 @@ async function compressPaymentProofImage(asset: DocumentPicker.DocumentPickerAss
     if (!result.base64) throw new Error("The selected image could not be compressed.");
     const compressedSize = base64ByteLength(result.base64);
     if (compressedSize <= paymentProofImageTargetBytes) return { uri: result.uri, size: compressedSize };
-    if (quality > 0.48) quality = Math.max(0.48, quality - 0.12);
+    if (quality > 0.36) quality = Math.max(0.36, quality - 0.1);
     else {
-      width = Math.max(1, Math.round(width * 0.8));
-      height = Math.max(1, Math.round(height * 0.8));
-      quality = 0.72;
+      width = Math.max(1, Math.round(width * 0.75));
+      height = Math.max(1, Math.round(height * 0.75));
+      quality = 0.68;
     }
   }
-  throw new Error("The image could not be compressed below 1 MB. Choose a smaller image.");
+  throw new Error("The image could not be compressed to about 80 KB. Choose a smaller image.");
 }
 
 async function preparePaymentProof(
@@ -278,7 +279,8 @@ async function preparePaymentProof(
     contextId: order.id,
     fileName,
     mimeType,
-    size: prepared.size
+    size: prepared.size,
+    onProgress: (percent) => onStatus(`Uploading ${percent}%`)
   });
   return {
     dataUri: "",
@@ -1034,6 +1036,15 @@ async function openChatAttachment(message: ChatMessageRecord): Promise<void> {
   await Sharing.shareAsync(attachment.uri, { mimeType: attachment.mimeType, dialogTitle: `Open ${message.orderNumber || attachment.fileName}` });
 }
 
+async function sharePaymentProofToWhatsApp(message: ChatMessageRecord): Promise<void> {
+  const orderValue = String(message.orderNumber || message.orderId || "").trim();
+  if (!orderValue) throw new Error("This attachment is not linked to an order.");
+  if (!(await Sharing.isAvailableAsync())) throw new Error("WhatsApp sharing is unavailable on this device.");
+  const attachment = await cacheChatAttachment(message);
+  const heading = /^order\b/i.test(orderValue) ? orderValue : `Order ${orderValue}`;
+  await Sharing.shareAsync(attachment.uri, { mimeType: attachment.mimeType, dialogTitle: heading });
+}
+
 function chatAttachmentFileName(message: ChatMessageRecord, mimeType: string): string {
   if (message.fileName) return message.fileName.replace(/[^a-z0-9._-]+/gi, "-");
   if (message.kind !== "voice") return "attachment";
@@ -1298,15 +1309,28 @@ export function ChatScreen({ session, state, offline, onState, onRefresh, onScro
                   {(item.media || item.attachmentId) && item.kind === "photo" ? <ChatPhoto message={item} /> : null}
                   {(item.media || item.attachmentId) && item.kind === "voice" ? <VoiceMessagePlayer message={item} /> : null}
                   {item.media || item.attachmentId ? (
-                    <Pressable
-                      accessibilityRole="button"
-                      accessibilityLabel={`Open ${item.fileName || "attachment"}`}
-                      onPress={() => openChatAttachment(item).catch((error) => Alert.alert("Attachment", errorMessage(error)))}
-                      style={styles.attachmentButton}
-                    >
-                      <Paperclip size={15} color={colors.accent} />
-                      <Text numberOfLines={2} style={styles.attachmentText}>{item.kind === "voice" ? "More audio options" : `Open ${item.fileName || "attachment"}`}</Text>
-                    </Pressable>
+                    <View style={styles.attachmentActions}>
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel={`Open ${item.fileName || "attachment"}`}
+                        onPress={() => openChatAttachment(item).catch((error) => Alert.alert("Attachment", errorMessage(error)))}
+                        style={styles.attachmentButton}
+                      >
+                        <Paperclip size={15} color={colors.accent} />
+                        <Text numberOfLines={2} style={styles.attachmentText}>{item.kind === "voice" ? "More audio options" : `Open ${item.fileName || "attachment"}`}</Text>
+                      </Pressable>
+                      {item.orderNumber || item.orderId ? (
+                        <Pressable
+                          accessibilityRole="button"
+                          accessibilityLabel={`Share order ${item.orderNumber || item.orderId} payment file in WhatsApp`}
+                          onPress={() => sharePaymentProofToWhatsApp(item).catch((error) => Alert.alert("WhatsApp", errorMessage(error)))}
+                          style={styles.whatsappButton}
+                        >
+                          <Phone size={15} color="#087a35" />
+                          <Text style={styles.whatsappText}>WhatsApp</Text>
+                        </Pressable>
+                      ) : null}
+                    </View>
                   ) : null}
                   {Object.entries(item.reactions || {}).length ? (
                     <View style={styles.reactionList}>
@@ -1863,8 +1887,11 @@ const styles = StyleSheet.create({
   voicePlayerText: { flex: 1, gap: 2 },
   voicePlayerLabel: { color: colors.ink, fontSize: 12, fontWeight: "800" },
   voicePlayerTime: { color: colors.muted, fontSize: 11 },
-  attachmentButton: { minHeight: 38, flexDirection: "row", alignItems: "center", gap: spacing.sm, borderRadius: radius.sm, paddingHorizontal: spacing.sm, paddingVertical: spacing.xs, backgroundColor: colors.panel, borderWidth: 1, borderColor: colors.line },
+  attachmentActions: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: spacing.xs },
+  attachmentButton: { minHeight: 38, flexDirection: "row", alignItems: "center", gap: spacing.sm, borderRadius: radius.sm, paddingHorizontal: spacing.sm, paddingVertical: spacing.xs, backgroundColor: colors.panel, borderWidth: 1, borderColor: colors.line, flexShrink: 1 },
   attachmentText: { color: colors.accent, fontSize: 12, fontWeight: "800", flexShrink: 1 },
+  whatsappButton: { minHeight: 38, flexDirection: "row", alignItems: "center", gap: spacing.xs, borderRadius: 999, paddingHorizontal: spacing.sm, paddingVertical: spacing.xs, backgroundColor: "#eafaf0", borderWidth: 1, borderColor: "#1ea952" },
+  whatsappText: { color: "#087a35", fontSize: 12, fontWeight: "800" },
   messageTime: { color: colors.muted, fontSize: 10 },
   messageReply: { borderLeftWidth: 3, borderLeftColor: colors.returned, backgroundColor: colors.panel, borderRadius: radius.sm, padding: spacing.sm, gap: 2 },
   messageReplyFrom: { color: colors.ink, fontSize: 11, fontWeight: "900" },

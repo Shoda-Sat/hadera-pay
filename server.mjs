@@ -653,6 +653,21 @@ async function readJson(request) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
 }
 
+async function readBinary(request, maxBytes) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > maxBytes) {
+      const error = new Error(`The attachment exceeds the ${Math.round(maxBytes / 1024 / 1024)} MB limit.`);
+      error.statusCode = 413;
+      throw error;
+    }
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
 function sessionIsExpired(session, now = Date.now()) {
   const expiresAt = new Date(session?.expiresAt || 0).getTime();
   if (!Number.isFinite(expiresAt) || expiresAt <= now) return true;
@@ -1636,7 +1651,7 @@ async function handleApi(request, response, url) {
 
   const backgroundRead = method === "GET" && (
     ["/api/app-state", "/api/auth/device-warning", "/api/files/status"].includes(url.pathname) ||
-    /^\/api\/files\/[^/]+\/download-url$/.test(url.pathname)
+    /^\/api\/files\/[^/]+\/(?:download-url|content)$/.test(url.pathname)
   );
   const session = await requireSession(request, response, db, { touch: !backgroundRead });
   if (!session) return;
@@ -1649,6 +1664,41 @@ async function handleApi(request, response, url) {
       pendingFiles: (db.files || []).filter((file) => file.workspaceId === session.workspace.id && file.status === "pending").length,
       legacyAttachments: legacyAttachmentCount(state),
     });
+    return;
+  }
+
+  if (url.pathname === "/api/files/payment-proof" && method === "POST") {
+    const client = requireR2();
+    const purpose = "payment-proof";
+    const contextId = String(url.searchParams.get("contextId") || "");
+    const fileName = safeAttachmentFileName(url.searchParams.get("fileName"));
+    const mimeType = normalizedMimeType(request.headers["content-type"]);
+    const rule = attachmentRules.get(purpose);
+    if (!rule?.mimeTypes.has(mimeType)) {
+      return sendJson(response, 400, { error: "Attach only a JPG, JPEG, PNG, PDF, XLS, or XLSX file." });
+    }
+    validateAttachmentContext(db, session, purpose, contextId);
+    const body = await readBinary(request, rule.maxBytes);
+    attachmentRule(purpose, mimeType, body.length);
+    const file = newFileRecord(session, {
+      purpose,
+      contextId,
+      fileName,
+      mimeType,
+      size: body.length,
+      status: "active",
+    });
+    const result = await client.send(new PutObjectCommand({
+      Bucket: r2BucketName,
+      Key: file.key,
+      Body: body,
+      ContentType: file.mimeType,
+      ContentLength: body.length,
+    }));
+    file.etag = String(result.ETag || "").replace(/^"|"$/g, "");
+    db.files.push(file);
+    await saveDb(db);
+    sendJson(response, 200, { file: publicFileRecord(file) });
     return;
   }
 
@@ -1728,6 +1778,28 @@ async function handleApi(request, response, url) {
       expiresIn: signedDownloadSeconds,
       file: publicFileRecord(file),
     });
+    return;
+  }
+
+  const fileContentMatch = url.pathname.match(/^\/api\/files\/([^/]+)\/content$/);
+  if (fileContentMatch && method === "GET") {
+    const client = requireR2();
+    const fileId = decodeURIComponent(fileContentMatch[1]);
+    const file = (db.files || []).find((item) => item.id === fileId);
+    if (!sessionCanAccessFile(db, session, file)) return sendJson(response, 404, { error: "This attachment is unavailable." });
+    const storedObject = await client.send(new GetObjectCommand({
+      Bucket: r2BucketName,
+      Key: file.key,
+    }));
+    if (!storedObject.Body) throw httpError(404, "This attachment is unavailable.");
+    const body = Buffer.from(await storedObject.Body.transformToByteArray());
+    response.writeHead(200, {
+      "Content-Type": file.mimeType,
+      "Content-Length": body.length,
+      "Content-Disposition": `attachment; filename="${safeAttachmentFileName(file.fileName)}"`,
+      "Cache-Control": "private, no-store",
+    });
+    response.end(body);
     return;
   }
 
