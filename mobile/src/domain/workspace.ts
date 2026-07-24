@@ -848,6 +848,66 @@ export async function createInternalTransfer(session: UserSession, draft: Intern
   });
 }
 
+export async function resubmitInternalTransfer(
+  session: UserSession,
+  transferId: string,
+  draft: InternalTransferDraft
+): Promise<WorkspaceState> {
+  if (processingTransferIds.has(transferId)) throw new Error("This transfer is already being processed.");
+  processingTransferIds.add(transferId);
+  try {
+    return await updateWorkspaceState((state) => {
+      const transfer = state.transfers.find((item) => item.id === transferId);
+      const from = actorForSession(session, state);
+      const ownsTransfer = Boolean(from && transfer &&
+        ((transfer.fromActorId && transfer.fromActorId === from.id) || transfer.from === from.name));
+      if (!transfer || !from || transfer.state !== "Returned" || transfer.journal || !ownsTransfer || isMasterView(session)) {
+        throw new Error("Only the sending Actor can modify and resubmit this returned transfer.");
+      }
+      const to = activeActors(state).find((actor) => actor.id === draft.toActorId);
+      if (!to || from.id === to.id || !transferTargetsFor(session, state).some((actor) => actor.id === to.id)) {
+        throw new Error("Choose a permitted receiving actor.");
+      }
+      if (!actorTransferCurrencies(from).includes(draft.sourceCurrency)) {
+        throw new Error(`${from.name} can only send transfers in ${from.currency}.`);
+      }
+      if (!actorTransferReceiveCurrencies(to).includes(draft.payoutCurrency)) {
+        throw new Error(`${to.name} can only receive this transfer in ${to.currency}.`);
+      }
+      const sourceMajor = parseAmount(draft.sourceAmount);
+      const rate = Number(draft.rate || 0);
+      const payoutMajor = parseAmount(draft.payoutAmount) || sourceMajor * rate;
+      const commissionPercent = Number(draft.commissionPercent || 0);
+      if (sourceMajor <= 0 || payoutMajor <= 0 || rate <= 0 || !Number.isFinite(commissionPercent) || commissionPercent < 0) {
+        throw new Error("Enter source amount, payout amount, rate, and a percentage of zero or more.");
+      }
+      const now = new Date().toISOString();
+      transfer.to = to.name;
+      transfer.toActorId = to.id;
+      transfer.sourceCurrency = draft.sourceCurrency;
+      transfer.sourceAmountMinor = minorFromMajor(sourceMajor, draft.sourceCurrency);
+      transfer.currency = draft.payoutCurrency;
+      transfer.amountMinor = minorFromMajor(payoutMajor, draft.payoutCurrency);
+      transfer.rate = rate;
+      transfer.commissionPercent = commissionPercent;
+      transfer.commissionMinor = minorFromMajor(sourceMajor * commissionPercent / 100, draft.sourceCurrency);
+      transfer.remarks = draft.remarks.trim();
+      transfer.state = "Pending Approval";
+      transfer.sentAt = now;
+      transfer.updatedAt = now;
+      transfer.returnedAt = "";
+      transfer.returnedBy = "";
+      transfer.returnedReason = "";
+      transfer.rejectedAt = "";
+      transfer.rejectedBy = "";
+      transfer.approvedAt = "";
+      transfer.paidOutAt = "";
+    });
+  } finally {
+    processingTransferIds.delete(transferId);
+  }
+}
+
 export async function forwardInternalTransfer(
   session: UserSession,
   transferId: string,
@@ -969,6 +1029,7 @@ export async function setTransferState(transferId: string, action: "approve" | "
       transfer.state = "Rejected";
       transfer.rejectedAt = now;
     }
+    transfer.updatedAt = now;
     syncMasterBankAccount(state);
     });
   } finally {

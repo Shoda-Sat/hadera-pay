@@ -43,13 +43,10 @@ const signedUploadSeconds = 5 * 60;
 const signedDownloadSeconds = 2 * 60;
 const attachmentRules = new Map([
   ["payment-proof", {
-    maxBytes: 8 * 1024 * 1024,
+    maxBytes: 5 * 1024 * 1024,
     mimeTypes: new Set([
       "image/jpeg",
       "image/png",
-      "application/pdf",
-      "application/vnd.ms-excel",
-      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ]),
   }],
   ["chat-photo", {
@@ -1675,7 +1672,7 @@ async function handleApi(request, response, url) {
     const mimeType = normalizedMimeType(request.headers["content-type"]);
     const rule = attachmentRules.get(purpose);
     if (!rule?.mimeTypes.has(mimeType)) {
-      return sendJson(response, 400, { error: "Attach only a JPG, JPEG, PNG, PDF, XLS, or XLSX file." });
+      return sendJson(response, 400, { error: "Attach only a JPG, JPEG, or PNG image." });
     }
     validateAttachmentContext(db, session, purpose, contextId);
     const body = await readBinary(request, rule.maxBytes);
@@ -1796,7 +1793,7 @@ async function handleApi(request, response, url) {
     response.writeHead(200, {
       "Content-Type": file.mimeType,
       "Content-Length": body.length,
-      "Content-Disposition": `attachment; filename="${safeAttachmentFileName(file.fileName)}"`,
+      "Content-Disposition": `inline; filename="${safeAttachmentFileName(file.fileName)}"`,
       "Cache-Control": "private, no-store",
     });
     response.end(body);

@@ -27,7 +27,7 @@ HaderaPay stores new payment proofs, chat photos, and voice messages in a privat
 
 Keep public bucket access disabled. The R2 token should have Object Read & Write access to only the HaderaPay bucket. The web origin must be included in the bucket's CORS policy for `PUT`, `GET`, and `HEAD` requests.
 
-New payment images are limited to 1 MB after client compression, payment documents to 8 MB, chat photos to 5 MB, and voice messages to 5 MB or five minutes. The server independently verifies the uploaded size and content type before activating each file.
+New payment proofs accept JPG and PNG images only and are compressed toward 80 KB before upload. Chat photos are limited to 5 MB, and voice messages to 5 MB or five minutes. The server independently verifies the uploaded size and content type before activating each file.
 
 Master can open **Settings > Private File Storage** in either client to verify the connection and move older Base64 attachments out of `auth-db.json` in small batches. Existing embedded attachments remain readable until they are migrated.
 

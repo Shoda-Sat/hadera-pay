@@ -81,6 +81,7 @@ import {
   remindOrderActor,
   rejectOrderVoid,
   requestOrderVoid,
+  resubmitInternalTransfer,
   respondToForwardedTransfer,
   returnOrder,
   sendChatMessage,
@@ -169,20 +170,15 @@ function orderNumber(order: OrderRecord, session: UserSession): string {
 
 const paymentProofImageTargetBytes = 80 * 1024;
 const maxPaymentProofImageSourceBytes = 24 * 1024 * 1024;
-const maxPaymentProofDocumentBytes = 8 * 1024 * 1024;
 const paymentProofMimeTypes = [
   "image/jpeg",
-  "image/png",
-  "application/pdf",
-  "application/vnd.ms-excel",
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  "image/png"
 ];
 
-function paymentProofKind(name: string, mimeType = ""): "image" | "document" | "" {
+function paymentProofKind(name: string, mimeType = ""): "image" | "" {
   const extension = name.toLowerCase().match(/\.[^.]+$/)?.[0] || "";
   const mime = mimeType.toLowerCase();
   if ([".jpg", ".jpeg", ".png"].includes(extension) || ["image/jpeg", "image/png"].includes(mime)) return "image";
-  if ([".pdf", ".xls", ".xlsx"].includes(extension) || paymentProofMimeTypes.slice(2).includes(mime)) return "document";
   return "";
 }
 
@@ -191,9 +187,6 @@ function paymentProofMimeType(name: string, mimeType = ""): string {
   const extension = name.toLowerCase().match(/\.[^.]+$/)?.[0] || "";
   if ([".jpg", ".jpeg"].includes(extension)) return "image/jpeg";
   if (extension === ".png") return "image/png";
-  if (extension === ".pdf") return "application/pdf";
-  if (extension === ".xls") return "application/vnd.ms-excel";
-  if (extension === ".xlsx") return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
   return "application/octet-stream";
 }
 
@@ -259,17 +252,15 @@ async function preparePaymentProof(
   onStatus: (status: string) => void
 ): Promise<PreparedPaymentProof> {
   const kind = paymentProofKind(asset.name, asset.mimeType || "");
-  if (!kind) throw new Error("Attach a JPG, JPEG, PNG, PDF, XLS, or XLSX file.");
+  if (!kind) throw new Error("Attach only a JPG, JPEG, or PNG image.");
   const size = await paymentProofAssetSize(asset);
   if (kind === "image" && size > maxPaymentProofImageSourceBytes) throw new Error("Choose an image under 24 MB.");
-  if (kind === "document" && size > maxPaymentProofDocumentBytes) throw new Error("Choose a PDF or Excel file under 8 MB.");
   const shouldCompress = kind === "image" && size > paymentProofImageTargetBytes;
   onStatus(shouldCompress ? "Compressing image..." : "Preparing attachment...");
   const prepared = shouldCompress
     ? await compressPaymentProofImage(asset, onStatus)
     : { uri: asset.uri, size };
   if (!prepared.uri || !prepared.size) throw new Error("The selected file could not be prepared.");
-  if (kind === "document" && prepared.size > maxPaymentProofDocumentBytes) throw new Error("Choose a PDF or Excel file under 8 MB.");
   onStatus("Uploading securely...");
   const mimeType = shouldCompress ? "image/jpeg" : paymentProofMimeType(asset.name, asset.mimeType || "");
   const fileName = safePaymentProofName(order, session, asset.name, shouldCompress);
@@ -331,9 +322,9 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
   };
 
   const chooseProof = async (order: OrderRecord) => {
-    if (offline) return Alert.alert("Offline", "Reconnect before attaching a payment file.");
+    if (offline) return Alert.alert("Offline", "Reconnect before attaching a payment image.");
     setPreparingProof(order.id);
-    setProofStatus((current) => ({ ...current, [order.id]: "Choose a payment file" }));
+    setProofStatus((current) => ({ ...current, [order.id]: "Choose a payment image" }));
     try {
       const result = await DocumentPicker.getDocumentAsync({
         type: paymentProofMimeTypes,
@@ -341,7 +332,7 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
         multiple: false
       });
       if (result.canceled) {
-        setProofStatus((current) => ({ ...current, [order.id]: current[order.id] === "Choose a payment file" ? "" : current[order.id] }));
+        setProofStatus((current) => ({ ...current, [order.id]: current[order.id] === "Choose a payment image" ? "" : current[order.id] }));
         return;
       }
       const proof = await preparePaymentProof(order, session, result.assets[0], (status) => {
@@ -500,7 +491,7 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
             {isPayer && order.state === "Assigned" ? (
               <View style={styles.actionBlock}>
                 <Button
-                  label={proofs[order.id] ? "Attachment ready" : "Attach payment file"}
+                  label={proofs[order.id] ? "Image ready" : "Attach payment image"}
                   variant="secondary"
                   icon={proofs[order.id] ? <Check size={17} color={colors.good} /> : <Paperclip size={17} color={colors.ink} />}
                   loading={preparingProof === order.id}
@@ -611,6 +602,7 @@ export function TransfersScreen(props: CommonProps) {
   const actor = actorForSession(session, state);
   const currencies = actorTransferCurrencies(actor);
   const [draft, setDraft] = useState<InternalTransferDraft>({ ...emptyTransfer, sourceCurrency: currencies[0] || session.currency, payoutCurrency: currencies[0] || session.currency });
+  const [editingTransferId, setEditingTransferId] = useState("");
   const conversionTouches = useRef<OrderConversionField[]>([]);
   const [busy, setBusy] = useState(false);
   const [journal, setJournal] = useState({ actorId: "", sourceCurrency: "USD" as Currency, sourceAmount: "", currency: "USD" as Currency, amount: "", rate: "1", remarks: "" });
@@ -724,13 +716,54 @@ export function TransfersScreen(props: CommonProps) {
     );
   };
 
+  const resetTransferDraft = () => {
+    conversionTouches.current = [];
+    setEditingTransferId("");
+    setDraft({
+      ...emptyTransfer,
+      sourceCurrency: currencies[0] || session.currency,
+      payoutCurrency: currencies[0] || session.currency
+    });
+  };
+
+  const editReturnedTransfer = (transfer: typeof transfers[number]) => {
+    const receiving = targets.find((target) =>
+      (transfer.toActorId && target.id === transfer.toActorId) || target.name === transfer.to
+    );
+    if (!receiving) {
+      Alert.alert("Returned transfer", "The original destination is no longer permitted. Ask Master to update your transfer permissions.");
+      return;
+    }
+    conversionTouches.current = [];
+    setEditingTransferId(transfer.id);
+    setDraft({
+      toActorId: receiving.id,
+      sourceCurrency: transfer.sourceCurrency,
+      payoutCurrency: transfer.currency,
+      sourceAmount: inputAmount(transfer.sourceCurrency, majorFromMinor(transfer.sourceAmountMinor, transfer.sourceCurrency)),
+      payoutAmount: inputAmount(transfer.currency, majorFromMinor(transfer.amountMinor, transfer.currency)),
+      rate: String(transfer.rate || 1),
+      commissionPercent: String(Number(transfer.commissionPercent || 0)),
+      remarks: transfer.remarks || ""
+    });
+  };
+
+  const submitTransfer = () => run(async () => {
+    const next = editingTransferId
+      ? await resubmitInternalTransfer(session, editingTransferId, draft)
+      : await createInternalTransfer(session, draft);
+    resetTransferDraft();
+    return next;
+  });
+
   return (
     <View style={styles.screen}>
       <ScreenTitle title="Transfers" subtitle="Transfers, journals, and withdrawals" />
       <OfflineGuard offline={offline} />
       {master ? <SelectRow label="Action" options={["Transfer", "Journal", "Withdrawal"]} value={mode} onChange={setMode} /> : null}
       {mode === "Transfer" ? (
-        <Panel title="New transfer" badge={master ? "Posts now" : "Needs approval"}>
+        <Panel title={editingTransferId ? `Modify ${editingTransferId}` : "New transfer"} badge={editingTransferId ? "Returned" : master ? "Posts now" : "Needs approval"}>
+          {editingTransferId ? <Text style={styles.warningText}>Update the details and send this transfer back to Master for approval.</Text> : null}
           <Text style={styles.fieldLabel}>Receiving actor</Text>
           <View style={styles.choiceWrap}>{targets.map((target) => <Pressable key={target.id} onPress={() => selectReceivingActor(target)} style={[styles.choice, draft.toActorId === target.id && styles.choiceActive]}><Text style={[styles.choiceText, draft.toActorId === target.id && styles.choiceTextActive]}>{target.name}</Text></Pressable>)}</View>
           <SelectRow label="Source currency" options={currencies.length ? currencies : [session.currency]} value={draft.sourceCurrency} onChange={(value) => setDraft({ ...draft, sourceCurrency: value })} />
@@ -740,7 +773,10 @@ export function TransfersScreen(props: CommonProps) {
           <Field label="Payout amount" value={draft.payoutAmount} onChangeText={(value) => setConversionField("payoutAmount", value)} keyboardType="decimal-pad" />
           <Field label="Percent" value={draft.commissionPercent} onChangeText={(value) => setDraft({ ...draft, commissionPercent: value })} keyboardType="decimal-pad" />
           <Field label="Remarks" value={draft.remarks} onChangeText={(value) => setDraft({ ...draft, remarks: value })} multiline />
-          <Button label="Send transfer" loading={busy} disabled={offline} onPress={() => run(() => createInternalTransfer(session, draft))} />
+          <View style={styles.rowButtons}>
+            <Button label={editingTransferId ? "Resubmit transfer" : "Send transfer"} loading={busy} disabled={offline} onPress={submitTransfer} style={styles.flexButton} />
+            {editingTransferId ? <Button label="Cancel modification" variant="secondary" disabled={busy} onPress={resetTransferDraft} style={styles.flexButton} /> : null}
+          </View>
         </Panel>
       ) : (
         <Panel title={mode}>
@@ -762,6 +798,8 @@ export function TransfersScreen(props: CommonProps) {
           const pendingMaster = master && transfer.state === "Pending Approval";
           const canForward = pendingMaster && transferArrivedAtMaster(transfer) && transfer.from !== masterActor?.name;
           const receivingForward = !master && transfer.state === "Pending Acceptance" && (transfer.toActorId === session.actorId || transfer.to === session.actorName);
+          const canModifyReturned = !master && transfer.state === "Returned" &&
+            ((transfer.fromActorId && transfer.fromActorId === session.actorId) || transfer.from === session.actorName);
           const forwardOpen = canForward && forwardingTransferId === transfer.id;
           const forwardDraft = forwardDrafts[transfer.id] || initialForwardDraft(transfer);
           const forwardTargets = forwardTargetsFor(transfer);
@@ -806,6 +844,15 @@ export function TransfersScreen(props: CommonProps) {
                   <Button label="Accept" disabled={offline || busy} onPress={() => respondToForward(transfer, true)} style={styles.flexButton} />
                   <Button label="Reject" variant="danger" disabled={offline || busy} onPress={() => respondToForward(transfer, false)} style={styles.flexButton} />
                 </View>
+              ) : null}
+              {canModifyReturned ? (
+                <Button
+                  label={editingTransferId === transfer.id ? "Editing transfer" : "Modify and resubmit"}
+                  icon={<Pencil size={17} color={colors.ink} />}
+                  variant="secondary"
+                  disabled={offline || busy || editingTransferId === transfer.id}
+                  onPress={() => editReturnedTransfer(transfer)}
+                />
               ) : null}
             </View>
           );
@@ -1853,6 +1900,7 @@ const styles = StyleSheet.create({
   title: { color: colors.ink, fontSize: 25, fontWeight: "900" },
   subtitle: { color: colors.muted, fontSize: 13 },
   offlineText: { color: colors.warn, fontWeight: "800", backgroundColor: colors.warnSoft, borderRadius: radius.md, padding: spacing.md },
+  warningText: { color: colors.warn, fontWeight: "800", backgroundColor: colors.warnSoft, borderRadius: radius.md, padding: spacing.md },
   muted: { color: colors.muted, fontSize: 12, lineHeight: 18 },
   versionText: { color: colors.muted, fontSize: 10, textAlign: "center", marginTop: spacing.sm, marginBottom: spacing.sm },
   primaryLine: { color: colors.ink, fontWeight: "900", flexShrink: 1 },

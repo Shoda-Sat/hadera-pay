@@ -2771,7 +2771,7 @@
             </div>
             <div class="panel span-6">
               <div class="panel-header">
-                <h2>New Transfer</h2>
+                <h2 id="transferFormTitle">New Transfer</h2>
                 <span class="state-pill" id="transferMode">Pending Approval</span>
               </div>
               <div class="panel-body">
@@ -2820,8 +2820,9 @@
                   <div class="actions">
                     <button class="btn primary" id="createTransferButton" type="submit">
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M22 2 11 13"/><path d="m22 2-7 20-4-9-9-4 20-7Z"/></svg>
-                      Send Transfer
+                      <span id="transferSubmitLabel">Send Transfer</span>
                     </button>
+                    <button class="btn secondary hidden" id="cancelTransferEditButton" type="button">Cancel modification</button>
                   </div>
                 </form>
               </div>
@@ -3622,12 +3623,11 @@
     const defaultAuthIdleSeconds = 7200;
     const paymentProofImageTargetBytes = 80 * 1024;
     const maxPaymentProofImageSourceBytes = 24 * 1024 * 1024;
-    const maxPaymentProofDocumentBytes = 8 * 1024 * 1024;
     const maxChatPhotoBytes = 5 * 1024 * 1024;
     const maxChatVoiceBytes = 5 * 1024 * 1024;
     const maxChatVoiceDurationMs = 5 * 60 * 1000;
     const attachmentDownloadCache = new Map();
-    const paymentProofAccept = ".jpg,.jpeg,.png,.pdf,.xls,.xlsx,image/jpeg,image/png,application/pdf,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    const paymentProofAccept = ".jpg,.jpeg,.png,image/jpeg,image/png";
     const supportedCurrencies = ["USD", "ETB", "EUR", "ERN"];
 
     function actorCanInitiateOrders(role) {
@@ -5034,6 +5034,9 @@
       transferRemarks: document.getElementById("transferRemarks"),
       transferError: document.getElementById("transferError"),
       transferMode: document.getElementById("transferMode"),
+      transferFormTitle: document.getElementById("transferFormTitle"),
+      transferSubmitLabel: document.getElementById("transferSubmitLabel"),
+      cancelTransferEditButton: document.getElementById("cancelTransferEditButton"),
       ledgerJournalForm: document.getElementById("ledgerJournalForm"),
       ledgerJournalActor: document.getElementById("ledgerJournalActor"),
       ledgerJournalSourceCurrency: document.getElementById("ledgerJournalSourceCurrency"),
@@ -6225,6 +6228,14 @@
     function renderTransferControls() {
       const actor = selectedActor();
       const actors = activeActors();
+      let editingTransfer = transferByIdentity(state.editingTransferId);
+      const canEditReturnedTransfer = Boolean(editingTransfer && actor && editingTransfer.state === "Returned" &&
+        ((editingTransfer.fromActorId && editingTransfer.fromActorId === actor.id) || editingTransfer.from === actor.name) &&
+        actor.role !== "Master");
+      if (state.editingTransferId && !canEditReturnedTransfer) {
+        state.editingTransferId = "";
+        editingTransfer = null;
+      }
       const masterActor = actors.find((item) => item.role === "Master") || actors[0];
       const fromActors = actor?.role === "Master" ? [masterActor] : actors.filter((item) => item.id === actor?.id);
       const currentFrom = els.transferFrom.value;
@@ -6267,12 +6278,24 @@
       els.transferCurrency.value = payoutOptions.includes(previousPayoutCurrency)
         ? previousPayoutCurrency
         : payoutOptions[0] || "";
-      if (actor?.role === "Master") {
+      if (canEditReturnedTransfer) {
+        els.transferMode.textContent = "Returned - Modify";
+        els.transferMode.className = "state-pill warn";
+        els.transferFormTitle.textContent = `Modify ${editingTransfer.id}`;
+        els.transferSubmitLabel.textContent = "Resubmit Transfer";
+        els.cancelTransferEditButton.classList.remove("hidden");
+      } else if (actor?.role === "Master") {
         els.transferMode.textContent = "Posts Immediately";
         els.transferMode.className = "state-pill good";
+        els.transferFormTitle.textContent = "New Transfer";
+        els.transferSubmitLabel.textContent = "Send Transfer";
+        els.cancelTransferEditButton.classList.add("hidden");
       } else {
         els.transferMode.textContent = "Pending Approval";
         els.transferMode.className = "state-pill warn";
+        els.transferFormTitle.textContent = "New Transfer";
+        els.transferSubmitLabel.textContent = "Send Transfer";
+        els.cancelTransferEditButton.classList.add("hidden");
       }
     }
 
@@ -6786,6 +6809,7 @@
       ` : "";
       if (message.attachmentId) {
         const attachmentId = escapeHtml(message.attachmentId);
+        const attachmentContentUrl = escapeHtml(`/api/files/${encodeURIComponent(message.attachmentId)}/content`);
         const fileName = escapeHtml(message.fileName || (message.kind === "voice" ? "voice-message.webm" : "attachment"));
         if (message.kind === "voice") {
           return `
@@ -6798,7 +6822,7 @@
         }
         return `
           ${text}
-          ${message.kind === "photo" ? `<img data-r2-attachment="${attachmentId}" alt="Shared attachment" hidden>` : ""}
+          ${message.kind === "photo" ? `<img src="${attachmentContentUrl}" alt="Payment proof image">` : ""}
           <div class="attachment-actions">
             <a class="attachment-link" href="#" data-r2-attachment="${attachmentId}" download="${fileName}">Open attachment</a>
             ${whatsappButton}
@@ -7021,22 +7045,14 @@
       const extension = String(file?.name || "").toLowerCase().match(/\.[^.]+$/)?.[0] || "";
       const mimeType = String(file?.type || "").toLowerCase();
       if ([".jpg", ".jpeg", ".png"].includes(extension) || ["image/jpeg", "image/png"].includes(mimeType)) return "image";
-      if ([".pdf", ".xls", ".xlsx"].includes(extension) || [
-        "application/pdf",
-        "application/vnd.ms-excel",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-      ].includes(mimeType)) return "document";
       return "";
     }
 
     function validatePaymentProofFile(file) {
       const kind = paymentProofKind(file);
-      if (!kind) throw new Error("Attach a JPG, JPEG, PNG, PDF, XLS, or XLSX file.");
+      if (!kind) throw new Error("Attach only a JPG, JPEG, or PNG image.");
       if (kind === "image" && file.size > maxPaymentProofImageSourceBytes) {
         throw new Error("The image is too large to prepare. Choose an image under 24 MB.");
-      }
-      if (kind === "document" && file.size > maxPaymentProofDocumentBytes) {
-        throw new Error("The document is too large. Choose a PDF or Excel file under 8 MB.");
       }
       return kind;
     }
@@ -7220,7 +7236,7 @@
         if (progress) progress.textContent = "Waiting for attachment...";
         preparedProof = await upload.promise;
       } else if (upload?.status === "error") {
-        throw new Error("Could not attach the payment proof. Try another supported file.");
+        throw new Error("Could not attach the payment proof. Try another JPG or PNG image.");
       }
       if (!preparedProof) {
         const proofFile = pendingProofFiles.get(orderId) || actionBox?.querySelector(".payment-proof-input")?.files?.[0] || null;
@@ -8248,7 +8264,7 @@
         return `
           <div class="order-actions">
             <span class="proof-upload-row">
-              <button class="btn secondary attach-proof" data-id="${order.id}" type="button" ${proofBusy ? "disabled" : ""}>${icons.paperclip}Attach</button>
+              <button class="btn secondary attach-proof" data-id="${order.id}" type="button" ${proofBusy ? "disabled" : ""}>${icons.paperclip}Attach Photo</button>
               <input class="payment-proof-input hidden" data-id="${order.id}" type="file" accept="${paymentProofAccept}">
               <span class="muted proof-progress" data-id="${order.id}">${proofStatus}</span>
             </span>
@@ -10955,7 +10971,8 @@
           !transfer.reversalJournal &&
           !transferBalanceWasClosed(transfer) &&
           transferWasSentByMaster(transfer);
-        const canUpdate = actor?.name === transfer.from && transfer.state === "Returned";
+        const canUpdate = actor?.role !== "Master" && transfer.state === "Returned" &&
+          ((transfer.fromActorId && transfer.fromActorId === actor?.id) || actor?.name === transfer.from);
         const forwardContext = canForward ? forwardTransferDraft(transfer) : null;
         const forwardForm = forwardContext
           ? `
@@ -11005,7 +11022,7 @@
           : canReverse
             ? `<button class="btn danger reverse-transfer" data-id="${actionId}" type="button" ${processingTransferIds.has(transfer.id) ? "disabled" : ""}>Reverse</button>`
             : canUpdate
-              ? `<button class="btn secondary edit-transfer" data-id="${actionId}" type="button">Update Details</button>`
+              ? `<button class="btn secondary edit-transfer" data-id="${actionId}" type="button">${state.editingTransferId === transferIdentity(transfer) ? "Editing Transfer" : "Modify and Resubmit"}</button>`
               : `<button class="btn secondary" type="button" disabled>${transfer.state === "Approved" ? icons.check : ""}${transfer.state}</button>`;
         const dateBits = [
           transfer.createdAt ? `Created: ${displayDate(transfer.createdAt)}` : "",
@@ -12399,7 +12416,7 @@
         return;
       }
       if (proofUpload?.status === "error") {
-        showOrderError("Could not attach the payment proof. Try another supported file.");
+        showOrderError("Could not attach the payment proof. Try another JPG or PNG image.");
         return;
       }
       if (proofFile) {
@@ -12453,7 +12470,7 @@
         processingOrderIds.delete(order.id);
         payButton.disabled = false;
         if (progress) progress.textContent = "";
-        showOrderError(error.message || "Could not attach the payment proof. Try another supported file.");
+        showOrderError(error.message || "Could not attach the payment proof. Try another JPG or PNG image.");
         return;
       }
       if (progress) progress.textContent = "Posting payment...";
@@ -13776,6 +13793,18 @@
       });
     });
 
+    els.cancelTransferEditButton.addEventListener("click", () => {
+      state.editingTransferId = "";
+      transferConversionTouches = [];
+      els.transferAmount.value = "";
+      els.transferPayoutAmount.value = "";
+      els.transferRate.value = "1.00";
+      els.transferPercent.value = "0";
+      els.transferRemarks.value = "";
+      els.transferError.classList.remove("visible");
+      renderAll();
+    });
+
     els.transferForm.addEventListener("submit", (event) => {
       event.preventDefault();
       const actor = selectedActor();
@@ -13818,7 +13847,14 @@
       if (invalid) return;
 
       const existingTransfer = transferByIdentity(state.editingTransferId);
-      const sentAt = existingTransfer?.sentAt || existingTransfer?.createdAt || new Date().toISOString();
+      const isResubmission = Boolean(existingTransfer && existingTransfer.state === "Returned" && actor?.role !== "Master" &&
+        ((existingTransfer.fromActorId && existingTransfer.fromActorId === actor?.id) || existingTransfer.from === actor?.name));
+      if (state.editingTransferId && !isResubmission) {
+        els.transferError.textContent = "Only the sending Actor can modify and resubmit this returned transfer.";
+        els.transferError.classList.add("visible");
+        return;
+      }
+      const submittedAt = new Date().toISOString();
       const transfer = {
         id: existingTransfer?.id || nextTransferId(),
         recordKey: existingTransfer?.recordKey || nextTransferRecordKey(),
@@ -13836,21 +13872,26 @@
         rate,
         remarks,
         state: actor?.role === "Master" ? "Approved" : "Pending Approval",
-        initiatedBy: actor?.name || "Unknown",
-        createdAt: existingTransfer?.createdAt || sentAt,
-        sentAt,
-        approvedAt: existingTransfer?.approvedAt || "",
-        paidOutAt: existingTransfer?.paidOutAt || "",
+        initiatedBy: existingTransfer?.initiatedBy || actor?.name || "Unknown",
+        createdAt: existingTransfer?.createdAt || submittedAt,
+        sentAt: submittedAt,
+        updatedAt: submittedAt,
+        approvedAt: "",
+        paidOutAt: "",
         returnedBy: "",
         returnedReason: "",
         returnedAt: "",
+        rejectedBy: "",
         rejectedAt: ""
       };
-      confirmAction("Send this transfer?", () => {
+      confirmAction(isResubmission ? `Resubmit ${transfer.id} to Master for approval?` : "Send this transfer?", async () => {
         if (transfer.state === "Approved") {
           postTransferLedger(transfer);
         }
-        const existingIndex = state.transfers.findIndex((item) => transferIdentity(item) === transferIdentity(existingTransfer));
+        const existingIdentity = existingTransfer ? transferIdentity(existingTransfer) : "";
+        const existingIndex = existingIdentity
+          ? state.transfers.findIndex((item) => transferIdentity(item) === existingIdentity)
+          : -1;
         if (existingIndex >= 0) {
           state.transfers.splice(existingIndex, 1, transfer);
         } else {
@@ -13863,11 +13904,11 @@
         els.transferPercent.value = "0";
         els.transferRemarks.value = "";
         els.transferError.classList.remove("visible");
-        notifyEvent("New transfer", transfer.state === "Pending Approval"
-          ? `${transfer.id} sent to Master for approval.`
+        notifyEvent(isResubmission ? "Transfer resubmitted" : "New transfer", transfer.state === "Pending Approval"
+          ? `${transfer.id} ${isResubmission ? "sent back" : "sent"} to Master for approval.`
           : `${transfer.id} sent to ${transfer.to}.`);
         renderAll();
-        if (transfer.state === "Approved") saveStateNow();
+        await saveStateNow();
       });
     });
 
@@ -14624,11 +14665,14 @@
       if (editTransferButton) {
         const actor = selectedActor();
         const transfer = transferByIdentity(editTransferButton.dataset.id);
-        if (!transfer || transfer.state !== "Returned" || transfer.from !== actor?.name) return;
+        const ownsTransfer = Boolean(transfer && actor &&
+          ((transfer.fromActorId && transfer.fromActorId === actor.id) || transfer.from === actor.name));
+        if (!transfer || transfer.state !== "Returned" || actor?.role === "Master" || !ownsTransfer) return;
         state.editingTransferId = transferIdentity(transfer);
         fillTransferForm(transfer);
         els.transferError.classList.remove("visible");
         renderAll();
+        els.transferFormTitle.scrollIntoView({ behavior: "smooth", block: "start" });
         return;
       }
 
@@ -14705,6 +14749,7 @@
         transfer.state = "Rejected";
         transfer.rejectedBy = actor.name;
         transfer.rejectedAt = new Date().toISOString();
+        transfer.updatedAt = transfer.rejectedAt;
         notifyEvent("Transfer rejected", `${transfer.id} returned to ${transfer.from}.`);
         renderAll();
         return;
@@ -14719,6 +14764,7 @@
         transfer.returnedBy = actor.name;
         transfer.returnedReason = "Update Details";
         transfer.returnedAt = new Date().toISOString();
+        transfer.updatedAt = transfer.returnedAt;
         notifyEvent("Transfer returned", `${transfer.id} needs updates from ${transfer.from}.`);
         renderAll();
         return;
