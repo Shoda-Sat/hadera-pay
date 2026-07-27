@@ -2,6 +2,7 @@ import { updateWorkspaceState } from "../api/client";
 import type {
   ActorRecord,
   ChatConversationRecord,
+  ChatMessageRecord,
   Currency,
   InternalTransferDraft,
   InternalTransferForwardDraft,
@@ -1212,6 +1213,46 @@ export async function sendChatMessage(chatId: string, from: string, text: string
     const reply = replyTo ? chat.messages.find((item) => item.id === replyTo) : undefined;
     if (replyTo && !reply) throw new Error("The message being replied to is no longer available.");
     chat.messages.push({ id: nextMessageId(state), from, text: clean, kind: "text", replyTo: reply?.id || "", reactions: {}, readBy: [from], createdAt: new Date().toISOString() });
+  });
+}
+
+export async function sendChatAttachment(
+  chatId: string,
+  from: string,
+  attachment: {
+    kind: "photo" | "voice";
+    attachmentId: string;
+    fileName: string;
+    mimeType: string;
+    fileSize: number;
+    text?: string;
+  },
+  replyTo = ""
+): Promise<WorkspaceState> {
+  return updateWorkspaceState((state) => {
+    ensureDirectChats(state);
+    const chat = state.chatConversations.find((item) => item.id === chatId);
+    if (!chat || !chat.members.includes(from)) throw new Error("Choose a chat before sending an attachment.");
+    if (!attachment.attachmentId || !attachment.fileName || !attachment.mimeType || attachment.fileSize <= 0) {
+      throw new Error("The attachment upload did not finish correctly.");
+    }
+    const reply = replyTo ? chat.messages.find((item) => item.id === replyTo) : undefined;
+    if (replyTo && !reply) throw new Error("The message being replied to is no longer available.");
+    const message: ChatMessageRecord = {
+      id: nextMessageId(state),
+      from,
+      text: String(attachment.text || "").trim(),
+      kind: attachment.kind,
+      attachmentId: attachment.attachmentId,
+      fileName: attachment.fileName,
+      mimeType: attachment.mimeType,
+      fileSize: attachment.fileSize,
+      replyTo: reply?.id || "",
+      reactions: {},
+      readBy: [from],
+      createdAt: new Date().toISOString()
+    };
+    chat.messages.push(message);
   });
 }
 

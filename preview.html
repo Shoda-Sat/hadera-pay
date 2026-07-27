@@ -1824,6 +1824,19 @@
       scrollbar-gutter: stable;
     }
 
+    .chat-bottom-button {
+      position: fixed;
+      right: 24px;
+      bottom: 24px;
+      z-index: 70;
+      box-shadow: var(--shadow);
+    }
+
+    .chat-bottom-button svg {
+      width: 17px;
+      height: 17px;
+    }
+
     .message {
       max-width: min(620px, 82%);
       align-self: flex-start;
@@ -2978,6 +2991,10 @@
                 </button>
                 <button class="btn primary" id="chatSend" type="submit">Send</button>
               </form>
+              <button class="btn primary chat-bottom-button" id="chatBottomButton" type="button" aria-label="Go to the newest chat message">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m6 9 6 6 6-6"/></svg>
+                Go to bottom
+              </button>
             </section>
           </div>
         </section>
@@ -5074,6 +5091,7 @@
       ledgerWithdrawalError: document.getElementById("ledgerWithdrawalError"),
       chatConversationList: document.getElementById("chatConversationList"),
       chatMessages: document.getElementById("chatMessages"),
+      chatBottomButton: document.getElementById("chatBottomButton"),
       chatComposer: document.getElementById("chatComposer"),
       chatText: document.getElementById("chatText"),
       chatPhotoInput: document.getElementById("chatPhotoInput"),
@@ -7119,6 +7137,10 @@
           : els.chatMessages.scrollHeight;
       }
       hydrateChatAttachments().catch(() => {});
+    }
+
+    function scrollChatToBottom() {
+      els.chatMessages.scrollTo({ top: els.chatMessages.scrollHeight, behavior: "smooth" });
     }
 
     function sendChatMessage({ chatId = "", text = "", kind = "text", media = "", attachmentId = "", fileName = "", mimeType = "", fileSize = 0, orderId = "" }) {
@@ -13366,6 +13388,8 @@
       renderChat();
       saveState();
     });
+
+    els.chatBottomButton.addEventListener("click", scrollChatToBottom);
 
     els.chatComposer.addEventListener("submit", (event) => {
       event.preventDefault();

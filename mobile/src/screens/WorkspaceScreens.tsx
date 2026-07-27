@@ -1,5 +1,13 @@
 import * as DocumentPicker from "expo-document-picker";
-import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
+import {
+  RecordingPresets,
+  requestRecordingPermissionsAsync,
+  setAudioModeAsync,
+  useAudioPlayer,
+  useAudioPlayerStatus,
+  useAudioRecorder,
+  useAudioRecorderState
+} from "expo-audio";
 import Constants from "expo-constants";
 import * as FileSystem from "expo-file-system";
 import * as ImageManipulator from "expo-image-manipulator";
@@ -12,7 +20,9 @@ import {
   ChevronUp,
   Forward as ForwardIcon,
   Heart,
+  Image as ImageIcon,
   MessageSquare,
+  Mic,
   Pause,
   Paperclip,
   Pencil,
@@ -84,6 +94,7 @@ import {
   resubmitInternalTransfer,
   respondToForwardedTransfer,
   returnOrder,
+  sendChatAttachment,
   sendChatMessage,
   setTransferState,
   supportedCurrencies,
@@ -284,6 +295,53 @@ async function preparePaymentProof(
     orderNumber: orderNumber(order, session),
     compressed: shouldCompress
   };
+}
+
+const chatPhotoMimeTypes = ["image/jpeg", "image/png", "image/webp"];
+const maxChatPhotoSourceBytes = 24 * 1024 * 1024;
+const maxChatVoiceBytes = 5 * 1024 * 1024;
+
+function chatPhotoMimeType(name: string, mimeType = ""): string {
+  const normalized = mimeType.split(";", 1)[0].trim().toLowerCase();
+  if (chatPhotoMimeTypes.includes(normalized)) return normalized;
+  const extension = name.toLowerCase().match(/\.[^.]+$/)?.[0] || "";
+  if ([".jpg", ".jpeg"].includes(extension)) return "image/jpeg";
+  if (extension === ".png") return "image/png";
+  if (extension === ".webp") return "image/webp";
+  return "";
+}
+
+function safeChatPhotoName(originalName: string, compressed: boolean): string {
+  const fallback = `chat-photo-${Date.now()}`;
+  const cleaned = (originalName || fallback).trim().replace(/[^a-z0-9._-]+/gi, "-").replace(/^-+/, "") || fallback;
+  return compressed ? `${cleaned.replace(/\.[^.]+$/, "") || fallback}.jpg` : cleaned;
+}
+
+async function uploadChatPhoto(
+  chatId: string,
+  asset: DocumentPicker.DocumentPickerAsset,
+  onStatus: (status: string) => void
+) {
+  const originalMimeType = chatPhotoMimeType(asset.name, asset.mimeType || "");
+  if (!originalMimeType) throw new Error("Choose a JPG, PNG, or WebP image.");
+  const size = await paymentProofAssetSize(asset);
+  if (!size) throw new Error("The selected image size could not be read.");
+  if (size > maxChatPhotoSourceBytes) throw new Error("Choose an image under 24 MB.");
+  const shouldCompress = size > paymentProofImageTargetBytes;
+  onStatus(shouldCompress ? "Compressing image..." : "Preparing image...");
+  const prepared = shouldCompress
+    ? await compressPaymentProofImage(asset, onStatus)
+    : { uri: asset.uri, size };
+  const mimeType = shouldCompress ? "image/jpeg" : originalMimeType;
+  return uploadR2Attachment({
+    uri: prepared.uri,
+    purpose: "chat-photo",
+    contextId: chatId,
+    fileName: safeChatPhotoName(asset.name, shouldCompress),
+    mimeType,
+    size: prepared.size,
+    onProgress: (percent) => onStatus(`Uploading image ${percent}%`)
+  });
 }
 
 function visibleOrders(session: UserSession, state: WorkspaceState): OrderRecord[] {
@@ -1262,13 +1320,18 @@ export function ChatScreen({ session, state, offline, onState, onRefresh, onScro
   const [groupName, setGroupName] = useState("");
   const [members, setMembers] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
+  const [attachmentStatus, setAttachmentStatus] = useState("");
   const busyRef = useRef(false);
+  const recordingChatIdRef = useRef("");
   const composerRef = useRef<TextInput>(null);
+  const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const audioRecorderState = useAudioRecorderState(audioRecorder, 250);
   const refreshRef = useRef(onRefresh);
   refreshRef.current = onRefresh;
   const selected = chats.find((chat) => chat.id === chatId) || chats[0];
   const replyingTo = selected?.messages.find((item) => item.id === replyToId);
   const forwardingMessage = selected?.messages.find((item) => item.id === forwardMessageId);
+  const voiceRecording = audioRecorderState.isRecording || audioRecorder.isRecording;
   const chatTitle = (chat: typeof chats[number]) => chat.type === "group"
     ? chat.name
     : chat.members.find((name) => name !== session.actorName) || chat.name;
@@ -1294,10 +1357,18 @@ export function ChatScreen({ session, state, offline, onState, onRefresh, onScro
     return () => clearInterval(timer);
   }, [offline]);
 
+  useEffect(() => () => {
+    if (audioRecorder.isRecording) void audioRecorder.stop().catch(() => undefined);
+    void setAudioModeAsync({ allowsRecording: false }).catch(() => undefined);
+    busyRef.current = false;
+  }, [audioRecorder]);
+
   const selectChat = (nextChatId: string) => {
+    if (voiceRecording) return Alert.alert("Voice recording", "Stop the current recording before changing chats.");
     setChatId(nextChatId);
     setReplyToId("");
     setForwardMessageId("");
+    setAttachmentStatus("");
   };
 
   const run = async (task: () => Promise<WorkspaceState>) => {
@@ -1325,6 +1396,112 @@ export function ChatScreen({ session, state, offline, onState, onRefresh, onScro
       setReplyToId("");
       return next;
     });
+  };
+
+  const chooseAndSendPhoto = async () => {
+    if (offline) return Alert.alert("Offline", "Reconnect before sending an image.");
+    if (!selected) return Alert.alert("Chat", "Choose a chat before sending an image.");
+    if (busyRef.current || voiceRecording) return;
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: chatPhotoMimeTypes,
+        copyToCacheDirectory: true,
+        multiple: false
+      });
+      if (result.canceled || !result.assets[0]) return;
+      busyRef.current = true;
+      setBusy(true);
+      setAttachmentStatus("Preparing image...");
+      const storedFile = await uploadChatPhoto(selected.id, result.assets[0], setAttachmentStatus);
+      setAttachmentStatus("Sending image...");
+      const next = await sendChatAttachment(selected.id, session.actorName, {
+        kind: "photo",
+        attachmentId: storedFile.id,
+        fileName: storedFile.fileName,
+        mimeType: storedFile.mimeType,
+        fileSize: storedFile.size
+      }, replyToId);
+      onState(next);
+      setReplyToId("");
+      setAttachmentStatus("Image sent");
+      setTimeout(() => onScrollToEnd?.(), 80);
+    } catch (error) {
+      setAttachmentStatus("Image failed");
+      Alert.alert("Image", errorMessage(error));
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  };
+
+  const startVoiceRecording = async () => {
+    if (offline) return Alert.alert("Offline", "Reconnect before recording a voice message.");
+    if (!selected) return Alert.alert("Chat", "Choose a chat before recording.");
+    if (busyRef.current || voiceRecording) return;
+    try {
+      const permission = await requestRecordingPermissionsAsync();
+      if (!permission.granted) throw new Error("Microphone permission is required to record a voice message.");
+      busyRef.current = true;
+      setBusy(true);
+      recordingChatIdRef.current = selected.id;
+      setAttachmentStatus("Preparing microphone...");
+      await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+      await audioRecorder.prepareToRecordAsync();
+      audioRecorder.record();
+      setAttachmentStatus("Recording voice...");
+    } catch (error) {
+      busyRef.current = false;
+      setBusy(false);
+      recordingChatIdRef.current = "";
+      setAttachmentStatus("Voice recording failed");
+      await setAudioModeAsync({ allowsRecording: false }).catch(() => undefined);
+      Alert.alert("Voice message", errorMessage(error));
+    }
+  };
+
+  const stopAndSendVoice = async () => {
+    if (!voiceRecording) return;
+    const destinationChatId = recordingChatIdRef.current || selected?.id || "";
+    try {
+      setAttachmentStatus("Preparing voice message...");
+      await audioRecorder.stop();
+      const uri = audioRecorder.uri || audioRecorderState.url;
+      if (!uri || !destinationChatId) throw new Error("The voice recording could not be prepared.");
+      const info = await FileSystem.getInfoAsync(uri);
+      const size = info.exists && "size" in info ? Number(info.size || 0) : 0;
+      if (!size) throw new Error("The voice recording is empty.");
+      if (size > maxChatVoiceBytes) throw new Error("The voice message exceeds 5 MB. Record a shorter message.");
+      setAttachmentStatus("Uploading voice 0%");
+      const storedFile = await uploadR2Attachment({
+        uri,
+        purpose: "chat-voice",
+        contextId: destinationChatId,
+        fileName: `voice-${Date.now()}.m4a`,
+        mimeType: "audio/mp4",
+        size,
+        onProgress: (percent) => setAttachmentStatus(`Uploading voice ${percent}%`)
+      });
+      setAttachmentStatus("Sending voice message...");
+      const next = await sendChatAttachment(destinationChatId, session.actorName, {
+        kind: "voice",
+        attachmentId: storedFile.id,
+        fileName: storedFile.fileName,
+        mimeType: storedFile.mimeType,
+        fileSize: storedFile.size
+      }, replyToId);
+      onState(next);
+      setReplyToId("");
+      setAttachmentStatus("Voice message sent");
+      setTimeout(() => onScrollToEnd?.(), 80);
+    } catch (error) {
+      setAttachmentStatus("Voice message failed");
+      Alert.alert("Voice message", errorMessage(error));
+    } finally {
+      recordingChatIdRef.current = "";
+      busyRef.current = false;
+      setBusy(false);
+      await setAudioModeAsync({ allowsRecording: false }).catch(() => undefined);
+    }
   };
 
   const forwardTo = (targetChatId: string) => {
@@ -1470,7 +1647,26 @@ export function ChatScreen({ session, state, offline, onState, onRefresh, onScro
             </View>
           ) : null}
           <Field inputRef={composerRef} label="Message" value={message} onChangeText={setMessage} onFocus={onScrollToEnd} multiline />
-          <Button label="Send" icon={<Send size={17} color="#fff" />} loading={busy} disabled={offline || !message.trim()} onPress={sendMessage} />
+          <View style={styles.rowButtons}>
+            <Button
+              label="Send image"
+              icon={<ImageIcon size={17} color={colors.ink} />}
+              variant="secondary"
+              disabled={offline || busy || voiceRecording}
+              onPress={chooseAndSendPhoto}
+              style={styles.flexButton}
+            />
+            <Button
+              label={voiceRecording ? `Stop & send ${formatVoiceTime(audioRecorderState.durationMillis / 1000)}` : "Record voice"}
+              icon={<Mic size={17} color={voiceRecording ? colors.danger : colors.ink} />}
+              variant={voiceRecording ? "danger" : "secondary"}
+              disabled={offline || (busy && !voiceRecording)}
+              onPress={voiceRecording ? stopAndSendVoice : startVoiceRecording}
+              style={styles.flexButton}
+            />
+          </View>
+          {attachmentStatus ? <Text style={voiceRecording ? styles.recordingStatus : styles.muted}>{attachmentStatus}</Text> : null}
+          <Button label="Send message" icon={<Send size={17} color="#fff" />} loading={busy && !voiceRecording} disabled={offline || busy || voiceRecording || !message.trim()} onPress={sendMessage} />
           {isMasterView(session) && selected.type === "group" ? (
             <Button label="Delete group" icon={<Trash2 size={17} color={colors.danger} />} variant="danger" disabled={offline || busy} onPress={() => run(() => deleteChatGroup(selected.id))} />
           ) : null}
@@ -1954,6 +2150,7 @@ const styles = StyleSheet.create({
   whatsappButton: { minHeight: 38, flexDirection: "row", alignItems: "center", gap: spacing.xs, borderRadius: 999, paddingHorizontal: spacing.sm, paddingVertical: spacing.xs, backgroundColor: "#eafaf0", borderWidth: 1, borderColor: "#1ea952" },
   whatsappText: { color: "#087a35", fontSize: 12, fontWeight: "800" },
   messageTime: { color: colors.muted, fontSize: 10 },
+  recordingStatus: { color: colors.danger, fontSize: 12, fontWeight: "900" },
   messageReply: { borderLeftWidth: 3, borderLeftColor: colors.returned, backgroundColor: colors.panel, borderRadius: radius.sm, padding: spacing.sm, gap: 2 },
   messageReplyFrom: { color: colors.ink, fontSize: 11, fontWeight: "900" },
   messageReplyText: { color: colors.muted, fontSize: 12, lineHeight: 17 },

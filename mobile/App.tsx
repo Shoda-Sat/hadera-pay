@@ -648,6 +648,17 @@ export default function App() {
             />
           )}
         </ScrollView>
+        {currentScreen === "chat" ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Go to the newest chat message"
+            onPress={() => contentScrollRef.current?.scrollToEnd({ animated: true })}
+            style={styles.chatBottomButton}
+          >
+            <ChevronDown size={18} color="#ffffff" strokeWidth={2.6} />
+            <Text style={styles.chatBottomButtonText}>Bottom</Text>
+          </Pressable>
+        ) : null}
         <BottomTabs session={actingSession} state={workspaceState} current={currentScreen} onChange={navigate} />
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -1930,6 +1941,25 @@ const styles = StyleSheet.create({
   },
   moreButton: {
     width: "48%"
+  },
+  chatBottomButton: {
+    position: "absolute",
+    right: spacing.lg,
+    bottom: 96,
+    zIndex: 10,
+    minHeight: 44,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.xs,
+    borderRadius: 999,
+    paddingHorizontal: spacing.md,
+    backgroundColor: colors.accent,
+    ...shadow
+  },
+  chatBottomButtonText: {
+    color: "#ffffff",
+    fontSize: 12,
+    fontWeight: "900"
   },
   tabs: {
     position: "absolute",
