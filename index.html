@@ -4144,6 +4144,32 @@
       return Math.round(sourceAmountMinor * transferCommissionPercent(transfer) / 100);
     }
 
+    function requestedTransferCommissionMinor(transfer) {
+      const stored = Number(transfer?.requestedCommissionMinor);
+      if (Number.isFinite(stored) && stored >= 0) return Math.round(stored);
+      const requestedPercent = Number(transfer?.requestedCommissionPercent);
+      if (!Number.isFinite(requestedPercent) || requestedPercent < 0) return 0;
+      const sourceAmountMinor = Number(transfer?.sourceAmountMinor || transfer?.amountMinor || 0);
+      return Math.round(sourceAmountMinor * requestedPercent / 100);
+    }
+
+    function forwardedCommissionChangedByMaster(transfer) {
+      const requestedPercent = Number(transfer?.requestedCommissionPercent);
+      return Boolean(
+        transfer?.forwardedAt &&
+        Number.isFinite(requestedPercent) &&
+        Math.abs(requestedPercent - transferCommissionPercent(transfer)) > 0.000000001
+      );
+    }
+
+    function originalSenderCommissionMinor(transfer) {
+      const commissionMinor = transferCommissionMinor(transfer);
+      const liability = normalizedCommissionLiability(transfer?.commissionLiability, commissionMinor);
+      return liability === "Receiver" && forwardedCommissionChangedByMaster(transfer)
+        ? requestedTransferCommissionMinor(transfer)
+        : 0;
+    }
+
     const commissionLiabilityOptions = ["Sender", "Master", "Receiver"];
 
     function normalizedCommissionLiability(value, commissionMinor = 0) {
@@ -4163,19 +4189,17 @@
 
     function commissionLedgerRouting(liability, senderName, receiverName, actorClearingSuffix = false) {
       const normalized = normalizedCommissionLiability(liability, 1) || "Sender";
-      const senderDebit = commissionPartyAccount(senderName, actorClearingSuffix);
       const senderCredit = commissionPartyAccount(senderName, actorClearingSuffix, "MASTER_COMMISSION_CLEARING");
       const receiverDebit = commissionPartyAccount(receiverName, actorClearingSuffix);
-      if (normalized === "Master") {
+      if (normalized === "Receiver") {
         return {
-          debit: { account: "MASTER_COMMISSION_EXPENSE", actorName: "" },
-          credit: senderCredit
+          debit: receiverDebit,
+          credit: { account: "MASTER_FEE_REVENUE", actorName: "" }
         };
       }
-      if (normalized === "Receiver") return { debit: receiverDebit, credit: senderCredit };
       return {
-        debit: senderDebit,
-        credit: { account: "MASTER_FEE_REVENUE", actorName: "" }
+        debit: { account: "MASTER_COMMISSION_EXPENSE", actorName: "" },
+        credit: senderCredit
       };
     }
 
@@ -6801,15 +6825,29 @@
           }
         } else if (!isMasterName(transfer.from) && !isMasterName(transfer.to)) {
           const commissionMinor = transferCommissionMinor(transfer);
+          const commissionLiability = normalizedCommissionLiability(transfer.commissionLiability, commissionMinor);
           if (commissionMinor > 0) {
             recordMasterBankEntry({
               id: `BANK-TRANSFER-${bankReference}-FEE`,
-              type: "Transfer Fee Expense",
+              type: commissionLiability === "Receiver" ? "Transfer Fee Income" : "Transfer Fee Expense",
+              reference: transfer.id,
+              direction: commissionLiability === "Receiver" ? "Credit" : "Debit",
+              currency: sourceCurrency,
+              amountMinor: commissionMinor,
+              details: `Commission (${commissionLiability}) for ${transfer.from} to ${transfer.to}${transfer.remarks ? ` - ${transfer.remarks}` : ""}`,
+              postedAt
+            });
+          }
+          const senderCommissionMinor = originalSenderCommissionMinor(transfer);
+          if (senderCommissionMinor > 0) {
+            recordMasterBankEntry({
+              id: `BANK-TRANSFER-${bankReference}-ORIGINAL-SENDER-COMMISSION`,
+              type: "Original Sender Commission",
               reference: transfer.id,
               direction: "Debit",
               currency: sourceCurrency,
-              amountMinor: commissionMinor,
-              details: `Fee expense for ${transfer.from} to ${transfer.to}${transfer.remarks ? ` - ${transfer.remarks}` : ""}`,
+              amountMinor: senderCommissionMinor,
+              details: `Original commission owed to ${transfer.from} after Master changed the forwarded percentage`,
               postedAt
             });
           }
@@ -8955,6 +8993,8 @@
       const commissionPercent = transferCommissionPercent(transfer);
       const commissionMinor = transferCommissionMinor(transfer);
       const commissionLiability = normalizedCommissionLiability(transfer.commissionLiability, commissionMinor);
+      const senderCommissionMinor = originalSenderCommissionMinor(transfer);
+      const requestedCommissionPercent = Number(transfer.requestedCommissionPercent || 0);
       const bits = [
         `${transfer.from || "Unknown"} -> ${transfer.to || "Unknown"}`,
         transfer.forwardedAt && transfer.requestedTo ? `Originally sent to ${transfer.requestedTo}` : "",
@@ -8962,6 +9002,7 @@
         `Payout: ${money(payoutCurrency, transfer.amountMinor || 0)}`,
         `Rate: ${formatRate(transfer.rate || 1)}`,
         commissionPercent > 0 ? `Commission: ${money(sourceCurrency, commissionMinor)} (${formatRate(commissionPercent)}%) - Liability: ${commissionLiability}` : "",
+        senderCommissionMinor > 0 ? `Original sender commission: ${money(sourceCurrency, senderCommissionMinor)} (${formatRate(requestedCommissionPercent)}%) owed by Master to ${transfer.from}` : "",
         transfer.forwardedBy ? `Forwarded by: ${transfer.forwardedBy}` : "",
         transfer.acceptedBy ? `Accepted by: ${transfer.acceptedBy}` : "",
         transfer.remarks ? `Remarks: ${transfer.remarks}` : ""
@@ -10313,6 +10354,8 @@
       const commissionPercent = transferCommissionPercent(transfer);
       const commissionMinor = transferCommissionMinor(transfer);
       const commissionLiability = normalizedCommissionLiability(transfer.commissionLiability, commissionMinor);
+      const senderCommissionMinor = originalSenderCommissionMinor(transfer);
+      const requestedCommissionPercent = Number(transfer.requestedCommissionPercent || 0);
       return [
         transfer.from ? `From: ${transfer.from}` : "",
         transfer.to ? `To: ${transfer.to}` : "",
@@ -10321,6 +10364,7 @@
         `Payout Amount: ${money(payoutCurrency, transfer.amountMinor || 0)}`,
         transfer.rate ? `Rate: ${formatRate(transfer.rate)}` : "",
         commissionPercent > 0 ? `Commission: ${money(sourceCurrency, commissionMinor)} (${formatRate(commissionPercent)}%) - Liability: ${commissionLiability}` : "",
+        senderCommissionMinor > 0 ? `Original sender commission: ${money(sourceCurrency, senderCommissionMinor)} (${formatRate(requestedCommissionPercent)}%) owed by Master to ${transfer.from}` : "",
         transfer.remarks ? `Remarks: ${transfer.remarks}` : "",
         transfer.journal ? `Journal: ${transfer.journal}` : "",
         transfer.reversalJournal ? `Reversal Journal: ${transfer.reversalJournal}` : "",
@@ -11343,6 +11387,7 @@
         const transferPercent = transferCommissionPercent(transfer);
         const transferCommission = transferCommissionMinor(transfer);
         const transferCommissionLiability = normalizedCommissionLiability(transfer.commissionLiability, transferCommission);
+        const transferSenderCommission = originalSenderCommissionMinor(transfer);
         return `
         <div class="transfer-row" data-search-target="${escapeHtml(transferSearchTargetKey(transfer))}" tabindex="-1">
           <div>
@@ -11351,6 +11396,7 @@
             ${transfer.remarks ? `<span>Remarks: ${escapeHtml(transfer.remarks)}</span>` : ""}
             <span>${money(transfer.sourceCurrency || transfer.currency, transfer.sourceAmountMinor || transfer.amountMinor)} -> ${money(transfer.currency, transfer.amountMinor)} at ${escapeHtml(transfer.rate || "1")} · ${transfer.state}</span>
             ${transferPercent > 0 ? `<span>Commission: ${escapeHtml(formatRate(transferPercent))}% (${money(transfer.sourceCurrency || transfer.currency, transferCommission)}) · Liability: ${escapeHtml(transferCommissionLiability)}</span>` : ""}
+            ${transferSenderCommission > 0 ? `<span>Master owes ${money(transfer.sourceCurrency || transfer.currency, transferSenderCommission)} original commission to ${escapeHtml(transfer.from)}</span>` : ""}
             <span>Sent: ${escapeHtml(displayDate(transfer.sentAt || transfer.createdAt))}${transfer.paidOutAt ? ` · Paid out: ${escapeHtml(displayDate(transfer.paidOutAt))}` : ""}</span>
             <span>${escapeHtml(dateBits.join(" - "))}</span>
           </div>
@@ -11897,6 +11943,7 @@
       transfer.commissionMinor = commissionMinor;
       const commissionLiability = normalizedCommissionLiability(transfer.commissionLiability, commissionMinor);
       transfer.commissionLiability = commissionLiability || "";
+      const senderCommissionMinor = originalSenderCommissionMinor(transfer);
       transfer.recordKey ||= transferIdentity(transfer);
       transfer.masterTransactionCycle = Number(transfer.masterTransactionCycle || state.masterTransactionCycle || 0);
       const transferRecordKey = transferIdentity(transfer);
@@ -11924,6 +11971,12 @@
         state.ledger.unshift(
           { journal: journalId, transferId: transfer.id, transferRecordKey, actorLedgerNumber: debitLedgerNumber, source: "TRANSFER", account: commissionRouting.debit.account, direction: "Debit", currency: sourceCurrency, amountMinor: commissionMinor, commissionLiability, masterTransactionCycle: transfer.masterTransactionCycle, details, postedAt },
           { journal: journalId, transferId: transfer.id, transferRecordKey, actorLedgerNumber: creditLedgerNumber, source: "TRANSFER", account: commissionRouting.credit.account, direction: "Credit", currency: sourceCurrency, amountMinor: commissionMinor, commissionLiability, masterTransactionCycle: transfer.masterTransactionCycle, details, postedAt }
+        );
+      }
+      if (senderCommissionMinor > 0) {
+        state.ledger.unshift(
+          { journal: journalId, transferId: transfer.id, transferRecordKey, source: "TRANSFER", account: "MASTER_COMMISSION_EXPENSE", direction: "Debit", currency: sourceCurrency, amountMinor: senderCommissionMinor, commissionLiability: "Master", commissionComponent: "ORIGINAL_SENDER", masterTransactionCycle: transfer.masterTransactionCycle, details, postedAt },
+          { journal: journalId, transferId: transfer.id, transferRecordKey, actorLedgerNumber: sendingLedgerNumber, source: "TRANSFER", account: transfer.from, direction: "Credit", currency: sourceCurrency, amountMinor: senderCommissionMinor, commissionLiability: "Master", commissionComponent: "ORIGINAL_SENDER", masterTransactionCycle: transfer.masterTransactionCycle, details, postedAt }
         );
       }
       syncTransferLedgerDetails(transfer);
