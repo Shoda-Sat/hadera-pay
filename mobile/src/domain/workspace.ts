@@ -677,21 +677,40 @@ function normalizedCommissionLiability(value: unknown, commissionMinor: number):
   return commissionMinor > 0 ? "Sender" : "";
 }
 
-function commissionLiabilityAccount(
+function commissionPartyAccount(
+  state: WorkspaceState,
+  name: string,
+  actorClearingSuffix = false,
+  masterAccount = "MASTER_COMMISSION_EXPENSE"
+): { account: string; actorName: string } {
+  const master = activeActors(state).find((actor) => actor.role === "Master");
+  if (!name || name === "Master" || name === master?.name) return { account: masterAccount, actorName: "" };
+  return {
+    account: actorClearingSuffix ? `${name} ACTOR_CLEARING` : name,
+    actorName: name
+  };
+}
+
+function commissionLedgerRouting(
   state: WorkspaceState,
   liability: CommissionLiability,
   senderName: string,
   receiverName: string,
   actorClearingSuffix = false
-): { account: string; actorName: string } {
-  const master = activeActors(state).find((actor) => actor.role === "Master");
-  const liableName = liability === "Sender" ? senderName : liability === "Receiver" ? receiverName : "";
-  if (!liableName || liableName === "Master" || liableName === master?.name || liability === "Master") {
-    return { account: "MASTER_COMMISSION_EXPENSE", actorName: "" };
+): { debit: { account: string; actorName: string }; credit: { account: string; actorName: string } } {
+  const senderDebit = commissionPartyAccount(state, senderName, actorClearingSuffix);
+  const senderCredit = commissionPartyAccount(state, senderName, actorClearingSuffix, "MASTER_COMMISSION_CLEARING");
+  const receiverDebit = commissionPartyAccount(state, receiverName, actorClearingSuffix);
+  if (liability === "Master") {
+    return {
+      debit: { account: "MASTER_COMMISSION_EXPENSE", actorName: "" },
+      credit: senderCredit
+    };
   }
+  if (liability === "Receiver") return { debit: receiverDebit, credit: senderCredit };
   return {
-    account: actorClearingSuffix ? `${liableName} ACTOR_CLEARING` : liableName,
-    actorName: liableName
+    debit: senderDebit,
+    credit: { account: "MASTER_FEE_REVENUE", actorName: "" }
   };
 }
 
@@ -810,15 +829,20 @@ function postTransferLedger(state: WorkspaceState, transfer: InternalTransferRec
     { journal, transferId: transfer.id, actorLedgerNumber: sendingLedgerNumber, source: "TRANSFER", account: transfer.from, direction: "Credit", currency: transfer.sourceCurrency, amountMinor: transfer.sourceAmountMinor, details, postedAt }
   );
   if (commission > 0) {
-    const liabilityAccount = commissionLiabilityAccount(state, commissionLiability || "Sender", transfer.from, transfer.to);
-    const liabilityLedgerNumber = liabilityAccount.actorName === transfer.to
+    const commissionRouting = commissionLedgerRouting(state, commissionLiability || "Sender", transfer.from, transfer.to);
+    const debitLedgerNumber = commissionRouting.debit.actorName === transfer.to
       ? receivingLedgerNumber
-      : liabilityAccount.actorName === transfer.from
+      : commissionRouting.debit.actorName === transfer.from
+        ? sendingLedgerNumber
+        : "";
+    const creditLedgerNumber = commissionRouting.credit.actorName === transfer.to
+      ? receivingLedgerNumber
+      : commissionRouting.credit.actorName === transfer.from
         ? sendingLedgerNumber
         : "";
     state.ledger.unshift(
-      { journal, transferId: transfer.id, actorLedgerNumber: liabilityLedgerNumber, source: "TRANSFER", account: liabilityAccount.account, direction: "Debit", currency: transfer.sourceCurrency, amountMinor: commission, commissionLiability, details, postedAt },
-      { journal, transferId: transfer.id, source: "TRANSFER", account: "MASTER_FEE_REVENUE", direction: "Credit", currency: transfer.sourceCurrency, amountMinor: commission, commissionLiability, details, postedAt }
+      { journal, transferId: transfer.id, actorLedgerNumber: debitLedgerNumber, source: "TRANSFER", account: commissionRouting.debit.account, direction: "Debit", currency: transfer.sourceCurrency, amountMinor: commission, commissionLiability, details, postedAt },
+      { journal, transferId: transfer.id, actorLedgerNumber: creditLedgerNumber, source: "TRANSFER", account: commissionRouting.credit.account, direction: "Credit", currency: transfer.sourceCurrency, amountMinor: commission, commissionLiability, details, postedAt }
     );
   }
 }
@@ -1232,10 +1256,10 @@ export async function postActorJournal(input: { actorId: string; sourceCurrency:
       postedAt
     });
     if (commissionMinor > 0) {
-      const liabilityAccount = commissionLiabilityAccount(state, commissionLiability || "Sender", "Master", actor.name, true);
+      const commissionRouting = commissionLedgerRouting(state, commissionLiability || "Sender", "Master", actor.name, true);
       state.ledger.unshift(
-        { journal, entryId, actorLedgerNumber: liabilityAccount.actorName ? actorLedgerNumber : "", source: "JOURNAL_COMMISSION", account: liabilityAccount.account, direction: "Debit", currency: input.sourceCurrency, amountMinor: commissionMinor, commissionPercent, commissionLiability, details, postedAt },
-        { journal, entryId, source: "JOURNAL_COMMISSION", account: "MASTER_FEE_REVENUE", direction: "Credit", currency: input.sourceCurrency, amountMinor: commissionMinor, commissionPercent, commissionLiability, details, postedAt }
+        { journal, entryId, actorLedgerNumber: commissionRouting.debit.actorName ? actorLedgerNumber : "", source: "JOURNAL_COMMISSION", account: commissionRouting.debit.account, direction: "Debit", currency: input.sourceCurrency, amountMinor: commissionMinor, commissionPercent, commissionLiability, details, postedAt },
+        { journal, entryId, actorLedgerNumber: commissionRouting.credit.actorName ? actorLedgerNumber : "", source: "JOURNAL_COMMISSION", account: commissionRouting.credit.account, direction: "Credit", currency: input.sourceCurrency, amountMinor: commissionMinor, commissionPercent, commissionLiability, details, postedAt }
       );
     }
     syncMasterBankAccount(state);
@@ -1272,10 +1296,10 @@ export async function postActorWithdrawal(input: { actorId: string; currency: Cu
       { journal, entryId, source: "WITHDRAWAL", account: "MASTER_FX_CLEARING", direction: "Debit", currency: input.currency, amountMinor, commissionPercent, commissionMinor, commissionLiability: commissionLiability || undefined, details, postedAt }
     );
     if (commissionMinor > 0) {
-      const liabilityAccount = commissionLiabilityAccount(state, commissionLiability || "Sender", actor.name, "Master", true);
+      const commissionRouting = commissionLedgerRouting(state, commissionLiability || "Sender", actor.name, "Master", true);
       state.ledger.unshift(
-        { journal, entryId, actorLedgerNumber: liabilityAccount.actorName ? actorLedgerNumber : "", source: "WITHDRAWAL_COMMISSION", account: liabilityAccount.account, direction: "Debit", currency: input.currency, amountMinor: commissionMinor, commissionPercent, commissionLiability, details, postedAt },
-        { journal, entryId, source: "WITHDRAWAL_COMMISSION", account: "MASTER_FEE_REVENUE", direction: "Credit", currency: input.currency, amountMinor: commissionMinor, commissionPercent, commissionLiability, details, postedAt }
+        { journal, entryId, actorLedgerNumber: commissionRouting.debit.actorName ? actorLedgerNumber : "", source: "WITHDRAWAL_COMMISSION", account: commissionRouting.debit.account, direction: "Debit", currency: input.currency, amountMinor: commissionMinor, commissionPercent, commissionLiability, details, postedAt },
+        { journal, entryId, actorLedgerNumber: commissionRouting.credit.actorName ? actorLedgerNumber : "", source: "WITHDRAWAL_COMMISSION", account: commissionRouting.credit.account, direction: "Credit", currency: input.currency, amountMinor: commissionMinor, commissionPercent, commissionLiability, details, postedAt }
       );
     }
     syncMasterBankAccount(state);

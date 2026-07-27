@@ -1810,13 +1810,14 @@ export function LedgerScreen({ session, state, onState }: CommonProps) {
           <View style={[styles.ledgerRow, styles.ledgerHead]}><Text style={styles.colDate}>Date</Text><Text style={styles.colRef}>Journal / No.</Text><Text style={styles.colDirection}>Type</Text><Text style={styles.colAmount}>Amount</Text><Text style={styles.colDetails}>Details</Text></View>
           {lines.map((line, index) => {
             const voided = ledgerLineIsForVoidedOrder(state, line);
+            const commissionCredit = line.direction === "Credit" && Boolean(line.commissionLiability);
             const details = [voided ? "VOIDED - Excluded from all calculations" : "", line.details || line.source || ""].filter(Boolean).join(" - ");
             return (
               <View key={`${line.journal}-${index}`} style={[styles.ledgerRow, voided && styles.ledgerVoidRow]}>
                 <Text style={[styles.colDate, voided && styles.ledgerVoidText]}>{formatDate(line.postedAt)}</Text>
                 <Text style={[styles.colRef, voided && styles.ledgerVoidText]}>{referenceForLine(line) || "-"}</Text>
-                <Text style={[styles.colDirection, voided && styles.ledgerVoidText]}>{line.direction}</Text>
-                <Text style={[styles.colAmount, voided && styles.ledgerVoidText]}>{compactAmount(line.currency, majorFromMinor(line.amountMinor, line.currency))}</Text>
+                <Text style={[styles.colDirection, commissionCredit && styles.ledgerCommissionCredit, voided && styles.ledgerVoidText]}>{line.direction}</Text>
+                <Text style={[styles.colAmount, commissionCredit && styles.ledgerCommissionCredit, voided && styles.ledgerVoidText]}>{compactAmount(line.currency, majorFromMinor(line.amountMinor, line.currency))}</Text>
                 <Text style={[styles.colDetails, voided && styles.ledgerVoidText]} numberOfLines={3}>{details}</Text>
               </View>
             );
@@ -2244,6 +2245,7 @@ const styles = StyleSheet.create({
   ledgerHead: { minHeight: 48, backgroundColor: colors.panel2 },
   ledgerVoidRow: { backgroundColor: colors.dangerSoft, borderBottomColor: colors.cancelledSoft },
   ledgerVoidText: { color: colors.danger },
+  ledgerCommissionCredit: { color: colors.danger, fontWeight: "900" },
   colDate: { width: 95, padding: spacing.sm, color: colors.ink },
   colRef: { width: 130, padding: spacing.sm, color: colors.ink, fontWeight: "800" },
   colDirection: { width: 90, padding: spacing.sm, color: colors.ink },
