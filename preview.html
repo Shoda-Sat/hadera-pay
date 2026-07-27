@@ -7055,11 +7055,17 @@
       els.chatGroupForm.classList.toggle("hidden", selectedActor()?.role !== "Master");
     }
 
-    function renderChat() {
+    function renderChat({ forceBottom = false } = {}) {
       renderChatGroups();
       const actor = selectedActor();
       const chats = visibleChats();
       const chat = selectedChat();
+      const nextChatId = chat?.id || "";
+      const sameChat = els.chatMessages.dataset.chatId === nextChatId;
+      const chatViewActive = document.getElementById("chat")?.classList.contains("active");
+      const distanceFromBottom = els.chatMessages.scrollHeight - els.chatMessages.clientHeight - els.chatMessages.scrollTop;
+      const preserveScrollPosition = !forceBottom && chatViewActive && sameChat && distanceFromBottom > 12;
+      const previousScrollTop = els.chatMessages.scrollTop;
       const totalUnread = chats.reduce((sum, item) => sum + unreadCount(item, actor?.name), 0);
       const chatNav = document.querySelector('[data-view="chat"]');
       if (chatNav) chatNav.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg>Chat${totalUnread ? ` <span class="unread-badge">${totalUnread}</span>` : ""}`;
@@ -7106,7 +7112,12 @@
           `;
         }).join("")
         : '<div class="empty">No messages yet.</div>';
-      els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
+      els.chatMessages.dataset.chatId = nextChatId;
+      if (chatViewActive) {
+        els.chatMessages.scrollTop = preserveScrollPosition
+          ? Math.min(previousScrollTop, Math.max(0, els.chatMessages.scrollHeight - els.chatMessages.clientHeight))
+          : els.chatMessages.scrollHeight;
+      }
       hydrateChatAttachments().catch(() => {});
     }
 
@@ -7134,7 +7145,7 @@
       els.chatText.value = "";
       const recipients = (chat.members || []).filter((member) => member !== actor.name).join(", ");
       notifyEvent("New message", recipients ? `${actor.name} to ${recipients}: ${messageSummary({ text, kind, media, attachmentId })}` : `${actor.name}: ${messageSummary({ text, kind, media, attachmentId })}`);
-      renderChat();
+      renderChat({ forceBottom: true });
       saveState();
     }
 
