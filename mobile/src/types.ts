@@ -1,4 +1,4 @@
-export type Currency = "USD" | "ETB" | "EUR" | "ERN";
+export type Currency = "USD" | "ETB" | "EUR" | "ERN" | "SSP" | "SDG";
 export type AuthMode = "login" | "signup";
 export type AppScreen =
   | "home"
@@ -424,7 +424,13 @@ export interface WorkspaceState {
   deletedActorIds?: string[];
   deletedChatIds?: string[];
   masterRateDivisorSettings?: Partial<Record<Currency, RateSetting>>;
-  buyingRates?: { eurToUsd?: number; usdToEtb?: number; usdToErn?: number };
+  buyingRates?: {
+    eurToUsd?: number;
+    usdToEtb?: number;
+    usdToErn?: number;
+    usdToSsp?: number;
+    usdToSdg?: number;
+  };
   orderCounter?: number;
   receivableCounter?: number;
   customerCounter?: number;

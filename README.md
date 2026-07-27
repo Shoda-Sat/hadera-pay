@@ -61,7 +61,7 @@ Each actor has one `ACTOR_CLEARING` ledger account per currency. Platform accoun
 - `MASTER_FX_CLEARING`: balancing account for cross-currency journals.
 - `MASTER_FEE_REVENUE`: commission revenue.
 
-The schema stores currencies as three-letter ISO-style codes. The local preview app currently exposes `USD`, `ETB`, `EUR`, and `ERN`.
+The schema stores currencies as three-letter ISO-style codes. The web and Android apps expose `USD`, `ETB`, `EUR`, `ERN`, `SSP`, and `SDG` across orders, transfers, journals, withdrawals, ledgers, reports, actor settings, and owner workspace creation.
 
 Special Broker netting requires no special balance table. The same actor can be debited for broker activity and credited for agent activity. Settlement simply sums that Special Broker's ledger lines by currency and nets the result.
 

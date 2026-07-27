@@ -2513,7 +2513,7 @@
         </div>
         <div class="top-actions">
           <span class="badge good" id="balanceBadge">Balanced</span>
-          <span class="badge" id="currencyBadge">USD / ETB / EUR / ERN</span>
+          <span class="badge" id="currencyBadge">USD / ETB / EUR / ERN / SSP / SDG</span>
           <span class="badge" id="profileBadge">Master</span>
           <span class="badge" id="accountBadge">Not logged in</span>
           <a class="btn secondary app-download-link topbar-action" href="https://github.com/Shoda-Sat/hadera-pay/releases/latest/download/haderapay-android.apk" download aria-label="Download Android app" title="Download Android app">
@@ -3054,7 +3054,7 @@
               <div class="panel-body table-wrap ledger-table-wrap" id="ledgerTableWrap">
                 <table class="ledger-table" id="ledgerTable">
                   <thead>
-                    <tr id="ledgerHeadRow"><th>Date</th><th>Journal</th><th>Order / Transfer No.</th><th>Source</th><th>Details</th><th>Account</th><th>Direction</th><th>USD</th><th>ETB</th><th>EUR</th><th>ERN</th></tr>
+                    <tr id="ledgerHeadRow"><th>Date</th><th>Journal</th><th>Order / Transfer No.</th><th>Source</th><th>Details</th><th>Account</th><th>Direction</th><th>USD</th><th>ETB</th><th>EUR</th><th>ERN</th><th>SSP</th><th>SDG</th></tr>
                   </thead>
                   <tbody id="ledgerRows"></tbody>
                 </table>
@@ -3074,7 +3074,7 @@
               <div class="table-wrap" id="trialBalanceTableWrap">
                 <table>
                   <thead>
-                    <tr><th>Actor</th><th>Role</th><th>USD</th><th>ETB</th><th>EUR</th><th>ERN</th><th>Running Position</th></tr>
+                    <tr><th>Actor</th><th>Role</th><th>USD</th><th>ETB</th><th>EUR</th><th>ERN</th><th>SSP</th><th>SDG</th><th>Running Position</th></tr>
                   </thead>
                   <tbody id="trialBalanceRows"></tbody>
                 </table>
@@ -3088,7 +3088,7 @@
               <div class="table-wrap income-table">
                 <table>
                   <thead>
-                    <tr><th>Order No.</th><th>Date</th><th>Details</th><th>Direction</th><th id="incomeBaseCurrencyHead">Base USD</th><th>Collected EUR</th><th>Collected USD</th><th>Profit/Loss USD</th></tr>
+                    <tr><th>Order No.</th><th>Date</th><th>Details</th><th>Direction</th><th id="incomeBaseCurrencyHead">Base USD</th><th>Collected Amount</th><th>Collected USD</th><th>Profit/Loss USD</th></tr>
                   </thead>
                   <tbody id="incomeStatementRows"></tbody>
                 </table>
@@ -3347,6 +3347,8 @@
                         <option>ETB</option>
                         <option>EUR</option>
                         <option>ERN</option>
+                        <option>SSP</option>
+                        <option>SDG</option>
                       </select>
                     </div>
                     <div class="field">
@@ -3662,7 +3664,7 @@
     const maxChatVoiceDurationMs = 5 * 60 * 1000;
     const attachmentDownloadCache = new Map();
     const paymentProofAccept = ".jpg,.jpeg,.png,image/jpeg,image/png";
-    const supportedCurrencies = ["USD", "ETB", "EUR", "ERN"];
+    const supportedCurrencies = ["USD", "ETB", "EUR", "ERN", "SSP", "SDG"];
 
     function actorCanInitiateOrders(role) {
       return ["Broker", "Special Broker"].includes(role);
@@ -3682,10 +3684,10 @@
         .filter((currency) => supportedCurrencies.includes(currency))));
       if (role === "Special Broker") {
         const selectedBeyondBase = selected.some((currency) => currency !== base);
-        return Array.from(new Set([base, ...(selectedBeyondBase ? selected : supportedCurrencies)])).slice(0, 5);
+        return Array.from(new Set([base, ...(selectedBeyondBase ? selected : supportedCurrencies)])).slice(0, supportedCurrencies.length);
       }
       if (role === "Special Agent") {
-        return Array.from(new Set([base, ...selected])).slice(0, 5);
+        return Array.from(new Set([base, ...selected])).slice(0, supportedCurrencies.length);
       }
       return selected;
     }
@@ -3694,7 +3696,9 @@
       return {
         eurToUsd: Number(settings.eurToUsd || settings.eurToUsdDivider) > 0 ? Number(settings.eurToUsd || settings.eurToUsdDivider) : 1,
         usdToEtb: Number(settings.usdToEtb) > 0 ? Number(settings.usdToEtb) : 1,
-        usdToErn: Number(settings.usdToErn) > 0 ? Number(settings.usdToErn) : 1
+        usdToErn: Number(settings.usdToErn) > 0 ? Number(settings.usdToErn) : 1,
+        usdToSsp: Number(settings.usdToSsp) > 0 ? Number(settings.usdToSsp) : 1,
+        usdToSdg: Number(settings.usdToSdg) > 0 ? Number(settings.usdToSdg) : 1
       };
     }
 
@@ -3831,7 +3835,7 @@
         { id: "ACT-0", name: "Master", role: "Master", currency: "USD", active: true, transferEnabled: true },
         { id: "ACT-1", name: "Eastline Broker", role: "Broker", currency: "USD", active: true, transferEnabled: true },
         { id: "ACT-2", name: "Hadera Agent", role: "Agent", currency: "USD", active: true, transferEnabled: true },
-        { id: "ACT-3", name: "Special Broker One", role: "Special Broker", currency: "ETB", workingCurrencies: ["USD", "ETB", "EUR", "ERN"], active: true, transferEnabled: true },
+        { id: "ACT-3", name: "Special Broker One", role: "Special Broker", currency: "ETB", workingCurrencies: ["USD", "ETB", "EUR", "ERN", "SSP", "SDG"], active: true, transferEnabled: true },
         { id: "ACT-4", name: "Addis Agent", role: "Agent", currency: "ETB", active: true, transferEnabled: true },
         { id: "ACT-5", name: "Multi-Currency Agent", role: "Special Agent", currency: "USD", workingCurrencies: ["USD", "ETB", "EUR"], active: true, transferEnabled: true }
       ],
@@ -3882,7 +3886,7 @@
       }
       return normalizedActors.map((actor) => {
         const savedWorkingCurrencies = Array.isArray(actor.workingCurrencies)
-          ? actor.workingCurrencies.filter((currency) => supportedCurrencies.includes(currency)).slice(0, 5)
+          ? actor.workingCurrencies.filter((currency) => supportedCurrencies.includes(currency)).slice(0, supportedCurrencies.length)
           : [];
         const baseCurrency = supportedCurrencies.includes(actor.currency) ? actor.currency : "USD";
         const workingCurrencies = normalizedWorkingCurrenciesForRole(actor.role, baseCurrency, savedWorkingCurrencies);
@@ -5108,7 +5112,7 @@
       subscriptionExpiryWarning: document.getElementById("subscriptionExpiryWarning")
     };
 
-    const decimalCurrencies = new Set(["USD", "EUR"]);
+    const decimalCurrencies = new Set(["USD", "EUR", "SSP", "SDG"]);
     const currencyFactor = (currency) => decimalCurrencies.has(currency) ? 100 : 1;
     const currencyDecimals = (currency) => decimalCurrencies.has(currency) ? 2 : 0;
 
@@ -6810,6 +6814,8 @@
       const rates = buyingRates();
       if (currency === "ETB") return rates.usdToEtb;
       if (currency === "ERN") return rates.usdToErn;
+      if (currency === "SSP") return rates.usdToSsp;
+      if (currency === "SDG") return rates.usdToSdg;
       return 1;
     }
 
@@ -7712,7 +7718,7 @@
       if (actorHasSpecialPayout(actor.role)) {
         actor.workingCurrencies = Array.from(new Set([nextCurrency, ...(actor.workingCurrencies || [])]))
           .filter((currency) => supportedCurrencies.includes(currency))
-          .slice(0, 5);
+          .slice(0, supportedCurrencies.length);
       }
       syncSettlementsFromLedger();
       return true;
@@ -7943,11 +7949,19 @@
                 <span>USD to ERN</span>
                 <input class="buying-rate-input" data-rate="usdToErn" type="text" inputmode="decimal" value="${escapeHtml(formatRate(rates.usdToErn))}" placeholder="Rate" aria-label="USD to ERN buying rate">
               </label>
+              <label class="manual-divider-field">
+                <span>USD to SSP</span>
+                <input class="buying-rate-input" data-rate="usdToSsp" type="text" inputmode="decimal" value="${escapeHtml(formatRate(rates.usdToSsp))}" placeholder="Rate" aria-label="USD to SSP buying rate">
+              </label>
+              <label class="manual-divider-field">
+                <span>USD to SDG</span>
+                <input class="buying-rate-input" data-rate="usdToSdg" type="text" inputmode="decimal" value="${escapeHtml(formatRate(rates.usdToSdg))}" placeholder="Rate" aria-label="USD to SDG buying rate">
+              </label>
               <button class="btn primary save-buying-rates" type="button">Save</button>
             </div>
           </td>
-          <td>EUR to USD ${escapeHtml(formatRate(rates.eurToUsd))}</td>
-          <td><span class="muted">Used for EUR broker income on ETB and ERN payouts</span></td>
+          <td>EUR/USD ${escapeHtml(formatRate(rates.eurToUsd))}</td>
+          <td><span class="muted">Local payout rates cover ETB, ERN, SSP, and SDG</span></td>
         </tr>
         <tr>
           <td><strong>${escapeHtml(master?.name || "Master")}</strong><br><span class="muted">Base ${escapeHtml(masterBaseCurrency())}</span></td>
@@ -8999,6 +9013,8 @@
       if (code === "EUR" && rates.eurToUsd > 0) return minorFromMajor(major * rates.eurToUsd, "USD");
       if (code === "ETB" && rates.usdToEtb > 0) return minorFromMajor(major / rates.usdToEtb, "USD");
       if (code === "ERN" && rates.usdToErn > 0) return minorFromMajor(major / rates.usdToErn, "USD");
+      if (code === "SSP" && rates.usdToSsp > 0) return minorFromMajor(major / rates.usdToSsp, "USD");
+      if (code === "SDG" && rates.usdToSdg > 0) return minorFromMajor(major / rates.usdToSdg, "USD");
       return 0;
     }
 
@@ -9089,7 +9105,7 @@
           : 0;
         const payoutMajor = majorAmount(ledgerPayoutMinor || Number(order.payoutAmountMinor || 0), payoutCurrency);
         let buyingProfitMinor = null;
-        if (brokerBaseCurrency === "EUR" && ["ETB", "ERN"].includes(payoutCurrency) && localRate > 0) {
+        if (brokerBaseCurrency === "EUR" && ["ETB", "ERN", "SSP", "SDG"].includes(payoutCurrency) && localRate > 0) {
           buyingProfitMinor = minorFromMajor(((collectedEurMajor * rates.eurToUsd * localRate) - payoutMajor) / localRate, "USD");
         }
         if (brokerBaseCurrency === "EUR" && payoutCurrency === "USD" && rates.usdToEtb > 0) {
@@ -9278,6 +9294,13 @@
       return row;
     }
 
+    function ledgerExportCurrencyColumns(currency, amountMinor) {
+      return Object.fromEntries(supportedCurrencies.map((code) => [
+        code,
+        code === currency ? formatMinor(amountMinor, code) : ""
+      ]));
+    }
+
     function ledgerExportRows(lines, actor, { dateOnly = false } = {}) {
       const viewer = selectedActor();
       const options = ledgerExportOptions(actor);
@@ -9296,10 +9319,7 @@
           ...row,
           Account: line.account,
           Direction: line.direction,
-          USD: line.currency === "USD" ? formatMinor(line.amountMinor, "USD") : "",
-          ETB: line.currency === "ETB" ? formatMinor(line.amountMinor, "ETB") : "",
-          EUR: line.currency === "EUR" ? formatMinor(line.amountMinor, "EUR") : "",
-          ERN: line.currency === "ERN" ? formatMinor(line.amountMinor, "ERN") : ""
+          ...ledgerExportCurrencyColumns(line.currency, line.amountMinor)
         };
       });
       if (!actor || actor.role === "Master") return rows;
@@ -9324,10 +9344,7 @@
             ...row,
             Account: `${actor.name} ACTOR_CLEARING`,
             Direction: net > 0 ? "Owes Master" : "Master owes",
-            USD: currency === "USD" ? formatMinor(Math.abs(net), "USD") : "",
-            ETB: currency === "ETB" ? formatMinor(Math.abs(net), "ETB") : "",
-            EUR: currency === "EUR" ? formatMinor(Math.abs(net), "EUR") : "",
-            ERN: currency === "ERN" ? formatMinor(Math.abs(net), "ERN") : ""
+            ...ledgerExportCurrencyColumns(currency, Math.abs(net))
           };
         });
       if (balanceRows.length === 0) {
@@ -9343,10 +9360,7 @@
           ...row,
           Account: `${actor.name} ACTOR_CLEARING`,
           Direction: "Zero",
-          USD: actor.currency === "USD" ? formatMinor(0, "USD") : "",
-          ETB: actor.currency === "ETB" ? formatMinor(0, "ETB") : "",
-          EUR: actor.currency === "EUR" ? formatMinor(0, "EUR") : "",
-          ERN: actor.currency === "ERN" ? formatMinor(0, "ERN") : ""
+          ...ledgerExportCurrencyColumns(actor.currency, 0)
         });
       }
       return [...rows, ...balanceRows];
@@ -9439,10 +9453,7 @@
         "%": 8,
         Account: 24,
         Direction: 12,
-        USD: 11,
-        ETB: 11,
-        EUR: 11,
-        ERN: 11,
+        ...Object.fromEntries(supportedCurrencies.map((currency) => [currency, 11])),
         Actor: 16,
         "Closed Statement": 22,
         Type: 14,
@@ -10771,7 +10782,7 @@
       }
       const rows = trialBalanceRowsFromLedger();
       if (rows.length === 0) {
-        els.trialBalanceRows.innerHTML = '<tr><td colspan="7">No actors attached to Master.</td></tr>';
+        els.trialBalanceRows.innerHTML = `<tr><td colspan="${supportedCurrencies.length + 3}">No actors attached to Master.</td></tr>`;
         return;
       }
       const totals = supportedCurrencies.reduce((acc, currency) => {
@@ -10985,7 +10996,7 @@
             <td>${escapeHtml(row.details)}</td>
             <td>${escapeHtml(row.direction)}</td>
             <td>${row.baseAmountMinor ? money(baseCurrency, row.baseAmountMinor) : ""}</td>
-            <td>${row.collectedEurMinor ? money("EUR", row.collectedEurMinor) : ""}</td>
+            <td>${row.collectedOriginalMinor ? money(row.collectedCurrency, row.collectedOriginalMinor) : ""}</td>
             <td>${row.collectedUsdMinor ? money("USD", row.collectedUsdMinor) : ""}</td>
             <td class="${profitClass}">${signedUsd(row.profitMinor)}</td>
           </tr>
@@ -14524,7 +14535,7 @@
         for (const input of inputs) {
           const key = input.dataset.rate;
           const rate = Number(input.value || 0);
-          if (!["eurToUsd", "usdToEtb", "usdToErn"].includes(key)) continue;
+          if (!["eurToUsd", "usdToEtb", "usdToErn", "usdToSsp", "usdToSdg"].includes(key)) continue;
           if (!Number.isFinite(rate) || rate <= 0) {
             input.setCustomValidity("Enter a rate greater than zero.");
             input.reportValidity();

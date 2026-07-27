@@ -1798,7 +1798,24 @@ export function LedgerScreen({ session, state, onState }: CommonProps) {
             {incomeExpanded ? <ChevronUp size={17} color={colors.accent} /> : <ChevronDown size={17} color={colors.accent} />}
           </Pressable>
           {incomeExpanded ? <>
-            {incomeOrders.map((order) => <View key={`income-${order.id}`} style={styles.recordRow}><Text style={styles.primaryLine}>{order.brokerOrderNumber || order.id}</Text><Text style={styles.muted}>Base USD {majorFromMinor(Number(order.incomeBaseAmountMinor || 0), "USD").toFixed(2)} | Collected EUR {majorFromMinor(Number(order.incomeCollectedEurMinor || 0), "EUR").toFixed(2)} | Collected USD {majorFromMinor(Number(order.incomeCollectedUsdMinor || 0), "USD").toFixed(2)}</Text><Text style={styles.amountLine}>Profit {compactAmount("USD", majorFromMinor(Number(order.incomeProfitMinor || 0), "USD"))}</Text></View>)}
+            {incomeOrders.map((order) => {
+              const collectedCurrency = order.incomeCollectedCurrency || order.sourceCurrency || "USD";
+              const collectedMinor = Number(
+                order.incomeCollectedOriginalMinor ||
+                (Number(order.sourceAmountMinor || 0) + Number(order.commissionMinor || 0))
+              );
+              return (
+                <View key={`income-${order.id}`} style={styles.recordRow}>
+                  <Text style={styles.primaryLine}>{order.brokerOrderNumber || order.id}</Text>
+                  <Text style={styles.muted}>
+                    Base USD {majorFromMinor(Number(order.incomeBaseAmountMinor || 0), "USD").toFixed(2)}
+                    {" | "}Collected {compactAmount(collectedCurrency, majorFromMinor(collectedMinor, collectedCurrency))}
+                    {" | "}USD equivalent {majorFromMinor(Number(order.incomeCollectedUsdMinor || 0), "USD").toFixed(2)}
+                  </Text>
+                  <Text style={styles.amountLine}>Profit {compactAmount("USD", majorFromMinor(Number(order.incomeProfitMinor || 0), "USD"))}</Text>
+                </View>
+              );
+            })}
             <SummaryRow label="Total profit" value={compactAmount("USD", majorFromMinor(totalIncomeUsdMinor, "USD"))} strong />
           </> : null}
         </Panel>
@@ -1877,7 +1894,9 @@ export function SettingsScreen({ session, state, offline, onState, onSessionTime
   const [buying, setBuying] = useState({
     eurToUsd: String(state.buyingRates?.eurToUsd || ""),
     usdToEtb: String(state.buyingRates?.usdToEtb || ""),
-    usdToErn: String(state.buyingRates?.usdToErn || "")
+    usdToErn: String(state.buyingRates?.usdToErn || ""),
+    usdToSsp: String(state.buyingRates?.usdToSsp || 1),
+    usdToSdg: String(state.buyingRates?.usdToSdg || 1)
   });
   const [statementRates, setStatementRates] = useState<Record<Currency, { enabled: boolean; divider: string; percent: string }>>(() => Object.fromEntries(supportedCurrencies.map((currency) => [currency, {
     enabled: state.masterRateDivisorSettings?.[currency]?.enabled === true,
@@ -1916,7 +1935,23 @@ export function SettingsScreen({ session, state, offline, onState, onSessionTime
   const setMode = async (actorId: string, mode: ActorRecord["transferMode"]) => { if (offline) return Alert.alert("Offline", "Reconnect before changing permissions."); setBusy(actorId); try { onState(await updateActorTransferMode(actorId, mode)); } catch (error) { Alert.alert("Permissions", errorMessage(error)); } finally { setBusy(""); } };
   const refreshInvites = async () => { setBusy("invites"); try { setInvites(await loadInvites()); } catch (error) { Alert.alert("Invite codes", errorMessage(error)); } finally { setBusy(""); } };
   const addInvite = async () => { if (offline) return Alert.alert("Offline", "Reconnect before creating an invite."); setBusy("invite-create"); try { await createInvite({ actorRole: inviteRole, currency: inviteCurrency, workingCurrencies: [inviteCurrency] }); await refreshInvites(); } catch (error) { Alert.alert("Invite codes", errorMessage(error)); } finally { setBusy(""); } };
-  const saveRates = async () => { if (offline) return Alert.alert("Offline", "Reconnect before saving rates."); setBusy("buying"); try { onState(await updateBuyingRates({ eurToUsd: Number(buying.eurToUsd), usdToEtb: Number(buying.usdToEtb), usdToErn: Number(buying.usdToErn) })); } catch (error) { Alert.alert("Buying rates", errorMessage(error)); } finally { setBusy(""); } };
+  const saveRates = async () => {
+    if (offline) return Alert.alert("Offline", "Reconnect before saving rates.");
+    setBusy("buying");
+    try {
+      onState(await updateBuyingRates({
+        eurToUsd: Number(buying.eurToUsd),
+        usdToEtb: Number(buying.usdToEtb),
+        usdToErn: Number(buying.usdToErn),
+        usdToSsp: Number(buying.usdToSsp),
+        usdToSdg: Number(buying.usdToSdg)
+      }));
+    } catch (error) {
+      Alert.alert("Buying rates", errorMessage(error));
+    } finally {
+      setBusy("");
+    }
+  };
   const saveStatementRate = async (currency: Currency) => { if (offline) return Alert.alert("Offline", "Reconnect before saving rates."); setBusy(`rate-${currency}`); const draft = statementRates[currency]; try { onState(await updateMasterRateSetting(currency, { enabled: draft.enabled, divider: Number(draft.divider), percent: Number(draft.percent) })); } catch (error) { Alert.alert("Income statement rate", errorMessage(error)); } finally { setBusy(""); } };
   const saveUsdAgentRate = async (actorId: string) => { if (offline) return Alert.alert("Offline", "Reconnect before saving rates."); setBusy(`usd-agent-rate-${actorId}`); const draft = usdAgentRates[actorId] || { divider: "1", percent: "0" }; try { onState(await updateUsdAgentIncomeRate(actorId, { divider: Number(draft.divider), percent: Number(draft.percent) })); } catch (error) { Alert.alert("USD Agent payout rate", errorMessage(error)); } finally { setBusy(""); } };
   const updateActor = async (actorId: string, input: Parameters<typeof updateActorOrderSettings>[1]) => { if (offline) return Alert.alert("Offline", "Reconnect before changing permissions."); setBusy(actorId); try { onState(await updateActorOrderSettings(actorId, input)); } catch (error) { Alert.alert("Permissions", errorMessage(error)); } finally { setBusy(""); } };
@@ -1996,7 +2031,14 @@ export function SettingsScreen({ session, state, offline, onState, onSessionTime
             <Button label="Move existing" loading={busy === "r2-migrate"} disabled={offline || Boolean(busy) || storageStatus?.configured === false || storageStatus?.legacyAttachments === 0} onPress={migrateFileStorage} style={styles.flexButton} />
           </View>
         </Panel>
-        <Panel title="Buying rates" badge="Income statement"><Field label="EUR to USD" value={buying.eurToUsd} onChangeText={(value) => setBuying({ ...buying, eurToUsd: value })} keyboardType="decimal-pad" /><Field label="USD to ETB" value={buying.usdToEtb} onChangeText={(value) => setBuying({ ...buying, usdToEtb: value })} keyboardType="decimal-pad" /><Field label="USD to ERN" value={buying.usdToErn} onChangeText={(value) => setBuying({ ...buying, usdToErn: value })} keyboardType="decimal-pad" /><Button label="Save buying rates" loading={busy === "buying"} disabled={offline} onPress={saveRates} /></Panel>
+        <Panel title="Buying rates" badge="Income statement">
+          <Field label="EUR to USD" value={buying.eurToUsd} onChangeText={(value) => setBuying({ ...buying, eurToUsd: value })} keyboardType="decimal-pad" />
+          <Field label="USD to ETB" value={buying.usdToEtb} onChangeText={(value) => setBuying({ ...buying, usdToEtb: value })} keyboardType="decimal-pad" />
+          <Field label="USD to ERN" value={buying.usdToErn} onChangeText={(value) => setBuying({ ...buying, usdToErn: value })} keyboardType="decimal-pad" />
+          <Field label="USD to SSP" value={buying.usdToSsp} onChangeText={(value) => setBuying({ ...buying, usdToSsp: value })} keyboardType="decimal-pad" />
+          <Field label="USD to SDG" value={buying.usdToSdg} onChangeText={(value) => setBuying({ ...buying, usdToSdg: value })} keyboardType="decimal-pad" />
+          <Button label="Save buying rates" loading={busy === "buying"} disabled={offline} onPress={saveRates} />
+        </Panel>
         <Panel title="Income statement rates" badge="Future orders only">
           {supportedCurrencies.map((currency) => {
             const draft = statementRates[currency];

@@ -19,7 +19,7 @@ import type {
 import { compactAmount, majorFromMinor, minorFromMajor, parseAmount } from "../utils/money";
 import { actorLedgerSequenceWidth, nextActorLedgerNumber, nextActorLedgerSequence } from "./ledgerNumbering";
 
-export const supportedCurrencies: Currency[] = ["USD", "ETB", "EUR", "ERN"];
+export const supportedCurrencies: Currency[] = ["USD", "ETB", "EUR", "ERN", "SSP", "SDG"];
 export const pendingCancelledOrderStates = new Set<OrderRecord["state"]>(["Assigned", "Returned", "Voided", "Cancelled"]);
 const processingOrderIds = new Set<string>();
 const processingTransferIds = new Set<string>();
@@ -342,12 +342,30 @@ function payingActorStatement(state: WorkspaceState, order: OrderRecord): { curr
   return { currency: baseCurrency, amountMinor: applyTerms(minorFromMajor(majorFromMinor(payoutAmountMinor, payoutCurrency) / rate, baseCurrency), baseCurrency) };
 }
 
-function buyingRates(state: WorkspaceState): { eurToUsd: number; usdToEtb: number; usdToErn: number } {
+type BuyingRates = {
+  eurToUsd: number;
+  usdToEtb: number;
+  usdToErn: number;
+  usdToSsp: number;
+  usdToSdg: number;
+};
+
+function buyingRates(state: WorkspaceState): BuyingRates {
   return {
     eurToUsd: Number(state.buyingRates?.eurToUsd) > 0 ? Number(state.buyingRates?.eurToUsd) : 1,
     usdToEtb: Number(state.buyingRates?.usdToEtb) > 0 ? Number(state.buyingRates?.usdToEtb) : 1,
-    usdToErn: Number(state.buyingRates?.usdToErn) > 0 ? Number(state.buyingRates?.usdToErn) : 1
+    usdToErn: Number(state.buyingRates?.usdToErn) > 0 ? Number(state.buyingRates?.usdToErn) : 1,
+    usdToSsp: Number(state.buyingRates?.usdToSsp) > 0 ? Number(state.buyingRates?.usdToSsp) : 1,
+    usdToSdg: Number(state.buyingRates?.usdToSdg) > 0 ? Number(state.buyingRates?.usdToSdg) : 1
   };
+}
+
+function usdToLocalBuyingRate(rates: BuyingRates, currency: Currency): number {
+  if (currency === "ETB") return rates.usdToEtb;
+  if (currency === "ERN") return rates.usdToErn;
+  if (currency === "SSP") return rates.usdToSsp;
+  if (currency === "SDG") return rates.usdToSdg;
+  return 0;
 }
 
 function currencyToUsd(state: WorkspaceState, currency: Currency, amountMinor: number): number {
@@ -355,8 +373,8 @@ function currencyToUsd(state: WorkspaceState, currency: Currency, amountMinor: n
   const major = majorFromMinor(amountMinor, currency);
   const rates = buyingRates(state);
   if (currency === "EUR") return minorFromMajor(major * rates.eurToUsd, "USD");
-  if (currency === "ETB") return minorFromMajor(major / rates.usdToEtb, "USD");
-  return minorFromMajor(major / rates.usdToErn, "USD");
+  const localRate = usdToLocalBuyingRate(rates, currency);
+  return localRate > 0 ? minorFromMajor(major / localRate, "USD") : 0;
 }
 
 export function applyUsdAgentIncomeRate(amountMinor: number, setting: RateSetting | undefined): number {
@@ -403,8 +421,8 @@ function freezeIncome(state: WorkspaceState, order: OrderRecord, lines: LedgerLi
   if (sourceCurrency === "EUR" && broker?.currency === "EUR") {
     const collectedEur = majorFromMinor(collectedMinor, "EUR");
     const payoutMajor = majorFromMinor(order.payoutAmountMinor, payoutCurrency);
-    const localRate = payoutCurrency === "ETB" ? rates.usdToEtb : payoutCurrency === "ERN" ? rates.usdToErn : rates.usdToEtb;
-    if (["ETB", "ERN", "USD"].includes(payoutCurrency) && localRate > 0) {
+    const localRate = payoutCurrency === "USD" ? rates.usdToEtb : usdToLocalBuyingRate(rates, payoutCurrency);
+    if (["ETB", "ERN", "SSP", "SDG", "USD"].includes(payoutCurrency) && localRate > 0) {
       const payoutLocal = payoutCurrency === "USD" ? payoutMajor * rates.usdToEtb : payoutMajor;
       profitMinor = minorFromMajor(((collectedEur * rates.eurToUsd * localRate) - payoutLocal) / localRate, "USD");
       if (!usdPayoutActorBaseMinor && !(payingActor && actorHasSpecialPayout(payingActor.role))) baseAmountMinor = collectedUsdMinor - profitMinor;
@@ -1060,9 +1078,9 @@ export async function updateActorTransferMode(actorId: string, mode: ActorRecord
   });
 }
 
-export async function updateBuyingRates(rates: { eurToUsd: number; usdToEtb: number; usdToErn: number }): Promise<WorkspaceState> {
+export async function updateBuyingRates(rates: BuyingRates): Promise<WorkspaceState> {
   return updateWorkspaceState((state) => {
-    if (rates.eurToUsd <= 0 || rates.usdToEtb <= 0 || rates.usdToErn <= 0) throw new Error("All buying rates must be greater than zero.");
+    if (Object.values(rates).some((rate) => !Number.isFinite(rate) || rate <= 0)) throw new Error("All buying rates must be greater than zero.");
     state.buyingRates = rates;
   });
 }

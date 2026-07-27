@@ -24,6 +24,8 @@ if (typeof ownerPassword !== "string" || ownerPassword.length < 12) {
   throw new Error("OWNER_PASSWORD is required and must contain at least 12 characters.");
 }
 const maxJsonBodyBytes = 12 * 1024 * 1024;
+const supportedCurrencies = ["USD", "ETB", "EUR", "ERN", "SSP", "SDG"];
+const supportedCurrencySet = new Set(supportedCurrencies);
 const r2AccountId = String(process.env.R2_ACCOUNT_ID || "").trim();
 const r2BucketName = String(process.env.R2_BUCKET_NAME || "").trim();
 const r2AccessKeyId = String(process.env.R2_ACCESS_KEY_ID || "").trim();
@@ -1901,7 +1903,7 @@ async function handleApi(request, response, url) {
     const name = String(body.name || "").trim();
     const email = String(body.email || "").trim().toLowerCase();
     const password = String(body.password || "");
-    const currency = ["USD", "ETB", "EUR", "ERN"].includes(body.currency) ? body.currency : "USD";
+    const currency = supportedCurrencySet.has(body.currency) ? body.currency : "USD";
     if (!name || !email || password.length < 6) return sendJson(response, 400, { error: "Enter Master name, email, and a password of at least 6 characters." });
     if (db.users.some((user) => user.email === email)) return sendJson(response, 409, { error: "That email already has an account." });
     const planId = subscriptionPlans.has(body.plan) ? body.plan : "one_month";
@@ -2050,13 +2052,13 @@ async function handleApi(request, response, url) {
     if (session.membership.role !== "Master") return sendJson(response, 403, { error: "Only Master can create invites." });
     const body = await readJson(request);
     const actorRole = ["Broker", "Agent", "Special Broker", "Special Agent"].includes(body.actorRole) ? body.actorRole : "Agent";
-    const currency = ["USD", "ETB", "EUR", "ERN"].includes(body.currency) ? body.currency : "USD";
+    const currency = supportedCurrencySet.has(body.currency) ? body.currency : "USD";
     const workingCurrencies = Array.isArray(body.workingCurrencies)
-      ? body.workingCurrencies.filter((item) => ["USD", "ETB", "EUR", "ERN"].includes(item)).slice(0, 5)
+      ? body.workingCurrencies.filter((item) => supportedCurrencySet.has(item)).slice(0, supportedCurrencies.length)
       : [];
     const specialWorkingCurrencies = actorRole === "Special Broker" && !workingCurrencies.some((item) => item !== currency)
-      ? ["USD", "ETB", "EUR", "ERN"]
-      : Array.from(new Set([currency, ...workingCurrencies])).slice(0, 5);
+      ? [...supportedCurrencies]
+      : Array.from(new Set([currency, ...workingCurrencies])).slice(0, supportedCurrencies.length);
     const invite = {
       id: id("inv"),
       code: inviteCode(),

@@ -1,7 +1,7 @@
 import type { Currency, TransferDraft, TransferQuote } from "../types";
 
-export const currencies: Currency[] = ["USD", "ETB", "EUR", "ERN"];
-const decimalCurrencies = new Set<Currency>(["USD", "EUR"]);
+export const currencies: Currency[] = ["USD", "ETB", "EUR", "ERN", "SSP", "SDG"];
+const decimalCurrencies = new Set<Currency>(["USD", "EUR", "SSP", "SDG"]);
 
 export function parseAmount(value: string): number {
   const numeric = Number(String(value || "").replace(/,/g, "").trim());
