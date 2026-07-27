@@ -95,6 +95,7 @@ import {
   updateUsdAgentIncomeRate,
   visibleChatsFor
 } from "../domain/workspace";
+import { actorLedgerReferenceForLine } from "../domain/ledgerNumbering";
 import { colors, radius, spacing } from "../theme";
 import type {
   ActorRecord,
@@ -876,6 +877,7 @@ type MobileSearchResult = {
   details: string;
   time: number;
   screen: AppScreen;
+  destinationAvailable?: boolean;
   searchText: string;
 };
 
@@ -895,13 +897,20 @@ function preferredSearchResult(results: MobileSearchResult[], participant = ""):
   return candidates.slice().sort((a, b) => searchResultPriority(b) - searchResultPriority(a) || b.time - a.time)[0];
 }
 
+function sessionCanOpenSearchResult(result: MobileSearchResult, session: UserSession): boolean {
+  if (result.destinationAvailable === false) return false;
+  if (result.screen !== "receivables") return true;
+  return isMasterView(session) || ["Broker", "Special Broker"].includes(session.actorRole);
+}
+
 function consolidateSearchResults(results: MobileSearchResult[], session: UserSession): MobileSearchResult[] {
   const grouped = new Map<string, MobileSearchResult[]>();
   results.forEach((result) => grouped.set(result.groupKey, [...(grouped.get(result.groupKey) || []), result]));
   return Array.from(grouped.entries()).flatMap(([groupKey, group]) => {
-    if (groupKey.startsWith("single:")) return group;
+    if (groupKey.startsWith("single:")) return group.filter((result) => sessionCanOpenSearchResult(result, session));
     if (!isMasterView(session)) {
-      const preferred = preferredSearchResult(group, session.actorName);
+      const openableResults = group.filter((result) => sessionCanOpenSearchResult(result, session));
+      const preferred = preferredSearchResult(openableResults, session.actorName);
       return preferred ? [{ ...preferred, key: `${groupKey}:${session.actorName}`, actor: session.actorName }] : [];
     }
     const participants = uniqueSearchNames(group.flatMap((result) => [...result.participants, result.participant]));
@@ -917,6 +926,7 @@ export function SearchScreen({ session, state, onNavigate }: CommonProps) {
   const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
   const viewerActor = actorForSession(session, state);
   const rawResults: MobileSearchResult[] = [];
+  const visibleOrderDestinationIds = new Set(visibleOrders(session, state).map((order) => order.id));
   let singleIndex = 0;
 
   const addOrder = (order: OrderRecord, type = "Order", status: string = order.state, archivedAt = "") => {
@@ -964,6 +974,7 @@ export function SearchScreen({ session, state, onNavigate }: CommonProps) {
       details,
       time: new Date(order.paidAt || order.sentAt || order.createdAt || archivedAt || 0).getTime() || 0,
       screen: type.startsWith("Archived") ? "archive" : "orders",
+      destinationAvailable: type.startsWith("Archived") || visibleOrderDestinationIds.has(order.id),
       searchText: [reference, order.id, order.brokerOrderNumber, order.agentOrderNumber, Object.values(order.agentOrderNumbers || {}), resultStatus, searchableParticipants, details].flat().join(" ").toLocaleLowerCase()
     });
   };
@@ -995,7 +1006,9 @@ export function SearchScreen({ session, state, onNavigate }: CommonProps) {
   };
   const addLedger = (line: WorkspaceState["ledger"][number], type = "Ledger", archivedAt = "") => {
     const participant = ledgerParticipant(String(line.account || ""));
-    const reference = String(line.journal || line.orderId || line.transferId || line.entryId || "Ledger");
+    const reference = participant
+      ? actorLedgerReferenceForLine(state, line, participant)
+      : String(line.actorLedgerNumber || line.transferId || line.entryId || line.orderId || line.journal || "Ledger");
     const groupKey = line.orderId ? `order:${line.orderId}` : line.transferId ? `transfer:${line.transferId}` : `ledger:${reference}`;
     const amount = compactAmount(line.currency, majorFromMinor(line.amountMinor, line.currency));
     const voided = ledgerLineIsForVoidedOrder(state, line);
@@ -1492,7 +1505,7 @@ export function LedgerScreen({ session, state, onState }: CommonProps) {
   const [transactionSort, setTransactionSort] = useState<"Date" | "Order / Transfer No.">("Date");
   const selected = isMasterView(session) ? actorChoices.find((actor) => actor.id === actorId) : actorForSession(session, state);
   const actorName = selected?.name || session.actorName;
-  const referenceForLine = (line: WorkspaceState["ledger"][number]) => String(line.journal || line.orderId || line.transferId || line.entryId || "");
+  const referenceForLine = (line: WorkspaceState["ledger"][number]) => actorLedgerReferenceForLine(state, line, actorName);
   const lines = state.ledger
     .filter((line) => line.archived !== true && (isMasterView(session) ? (!selected || String(line.account).includes(actorName)) : String(line.account).includes(session.actorName)))
     .slice()
@@ -1573,7 +1586,7 @@ export function LedgerScreen({ session, state, onState }: CommonProps) {
             return (
               <View key={`${line.journal}-${index}`} style={[styles.ledgerRow, voided && styles.ledgerVoidRow]}>
                 <Text style={[styles.colDate, voided && styles.ledgerVoidText]}>{formatDate(line.postedAt)}</Text>
-                <Text style={[styles.colRef, voided && styles.ledgerVoidText]}>{String(line.journal || line.orderId || line.transferId || "-")}</Text>
+                <Text style={[styles.colRef, voided && styles.ledgerVoidText]}>{referenceForLine(line) || "-"}</Text>
                 <Text style={[styles.colDirection, voided && styles.ledgerVoidText]}>{line.direction}</Text>
                 <Text style={[styles.colAmount, voided && styles.ledgerVoidText]}>{compactAmount(line.currency, majorFromMinor(line.amountMinor, line.currency))}</Text>
                 <Text style={[styles.colDetails, voided && styles.ledgerVoidText]} numberOfLines={3}>{details}</Text>

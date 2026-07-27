@@ -235,6 +235,7 @@ export interface LedgerLine {
   entryId?: string;
   transferId?: string;
   orderId?: string;
+  actorLedgerNumber?: string;
   source?: string;
   account: string;
   direction: "Debit" | "Credit";

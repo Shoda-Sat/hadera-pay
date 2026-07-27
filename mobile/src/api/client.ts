@@ -18,6 +18,7 @@ import type {
   UserSession,
   WorkspaceState
 } from "../types";
+import { ensureActorLedgerNumbers, nextActorLedgerSequence } from "../domain/ledgerNumbering";
 import { calculateQuote, compactAmount, minorFromMajor } from "../utils/money";
 
 declare const process: { env?: Record<string, string | undefined> } | undefined;
@@ -303,7 +304,7 @@ function removeOrdersAlreadyReported(orders: OrderRecord[] | undefined, archives
 
 function normalizeState(state: Partial<WorkspaceState> | null | undefined): WorkspaceState {
   const archives = normalizeArchiveSnapshots(state?.archives);
-  return {
+  const normalized = {
     ...(state || {}),
     actors: Array.isArray(state?.actors) ? state.actors : [],
     orders: removeOrdersAlreadyReported(state?.orders, archives),
@@ -315,7 +316,9 @@ function normalizeState(state: Partial<WorkspaceState> | null | undefined): Work
     archives,
     settlements: Array.isArray(state?.settlements) ? state.settlements : [],
     chatConversations: Array.isArray(state?.chatConversations) ? state.chatConversations : []
-  };
+  } as WorkspaceState;
+  ensureActorLedgerNumbers(normalized);
+  return normalized;
 }
 
 export function canCreateOrders(session: UserSession | null | undefined): boolean {
@@ -545,24 +548,7 @@ function actorOrderPrefix(name: string): string {
 
 function nextBrokerOrderNumber(session: UserSession, state: WorkspaceState): string {
   const prefix = actorOrderPrefix(session.actorName);
-  const pattern = new RegExp(`^${prefix}(\\d+)$`);
-  const latestClose = state.archives
-    .filter((archive) => archive.actor === session.actorName)
-    .reduce((latest, archive) => Math.max(latest, new Date(archive.closedAt || 0).getTime() || 0), 0);
-  const records = [
-    ...state.orders.map((order) => ({ order, current: true, closedAt: "" })),
-    ...state.archives.flatMap((archive) => (archive.orders || []).map((order) => ({ order, current: false, closedAt: archive.closedAt || "" })))
-  ];
-  const usedNumbers = new Set(records.reduce<number[]>((used, record) => {
-    const actorMatches = record.order.brokerActorId === session.actorId || (!record.order.brokerActorId && record.order.broker === session.actorName);
-    const recordClosedAt = new Date(record.closedAt || 0).getTime();
-    const reserve = record.current || record.order.state === "Voided" || Boolean(record.order.voidJournal) || !latestClose || recordClosedAt > latestClose;
-    const match = String(record.order.brokerOrderNumber || record.order.id || "").match(pattern);
-    if (actorMatches && reserve && match) used.push(Number(match[1]));
-    return used;
-  }, []));
-  let next = 1;
-  while (usedNumbers.has(next)) next += 1;
+  const next = nextActorLedgerSequence(state, session.actorName);
   return `${prefix}${String(next).padStart(3, "0")}`;
 }
 

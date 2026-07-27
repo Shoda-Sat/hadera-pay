@@ -16,6 +16,7 @@ import type {
   WorkspaceState
 } from "../types";
 import { compactAmount, majorFromMinor, minorFromMajor, parseAmount } from "../utils/money";
+import { actorLedgerSequenceWidth, nextActorLedgerNumber, nextActorLedgerSequence } from "./ledgerNumbering";
 
 export const supportedCurrencies: Currency[] = ["USD", "ETB", "EUR", "ERN"];
 export const pendingCancelledOrderStates = new Set<OrderRecord["state"]>(["Assigned", "Returned", "Voided", "Cancelled"]);
@@ -231,17 +232,6 @@ function brokerOrderNumber(order: OrderRecord): string {
   return order.brokerOrderNumber || order.id;
 }
 
-function allNumberedOrders(state: WorkspaceState): Array<{ order: OrderRecord; current: boolean; closedAt: string }> {
-  return [
-    ...state.orders.map((order) => ({ order, current: true, closedAt: "" })),
-    ...state.archives.flatMap((archive) => (archive.orders || []).map((order) => ({
-      order,
-      current: false,
-      closedAt: archive.closedAt || ""
-    })))
-  ];
-}
-
 export function orderRecordIsVoided(order: OrderRecord | undefined): boolean {
   return order?.state === "Voided" || Boolean(order?.voidedAt || order?.voidJournal || order?.excludedFromCalculations);
 }
@@ -279,33 +269,8 @@ function orderBalanceWasClosed(state: WorkspaceState, order: OrderRecord): boole
   }));
 }
 
-function latestCloseForActor(state: WorkspaceState, actorName: string): number {
-  return state.archives
-    .filter((archive) => archive.actor === actorName)
-    .reduce((latest, archive) => Math.max(latest, new Date(archive.closedAt || 0).getTime() || 0), 0);
-}
-
 function nextAgentSequence(state: WorkspaceState, agentName: string): number {
-  const latestClose = latestCloseForActor(state, agentName);
-  const used = new Set<number>();
-  allNumberedOrders(state).forEach((record) => {
-    const numbers = Object.entries(record.order.agentOrderNumbers || {})
-      .filter(([name]) => name === agentName)
-      .map(([, number]) => number);
-    if ((record.order.agentOrderActor === agentName || record.order.agent === agentName) && record.order.agentOrderNumber) {
-      numbers.push(record.order.agentOrderNumber);
-    }
-    const reserve = record.current || record.order.state === "Voided" || Boolean(record.order.voidJournal) ||
-      !latestClose || new Date(record.closedAt || 0).getTime() > latestClose;
-    if (!reserve) return;
-    numbers.forEach((number) => {
-      const match = String(number || "").match(/^(\d+)_/);
-      if (match) used.add(Number(match[1]));
-    });
-  });
-  let next = 1;
-  while (used.has(next)) next += 1;
-  return next;
+  return nextActorLedgerSequence(state, agentName);
 }
 
 function assignAgentNumber(state: WorkspaceState, order: OrderRecord, agentName: string): void {
@@ -314,7 +279,7 @@ function assignAgentNumber(state: WorkspaceState, order: OrderRecord, agentName:
     order.agentOrderNumbers[order.agentOrderActor] = order.agentOrderNumber;
   }
   if (!order.agentOrderNumbers[agentName]) {
-    order.agentOrderNumbers[agentName] = `${String(nextAgentSequence(state, agentName)).padStart(4, "0")}_${brokerOrderNumber(order)}`;
+    order.agentOrderNumbers[agentName] = `${String(nextAgentSequence(state, agentName)).padStart(actorLedgerSequenceWidth(state, agentName), "0")}_${brokerOrderNumber(order)}`;
   }
   order.agentOrderNumber = order.agentOrderNumbers[agentName];
   order.agentOrderActor = agentName;
@@ -786,18 +751,20 @@ function postTransferLedger(state: WorkspaceState, transfer: InternalTransferRec
   const postedAt = new Date().toISOString();
   const commission = Number(transfer.commissionMinor || 0);
   const details = transferDetails(transfer);
+  const receivingLedgerNumber = nextActorLedgerNumber(state, transfer.to, transfer.id);
+  const sendingLedgerNumber = nextActorLedgerNumber(state, transfer.from, transfer.id);
   transfer.journal = journal;
   transfer.approvedAt = transfer.approvedAt || postedAt;
   transfer.paidOutAt = transfer.paidOutAt || postedAt;
   state.ledger.unshift(
-    { journal, transferId: transfer.id, source: "TRANSFER", account: transfer.to, direction: "Debit", currency: transfer.currency, amountMinor: transfer.amountMinor, details, postedAt },
+    { journal, transferId: transfer.id, actorLedgerNumber: receivingLedgerNumber, source: "TRANSFER", account: transfer.to, direction: "Debit", currency: transfer.currency, amountMinor: transfer.amountMinor, details, postedAt },
     { journal, transferId: transfer.id, source: "TRANSFER", account: "MASTER_FX_CLEARING", direction: "Credit", currency: transfer.currency, amountMinor: transfer.amountMinor, details, postedAt },
     { journal, transferId: transfer.id, source: "TRANSFER", account: "MASTER_FX_CLEARING", direction: "Debit", currency: transfer.sourceCurrency, amountMinor: transfer.sourceAmountMinor, details, postedAt },
-    { journal, transferId: transfer.id, source: "TRANSFER", account: transfer.from, direction: "Credit", currency: transfer.sourceCurrency, amountMinor: transfer.sourceAmountMinor, details, postedAt }
+    { journal, transferId: transfer.id, actorLedgerNumber: sendingLedgerNumber, source: "TRANSFER", account: transfer.from, direction: "Credit", currency: transfer.sourceCurrency, amountMinor: transfer.sourceAmountMinor, details, postedAt }
   );
   if (commission > 0) {
     state.ledger.unshift(
-      { journal, transferId: transfer.id, source: "TRANSFER", account: transfer.from, direction: "Debit", currency: transfer.sourceCurrency, amountMinor: commission, details, postedAt },
+      { journal, transferId: transfer.id, actorLedgerNumber: sendingLedgerNumber, source: "TRANSFER", account: transfer.from, direction: "Debit", currency: transfer.sourceCurrency, amountMinor: commission, details, postedAt },
       { journal, transferId: transfer.id, source: "TRANSFER", account: "MASTER_FEE_REVENUE", direction: "Credit", currency: transfer.sourceCurrency, amountMinor: commission, details, postedAt }
     );
   }
@@ -1154,9 +1121,12 @@ export async function postActorJournal(input: { actorId: string; sourceCurrency:
     const postedAt = new Date().toISOString();
     const sourceAmountMinor = minorFromMajor(sourceMajor, input.sourceCurrency);
     const amountMinor = minorFromMajor(amountMajor, input.currency);
+    const entryId = `JNL-${journal.replace("JRN-", "")}`;
+    const actorLedgerNumber = nextActorLedgerNumber(state, actor.name, entryId);
     state.ledger.unshift({
       journal,
-      entryId: `JNL-${journal.replace("JRN-", "")}`,
+      entryId,
+      actorLedgerNumber,
       source: "JOURNAL",
       account: `${actor.name} ACTOR_CLEARING`,
       direction: "Debit",
@@ -1181,9 +1151,10 @@ export async function postActorWithdrawal(input: { actorId: string; currency: Cu
     const journal = nextJournalId(state);
     const postedAt = new Date().toISOString();
     const entryId = `WDL-${journal.replace("JRN-", "")}`;
+    const actorLedgerNumber = nextActorLedgerNumber(state, actor.name, entryId);
     const details = [`Withdrawal ${compactAmount(input.currency, amountMajor)} from ${actor.name}`, input.remarks ? `Remarks: ${input.remarks}` : ""].filter(Boolean).join(" - ");
     state.ledger.unshift(
-      { journal, entryId, source: "WITHDRAWAL", account: `${actor.name} ACTOR_CLEARING`, direction: "Credit", currency: input.currency, amountMinor, details, postedAt },
+      { journal, entryId, actorLedgerNumber, source: "WITHDRAWAL", account: `${actor.name} ACTOR_CLEARING`, direction: "Credit", currency: input.currency, amountMinor, details, postedAt },
       { journal, entryId, source: "WITHDRAWAL", account: "MASTER_FX_CLEARING", direction: "Debit", currency: input.currency, amountMinor, details, postedAt }
     );
     syncMasterBankAccount(state);

@@ -1684,7 +1684,9 @@
     .chat-shell {
       display: grid;
       grid-template-columns: 320px minmax(0, 1fr);
-      min-height: calc(100vh - 128px);
+      height: calc(100vh - 128px);
+      height: calc(100dvh - 128px);
+      min-height: 0;
       border: 1px solid var(--line);
       border-radius: 8px;
       overflow: hidden;
@@ -1696,8 +1698,10 @@
       border-right: 1px solid var(--line);
       background: #f8fbfa;
       min-width: 0;
+      min-height: 0;
       display: grid;
       grid-template-rows: auto auto 1fr;
+      overflow: hidden;
     }
 
     .chat-list-head,
@@ -1730,6 +1734,8 @@
     .chat-list {
       overflow-y: auto;
       min-height: 0;
+      overscroll-behavior: contain;
+      scrollbar-gutter: stable;
     }
 
     .chat-list-row {
@@ -1800,9 +1806,11 @@
 
     .chat-panel {
       min-width: 0;
+      min-height: 0;
       display: grid;
       grid-template-rows: auto 1fr auto auto;
       background: #edf7f4;
+      overflow: hidden;
     }
 
     .chat-messages {
@@ -1812,6 +1820,8 @@
       display: flex;
       flex-direction: column;
       gap: 10px;
+      overscroll-behavior: contain;
+      scrollbar-gutter: stable;
     }
 
     .message {
@@ -2125,12 +2135,19 @@
 
       .chat-shell {
         grid-template-columns: 1fr;
+        height: auto;
+        min-height: calc(100vh - 128px);
+        min-height: calc(100dvh - 128px);
       }
 
       .chat-list-panel {
         border-right: 0;
         border-bottom: 1px solid var(--line);
         max-height: 360px;
+      }
+
+      .chat-panel {
+        overflow: visible;
       }
     }
 
@@ -4556,6 +4573,7 @@
       state.masterTransactionCycle = Math.max(localMasterTransactionCycle, remoteMasterTransactionCycle);
       assignCurrentMasterTransactionCycle();
       state.customerCounter = Math.max(Number(state.customerCounter || 0), Number(remoteState.customerCounter || 0));
+      ensureActorLedgerNumbers();
       return true;
     }
 
@@ -4826,7 +4844,9 @@
       state.withdrawalCounter = Math.max(Number(state.withdrawalCounter || 0), nextWithdrawalNumberFromLedger() - 1);
       assignCurrentMasterTransactionCycle();
       ensureSessionActor();
+      const actorLedgerNumbersChanged = ensureActorLedgerNumbers();
       remoteStateReady = true;
+      if (actorLedgerNumbersChanged) await saveStateNow();
       refreshAccountDeviceWarning();
       startRemoteRefresh();
       startInactivityWatch();
@@ -5676,10 +5696,8 @@
       return Number.isFinite(recordClose) && recordClose > latestClose;
     }
 
-    function firstAvailableSequence(usedNumbers) {
-      let next = 1;
-      while (usedNumbers.has(next)) next += 1;
-      return next;
+    function nextActorLedgerSequence(actorName) {
+      return Math.max(0, ...actorLedgerUsedSequences(actorName)) + 1;
     }
 
     function brokerOrderNumberForOrder(order) {
@@ -5694,23 +5712,129 @@
       return order.agentOrderNumber || "";
     }
 
-    function nextBrokerOrderNumber(brokerName) {
-      const brokerActor = activeActors().find((actor) => actor.name === brokerName);
-      const prefix = actorOrderPrefix(brokerName);
-      const escapedPrefix = prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const pattern = new RegExp(`^${escapedPrefix}(\\d+)$`);
-      const usedNumbers = allOrderRecordsForNumbering().reduce((used, record) => {
+    function actorOrderReferencesForNumbering(actorName) {
+      const actor = state.actors.find((candidate) => candidate.name === actorName);
+      const references = [];
+      allOrderRecordsForNumbering().forEach((record) => {
+        if (!orderRecordCountsForActorNumber(record, actorName)) return;
         const order = record.order;
-        const actorMatches = order?.brokerActorId && brokerActor?.id
-          ? order.brokerActorId === brokerActor.id
-          : order?.broker === brokerName;
-        if (!actorMatches || !orderRecordCountsForActorNumber(record, brokerName)) return used;
-        const number = brokerOrderNumberForOrder(order);
-        const match = String(number || "").match(pattern);
-        if (match) used.add(Number(match[1]));
-        return used;
-      }, new Set());
-      const next = firstAvailableSequence(usedNumbers);
+        const postedAt = order.paidAt || order.assignedAt || order.sentAt || order.createdAt || record.closedAt || "";
+        const isBroker = actor?.id && order.brokerActorId
+          ? order.brokerActorId === actor.id
+          : order.broker === actorName;
+        if (isBroker && brokerOrderNumberForOrder(order)) {
+          references.push({ reference: brokerOrderNumberForOrder(order), postedAt });
+        }
+        agentOrderNumbersForActor(order, actorName).forEach((reference) => references.push({ reference, postedAt }));
+      });
+      return references;
+    }
+
+    function actorLedgerSequenceDetails(reference, actorName) {
+      const leading = String(reference || "").match(/^(\d+)_/);
+      if (leading) return { value: Number(leading[1]), width: leading[1].length };
+      const prefix = actorOrderPrefix(actorName).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const broker = String(reference || "").match(new RegExp(`^${prefix}(\\d+)$`, "i"));
+      return broker ? { value: Number(broker[1]), width: broker[1].length } : null;
+    }
+
+    function actorLedgerUsedSequences(actorName) {
+      const used = new Set();
+      actorOrderReferencesForNumbering(actorName).forEach(({ reference }) => {
+        const details = actorLedgerSequenceDetails(reference, actorName);
+        if (details && Number.isFinite(details.value) && details.value > 0) used.add(details.value);
+      });
+      state.ledger
+        .filter((line) =>
+          line?.archived !== true &&
+          (line.account === actorName || line.account === `${actorName} ACTOR_CLEARING`)
+        )
+        .forEach((line) => {
+          const match = String(line.actorLedgerNumber || "").match(/^(\d+)_/);
+          if (match) used.add(Number(match[1]));
+        });
+      return used;
+    }
+
+    function actorLedgerSequenceWidth(actorName) {
+      const existingWidth = state.ledger
+        .filter((line) =>
+          line?.archived !== true &&
+          (line.account === actorName || line.account === `${actorName} ACTOR_CLEARING`)
+        )
+        .map((line) => String(line.actorLedgerNumber || "").match(/^(\d+)_/)?.[1]?.length || 0)
+        .find((width) => width > 0);
+      if (existingWidth) return existingWidth;
+      const latestReference = actorOrderReferencesForNumbering(actorName)
+        .map((item) => ({ ...item, details: actorLedgerSequenceDetails(item.reference, actorName) }))
+        .filter((item) => item.details)
+        .sort((left, right) => new Date(right.postedAt || 0).getTime() - new Date(left.postedAt || 0).getTime())[0];
+      if (latestReference) return Math.max(1, latestReference.details.width);
+      const actor = state.actors.find((candidate) => candidate.name === actorName);
+      return actorCanReceivePayouts(actor?.role) ? 4 : 3;
+    }
+
+    function formattedLedgerTransactionReference(reference) {
+      return String(reference || "").replace(/^(TRF|JNL|WDL)-(\d+)$/i, (_match, prefix, value) =>
+        `${prefix.toUpperCase()}-${value.padStart(2, "0")}`
+      );
+    }
+
+    function nextActorLedgerNumber(actorName, reference) {
+      const actor = state.actors.find((candidate) => candidate.name === actorName);
+      if (!actor || actor.role === "Master") return "";
+      const sequence = nextActorLedgerSequence(actorName);
+      return `${String(sequence).padStart(actorLedgerSequenceWidth(actorName), "0")}_${formattedLedgerTransactionReference(reference)}`;
+    }
+
+    function ensureActorLedgerNumbers() {
+      let changed = false;
+      activeActors()
+        .filter((actor) => actor.role !== "Master")
+        .forEach((actor) => {
+          const groups = new Map();
+          state.ledger
+            .filter((line) =>
+              line?.archived !== true &&
+              ["TRANSFER", "TRANSFER_REVERSAL", "JOURNAL", "WITHDRAWAL"].includes(String(line.source || "")) &&
+              (line.account === actor.name || line.account === `${actor.name} ACTOR_CLEARING`)
+            )
+            .forEach((line) => {
+              const reference = String(line.transferId || line.entryId || line.journal || "");
+              if (!reference) return;
+              const key = `${line.source}:${reference}`;
+              const group = groups.get(key) || { lines: [], reference, postedAt: String(line.postedAt || "") };
+              group.lines.push(line);
+              if (!group.postedAt || new Date(line.postedAt || 0).getTime() < new Date(group.postedAt || 0).getTime()) {
+                group.postedAt = String(line.postedAt || "");
+              }
+              groups.set(key, group);
+            });
+          Array.from(groups.values())
+            .sort((left, right) => new Date(left.postedAt || 0).getTime() - new Date(right.postedAt || 0).getTime())
+            .forEach((group) => {
+              const existing = group.lines.find((line) => line.actorLedgerNumber)?.actorLedgerNumber;
+              if (existing) {
+                group.lines.forEach((line) => {
+                  if (line.actorLedgerNumber) return;
+                  line.actorLedgerNumber = existing;
+                  changed = true;
+                });
+                return;
+              }
+              const actorLedgerNumber = nextActorLedgerNumber(actor.name, group.reference);
+              group.lines.forEach((line) => {
+                line.actorLedgerNumber = actorLedgerNumber;
+                changed = true;
+              });
+            });
+        });
+      return changed;
+    }
+
+    function nextBrokerOrderNumber(brokerName) {
+      const prefix = actorOrderPrefix(brokerName);
+      const next = nextActorLedgerSequence(brokerName);
       return `${prefix}${String(next).padStart(3, "0")}`;
     }
 
@@ -5725,21 +5849,8 @@
       return Array.from(new Set(numbers.filter(Boolean)));
     }
 
-    function nextAgentSequence(agentName, brokerNumber = "") {
-      const usedNumbers = allOrderRecordsForNumbering().reduce((used, record) => {
-        const order = record.order;
-        const numbers = [];
-        numbers.push(...agentOrderNumbersForActor(order, agentName));
-        return numbers.reduce((innerUsed, number) => {
-          const match = String(number || "").match(/^(\d+)_/);
-          if (!match) return innerUsed;
-          const sequence = Number(match[1]);
-          const exactVoidedMatch = orderRecordIsVoided(order) && (!brokerNumber || String(number).endsWith(`_${brokerNumber}`));
-          if (orderRecordCountsForActorNumber(record, agentName, false) || exactVoidedMatch) innerUsed.add(sequence);
-          return innerUsed;
-        }, used);
-      }, new Set());
-      return firstAvailableSequence(usedNumbers);
+    function nextAgentSequence(agentName) {
+      return nextActorLedgerSequence(agentName);
     }
 
     function assignAgentOrderNumber(order, agentName) {
@@ -5752,7 +5863,7 @@
         order.agentOrderNumbers[order.agentOrderActor] = order.agentOrderNumber;
       }
       if (!order.agentOrderNumbers[agentName]) {
-        order.agentOrderNumbers[agentName] = `${String(nextAgentSequence(agentName, brokerNumber)).padStart(4, "0")}_${brokerNumber}`;
+        order.agentOrderNumbers[agentName] = `${String(nextAgentSequence(agentName)).padStart(actorLedgerSequenceWidth(agentName), "0")}_${brokerNumber}`;
       }
       order.agentOrderNumber = order.agentOrderNumbers[agentName];
       order.agentOrderActor = agentName;
@@ -6444,6 +6555,7 @@
       const journalId = nextJournalId();
       const postedAt = new Date().toISOString();
       const entryId = nextManualJournalEntryId();
+      const actorLedgerNumber = nextActorLedgerNumber(actorName, entryId);
       const masterTransactionCycle = Number(state.masterTransactionCycle || 0);
       const detailBits = [
         `Journal add ${money(sourceCurrency, sourceAmountMinor)} to ${money(currency, amountMinor)}`,
@@ -6453,6 +6565,7 @@
       state.ledger.unshift({
         journal: journalId,
         entryId,
+        actorLedgerNumber,
         source: "JOURNAL",
         account: `${actorName} ACTOR_CLEARING`,
         direction: "Debit",
@@ -6473,10 +6586,11 @@
       const journalId = nextJournalId();
       const postedAt = new Date().toISOString();
       const entryId = nextWithdrawalEntryId();
+      const actorLedgerNumber = nextActorLedgerNumber(actorName, entryId);
       const masterTransactionCycle = Number(state.masterTransactionCycle || 0);
       const details = [`Withdrawal ${money(currency, amountMinor)} from ${actorName}`, remarks ? `Remarks: ${remarks}` : ""].filter(Boolean).join(" - ");
       state.ledger.unshift(
-        { journal: journalId, entryId, source: "WITHDRAWAL", account: `${actorName} ACTOR_CLEARING`, direction: "Credit", currency, amountMinor, masterTransactionCycle, details, postedAt },
+        { journal: journalId, entryId, actorLedgerNumber, source: "WITHDRAWAL", account: `${actorName} ACTOR_CLEARING`, direction: "Credit", currency, amountMinor, masterTransactionCycle, details, postedAt },
         { journal: journalId, entryId, source: "WITHDRAWAL", account: "MASTER_FX_CLEARING", direction: "Debit", currency, amountMinor, masterTransactionCycle, details, postedAt }
       );
       syncSettlementsFromLedger();
@@ -8714,11 +8828,12 @@
     function ledgerReferenceNumber(line, viewer = selectedActor(), contextActor = null) {
       const order = orderForLedgerLine(line);
       if (order) return orderDisplayNumber(order, viewer, contextActor);
+      if (line.actorLedgerNumber) return line.actorLedgerNumber;
       if (line.orderId) return line.orderId;
-      if (line.transferId) return line.transferId;
-      if (line.entryId) return line.entryId;
+      if (line.transferId) return formattedLedgerTransactionReference(line.transferId);
+      if (line.entryId) return formattedLedgerTransactionReference(line.entryId);
       const transfer = transferForLedgerLine(line);
-      if (transfer) return transfer.id;
+      if (transfer) return formattedLedgerTransactionReference(transfer.id);
       return "";
     }
 
@@ -9675,10 +9790,10 @@
       const activeOrders = visibleOrders
         .filter((order) => !["Voided", "Cancelled"].includes(order.state) && order.locked !== true)
         .sort(orderSortForActor(actor));
-      const brokerCancelledOrders = actor?.role === "Master"
-        ? []
-        : visibleOrders.filter((order) => order.state === "Cancelled" && order.broker === actor?.name);
-      const orderbookOrders = (actor?.role === "Master" ? visibleOrders : [...activeOrders, ...brokerCancelledOrders]).slice().sort(orderSortForActor(actor));
+      const orderbookOrders = (actor?.role === "Master"
+        ? visibleOrders
+        : visibleOrders.filter((order) => orderAppearsInOrderbookForActor(order, actor))
+      ).slice().sort(orderSortForActor(actor));
       const rowsForOrders = (orders) => orders.map((order) => {
         const payoutAgent = payingAgentLabel(order);
         const stateLabel = actor?.role === "Master" && order.state === "Assigned" && payoutAgent !== "Unassigned"
@@ -9966,6 +10081,16 @@
       return `archive:${text(archive?.id)}:${text(currency)}`;
     }
 
+    function orderAppearsInOrderbookForActor(order, actor) {
+      if (!order || !actor) return false;
+      if (actor.role === "Master") return true;
+      const isBroker = order.broker === actor.name;
+      const isPayer = order.agent === actor.name || Boolean(order.agentActorId && order.agentActorId === actor.id);
+      if (!isBroker && !isPayer) return false;
+      if (order.state === "Cancelled") return isBroker;
+      return order.state !== "Voided" && order.locked !== true;
+    }
+
     function orderSearchResult(order, viewer, type = "Order", statusOverride = "") {
       const sourceCurrency = order.sourceCurrency || "USD";
       const payoutCurrency = order.payoutCurrency || sourceCurrency;
@@ -9996,6 +10121,7 @@
         destinationActor: order.searchArchiveActor || "",
         destinationArchiveId: order.searchArchiveId || "",
         destinationClosedAt: order.searchArchiveClosedAt || "",
+        destinationAvailable: Boolean(order.searchArchiveId) || orderAppearsInOrderbookForActor(order, viewer),
         type,
         date: order.paidAt || order.sentAt || order.createdAt || order.archivedAt || "",
         time: new Date(order.paidAt || order.sentAt || order.createdAt || order.archivedAt || 0).getTime() || 0,
@@ -10333,6 +10459,12 @@
       })[0];
     }
 
+    function viewerCanOpenSearchResult(result, viewer) {
+      if (!result?.destinationView || !viewer) return false;
+      if (!privilegeViews(viewer.role, viewer).includes(result.destinationView)) return false;
+      return result.destinationAvailable !== false;
+    }
+
     function consolidateGlobalSearchResults(results, viewer) {
       const grouped = new Map();
       results.forEach((result, index) => {
@@ -10341,9 +10473,12 @@
         grouped.get(key).push(result);
       });
       return Array.from(grouped.entries()).flatMap(([key, group]) => {
-        if (key.startsWith("single:")) return group;
+        if (key.startsWith("single:")) {
+          return viewer?.role === "Master" ? group : group.filter((result) => viewerCanOpenSearchResult(result, viewer));
+        }
         if (viewer?.role !== "Master") {
-          const preferred = preferredGroupedSearchResult(group, viewer?.name || "");
+          const openableResults = group.filter((result) => viewerCanOpenSearchResult(result, viewer));
+          const preferred = preferredGroupedSearchResult(openableResults, viewer?.name || "");
           return preferred ? [{ ...preferred, actors: viewer?.name || preferred.actors }] : [];
         }
         const participants = uniqueSearchParticipants(group.flatMap((result) => [
@@ -10478,7 +10613,13 @@
 
     function prepareLedgerSearchDestination(result) {
       const viewer = selectedActor();
-      if (viewer?.role !== "Master") return;
+      if (viewer?.role !== "Master") {
+        if (!viewer) return;
+        state.selectedLedgerActor = viewer.name;
+        renderLedgerActorSelector();
+        renderLedger();
+        return;
+      }
       const actorName = result.destinationActor || result.searchParticipant || result.actors;
       const ledgerActor = activeActors().find((actor) => actor.name === actorName && actor.role !== "Master");
       if (!ledgerActor) return;
@@ -11382,7 +11523,7 @@
       });
       (archive.ledger || []).forEach((line) => {
         const date = line.postedAt || archive.closedAt;
-        const reference = line.entryId || line.transferId || line.orderId || line.journal;
+        const reference = line.actorLedgerNumber || line.entryId || line.transferId || line.orderId || line.journal;
         const details = line.details || `${line.account} ${line.direction}`;
         addRow({
           date,
@@ -11593,15 +11734,17 @@
       transfer.masterTransactionCycle = Number(transfer.masterTransactionCycle || state.masterTransactionCycle || 0);
       const transferRecordKey = transferIdentity(transfer);
       const details = transferLedgerDetails(transfer);
+      const receivingLedgerNumber = nextActorLedgerNumber(transfer.to, transfer.id);
+      const sendingLedgerNumber = nextActorLedgerNumber(transfer.from, transfer.id);
       state.ledger.unshift(
-        { journal: journalId, transferId: transfer.id, transferRecordKey, source: "TRANSFER", account: transfer.to, direction: "Debit", currency: transfer.currency, amountMinor: payoutAmountMinor, masterTransactionCycle: transfer.masterTransactionCycle, details, postedAt },
+        { journal: journalId, transferId: transfer.id, transferRecordKey, actorLedgerNumber: receivingLedgerNumber, source: "TRANSFER", account: transfer.to, direction: "Debit", currency: transfer.currency, amountMinor: payoutAmountMinor, masterTransactionCycle: transfer.masterTransactionCycle, details, postedAt },
         { journal: journalId, transferId: transfer.id, transferRecordKey, source: "TRANSFER", account: "MASTER_FX_CLEARING", direction: "Credit", currency: transfer.currency, amountMinor: payoutAmountMinor, masterTransactionCycle: transfer.masterTransactionCycle, details, postedAt },
         { journal: journalId, transferId: transfer.id, transferRecordKey, source: "TRANSFER", account: "MASTER_FX_CLEARING", direction: "Debit", currency: sourceCurrency, amountMinor: sourceAmountMinor, masterTransactionCycle: transfer.masterTransactionCycle, details, postedAt },
-        { journal: journalId, transferId: transfer.id, transferRecordKey, source: "TRANSFER", account: transfer.from, direction: "Credit", currency: sourceCurrency, amountMinor: sourceAmountMinor, masterTransactionCycle: transfer.masterTransactionCycle, details, postedAt }
+        { journal: journalId, transferId: transfer.id, transferRecordKey, actorLedgerNumber: sendingLedgerNumber, source: "TRANSFER", account: transfer.from, direction: "Credit", currency: sourceCurrency, amountMinor: sourceAmountMinor, masterTransactionCycle: transfer.masterTransactionCycle, details, postedAt }
       );
       if (commissionMinor > 0) {
         state.ledger.unshift(
-          { journal: journalId, transferId: transfer.id, transferRecordKey, source: "TRANSFER", account: transfer.from, direction: "Debit", currency: sourceCurrency, amountMinor: commissionMinor, masterTransactionCycle: transfer.masterTransactionCycle, details, postedAt },
+          { journal: journalId, transferId: transfer.id, transferRecordKey, actorLedgerNumber: sendingLedgerNumber, source: "TRANSFER", account: transfer.from, direction: "Debit", currency: sourceCurrency, amountMinor: commissionMinor, masterTransactionCycle: transfer.masterTransactionCycle, details, postedAt },
           { journal: journalId, transferId: transfer.id, transferRecordKey, source: "TRANSFER", account: "MASTER_FEE_REVENUE", direction: "Credit", currency: sourceCurrency, amountMinor: commissionMinor, masterTransactionCycle: transfer.masterTransactionCycle, details, postedAt }
         );
       }
@@ -11774,10 +11917,18 @@
         const journalId = nextJournalId();
         const postedAt = new Date().toISOString();
         const details = `Reversal of ${transfer.id} - ${transferLedgerDetails(transfer)}`;
+        const actorLedgerNumbers = new Map();
+        originalLines.forEach((line) => {
+          const actorName = actorNameFromAccount(line.account);
+          if (actorName && !actorLedgerNumbers.has(actorName)) {
+            actorLedgerNumbers.set(actorName, nextActorLedgerNumber(actorName, transfer.id));
+          }
+        });
         state.ledger.unshift(...originalLines.map((line) => ({
           journal: journalId,
           transferId: transfer.id,
           transferRecordKey: transferIdentity(transfer),
+          actorLedgerNumber: actorLedgerNumbers.get(actorNameFromAccount(line.account)) || "",
           source: "TRANSFER_REVERSAL",
           account: line.account,
           direction: line.direction === "Debit" ? "Credit" : "Debit",
@@ -12044,6 +12195,7 @@
         actor: actorName,
         journal: line.journal || "",
         entryId: line.entryId || "",
+        actorLedgerNumber: line.actorLedgerNumber || "",
         transferId: line.transferId || "",
         transferRecordKey: line.transferRecordKey || "",
         orderId: line.orderId || "",
