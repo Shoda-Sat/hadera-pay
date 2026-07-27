@@ -70,6 +70,7 @@ import {
   cancelOrder,
   calculableLedgerLines,
   collectReceivable,
+  commissionLiabilityOptions,
   createChatGroup,
   createInternalTransfer,
   createManagedActor,
@@ -113,6 +114,7 @@ import type {
   ActorRole,
   AppScreen,
   ChatMessageRecord,
+  CommissionLiability,
   Currency,
   InternalTransferDraft,
   InternalTransferForwardDraft,
@@ -652,6 +654,7 @@ const emptyTransfer: InternalTransferDraft = {
   payoutAmount: "",
   rate: "1",
   commissionPercent: "",
+  commissionLiability: "",
   remarks: ""
 };
 
@@ -664,7 +667,17 @@ export function TransfersScreen(props: CommonProps) {
   const [editingTransferId, setEditingTransferId] = useState("");
   const conversionTouches = useRef<OrderConversionField[]>([]);
   const [busy, setBusy] = useState(false);
-  const [journal, setJournal] = useState({ actorId: "", sourceCurrency: "USD" as Currency, sourceAmount: "", currency: "USD" as Currency, amount: "", rate: "1", remarks: "" });
+  const [journal, setJournal] = useState({
+    actorId: "",
+    sourceCurrency: "USD" as Currency,
+    sourceAmount: "",
+    currency: "USD" as Currency,
+    amount: "",
+    rate: "1",
+    commissionPercent: "",
+    commissionLiability: "" as CommissionLiability | "",
+    remarks: ""
+  });
   const targets = transferTargetsFor(session, state);
   const receivingActor = targets.find((target) => target.id === draft.toActorId);
   const payoutCurrencies = actorTransferReceiveCurrencies(receivingActor);
@@ -716,7 +729,10 @@ export function TransfersScreen(props: CommonProps) {
       payoutCurrency,
       rate: String(rate),
       payoutAmount: inputAmount(payoutCurrency, sourceAmount * rate),
-      commissionPercent: String(Number(transfer.commissionPercent || 0))
+      commissionPercent: String(Number(transfer.commissionPercent || 0)),
+      commissionLiability: Number(transfer.commissionMinor || 0) > 0
+        ? transfer.commissionLiability || "Sender"
+        : ""
     };
   };
 
@@ -803,6 +819,9 @@ export function TransfersScreen(props: CommonProps) {
       payoutAmount: inputAmount(transfer.currency, majorFromMinor(transfer.amountMinor, transfer.currency)),
       rate: String(transfer.rate || 1),
       commissionPercent: String(Number(transfer.commissionPercent || 0)),
+      commissionLiability: Number(transfer.commissionMinor || 0) > 0
+        ? transfer.commissionLiability || "Sender"
+        : "",
       remarks: transfer.remarks || ""
     });
   };
@@ -830,7 +849,10 @@ export function TransfersScreen(props: CommonProps) {
           <SelectRow label="Payout currency" options={payoutCurrencies.length ? payoutCurrencies : [draft.payoutCurrency]} value={draft.payoutCurrency} onChange={(value) => setDraft({ ...draft, payoutCurrency: value })} />
           <Field label="Rate" value={draft.rate} onChangeText={(value) => setConversionField("rate", value)} keyboardType="decimal-pad" />
           <Field label="Payout amount" value={draft.payoutAmount} onChangeText={(value) => setConversionField("payoutAmount", value)} keyboardType="decimal-pad" />
-          <Field label="Percent" value={draft.commissionPercent} onChangeText={(value) => setDraft({ ...draft, commissionPercent: value })} keyboardType="decimal-pad" />
+          <Field label="Commission %" value={draft.commissionPercent} onChangeText={(value) => setDraft({ ...draft, commissionPercent: value, commissionLiability: Number(value || 0) > 0 ? draft.commissionLiability : "" })} keyboardType="decimal-pad" />
+          {Number(draft.commissionPercent || 0) > 0 ? (
+            <SelectRow label="Whose liability is the commission?" options={commissionLiabilityOptions} value={draft.commissionLiability as CommissionLiability} onChange={(value) => setDraft({ ...draft, commissionLiability: value })} />
+          ) : null}
           <Field label="Remarks" value={draft.remarks} onChangeText={(value) => setDraft({ ...draft, remarks: value })} multiline />
           <View style={styles.rowButtons}>
             <Button label={editingTransferId ? "Resubmit transfer" : "Send transfer"} loading={busy} disabled={offline} onPress={submitTransfer} style={styles.flexButton} />
@@ -848,8 +870,12 @@ export function TransfersScreen(props: CommonProps) {
             <Field label="Rate" value={journal.rate} onChangeText={(value) => setJournal({ ...journal, rate: value, amount: inputAmount(journal.currency, parseAmount(journal.sourceAmount) * Number(value || 0)) })} keyboardType="decimal-pad" />
             <Field label="Converted amount" value={journal.amount} onChangeText={(value) => setJournal({ ...journal, amount: value })} keyboardType="decimal-pad" />
           </> : <><SelectRow label="Currency" options={supportedCurrencies} value={journal.currency} onChange={(value) => setJournal({ ...journal, currency: value })} /><Field label="Amount" value={journal.amount} onChangeText={(value) => setJournal({ ...journal, amount: value })} keyboardType="decimal-pad" /></>}
+          <Field label="Commission %" value={journal.commissionPercent} onChangeText={(value) => setJournal({ ...journal, commissionPercent: value, commissionLiability: Number(value || 0) > 0 ? journal.commissionLiability : "" })} keyboardType="decimal-pad" />
+          {Number(journal.commissionPercent || 0) > 0 ? (
+            <SelectRow label="Whose liability is the commission?" options={commissionLiabilityOptions} value={journal.commissionLiability as CommissionLiability} onChange={(value) => setJournal({ ...journal, commissionLiability: value })} />
+          ) : null}
           <Field label="Remarks" value={journal.remarks} onChangeText={(value) => setJournal({ ...journal, remarks: value })} multiline />
-          <Button label={`Post ${mode.toLowerCase()}`} loading={busy} disabled={offline} onPress={() => run(() => mode === "Journal" ? postActorJournal(journal) : postActorWithdrawal({ actorId: journal.actorId, currency: journal.currency, amount: journal.amount, remarks: journal.remarks }))} />
+          <Button label={`Post ${mode.toLowerCase()}`} loading={busy} disabled={offline} onPress={() => run(() => mode === "Journal" ? postActorJournal(journal) : postActorWithdrawal({ actorId: journal.actorId, currency: journal.currency, amount: journal.amount, commissionPercent: journal.commissionPercent, commissionLiability: journal.commissionLiability, remarks: journal.remarks }))} />
         </Panel>
       )}
       <Panel title="Transfer history" badge={String(transfers.length)}>
@@ -872,6 +898,7 @@ export function TransfersScreen(props: CommonProps) {
                 <Text style={styles.muted}>
                   {compactAmount(transfer.sourceCurrency, majorFromMinor(transfer.sourceAmountMinor, transfer.sourceCurrency))} to {compactAmount(transfer.currency, majorFromMinor(transfer.amountMinor, transfer.currency))}{transfer.remarks ? ` - ${transfer.remarks}` : ""}
                 </Text>
+                {Number(transfer.commissionMinor || 0) > 0 ? <Text style={styles.muted}>Commission liability: {transfer.commissionLiability || "Sender"}</Text> : null}
               </View>
               <Pill label={transfer.state} tone={tone(transfer.state)} />
               {pendingMaster ? (
@@ -892,7 +919,10 @@ export function TransfersScreen(props: CommonProps) {
                       <SelectRow label="Payout currency" options={forwardCurrencies.length ? forwardCurrencies : [forwardDraft.payoutCurrency]} value={forwardDraft.payoutCurrency} onChange={(value) => setForwardDrafts((current) => ({ ...current, [transfer.id]: { ...(current[transfer.id] || forwardDraft), payoutCurrency: value } }))} />
                       <Field label="Rate" value={forwardDraft.rate} onChangeText={(value) => updateForwardRate(transfer, value)} keyboardType="decimal-pad" />
                       <Field label="Payout amount" value={forwardDraft.payoutAmount} onChangeText={(value) => updateForwardPayout(transfer, value)} keyboardType="decimal-pad" />
-                      <Field label="Percent (%)" value={forwardDraft.commissionPercent} onChangeText={(value) => setForwardDrafts((current) => ({ ...current, [transfer.id]: { ...(current[transfer.id] || forwardDraft), commissionPercent: value } }))} keyboardType="decimal-pad" />
+                      <Field label="Commission %" value={forwardDraft.commissionPercent} onChangeText={(value) => setForwardDrafts((current) => ({ ...current, [transfer.id]: { ...(current[transfer.id] || forwardDraft), commissionPercent: value, commissionLiability: Number(value || 0) > 0 ? (current[transfer.id] || forwardDraft).commissionLiability : "" } }))} keyboardType="decimal-pad" />
+                      {Number(forwardDraft.commissionPercent || 0) > 0 ? (
+                        <SelectRow label="Whose liability is the commission?" options={commissionLiabilityOptions} value={forwardDraft.commissionLiability as CommissionLiability} onChange={(value) => setForwardDrafts((current) => ({ ...current, [transfer.id]: { ...(current[transfer.id] || forwardDraft), commissionLiability: value } }))} />
+                      ) : null}
                       <Button label="Forward for acceptance" disabled={offline || busy || !forwardReceiver} loading={busy} onPress={() => submitForward(transfer)} />
                     </View>
                   ) : null}
@@ -1042,12 +1072,14 @@ export function SearchScreen({ session, state, onNavigate }: CommonProps) {
     const payoutCurrency = transfer.currency || sourceCurrency;
     const sourceAmount = compactAmount(sourceCurrency, majorFromMinor(Number(transfer.sourceAmountMinor || transfer.amountMinor || 0), sourceCurrency));
     const payoutAmount = compactAmount(payoutCurrency, majorFromMinor(Number(transfer.amountMinor || 0), payoutCurrency));
+    const commissionMinor = Number(transfer.commissionMinor || 0);
     const details = [
       transfer.from ? `From: ${transfer.from}` : "",
       transfer.to ? `To: ${transfer.to}` : "",
       transfer.forwardedAt && transfer.requestedTo ? `Originally sent to: ${transfer.requestedTo}` : "",
       transfer.forwardedBy ? `Forwarded by: ${transfer.forwardedBy}` : "",
       transfer.acceptedBy ? `Accepted by: ${transfer.acceptedBy}` : "",
+      commissionMinor > 0 ? `Commission: ${compactAmount(sourceCurrency, majorFromMinor(commissionMinor, sourceCurrency))} - Liability: ${transfer.commissionLiability || "Sender"}` : "",
       transfer.remarks ? `Remarks: ${transfer.remarks}` : "",
       transfer.journal ? `Journal: ${transfer.journal}` : "",
       transfer.reversalJournal ? `Reversal: ${transfer.reversalJournal}` : ""

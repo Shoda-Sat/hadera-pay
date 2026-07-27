@@ -252,6 +252,7 @@ export interface LedgerLine {
 }
 
 export type TransferState = "Pending Approval" | "Pending Acceptance" | "Approved" | "Returned" | "Rejected" | "Reversed";
+export type CommissionLiability = "Sender" | "Master" | "Receiver";
 
 export interface InternalTransferRecord {
   id: string;
@@ -266,6 +267,7 @@ export interface InternalTransferRecord {
   rate: number | string;
   commissionPercent?: number;
   commissionMinor?: number;
+  commissionLiability?: CommissionLiability;
   remarks: string;
   details?: string;
   state: TransferState;
@@ -287,6 +289,7 @@ export interface InternalTransferRecord {
   requestedRate?: number | string;
   requestedCommissionPercent?: number;
   requestedCommissionMinor?: number;
+  requestedCommissionLiability?: CommissionLiability;
   forwardedBy?: string;
   forwardedAt?: string;
   acceptedBy?: string;
@@ -381,6 +384,7 @@ export interface ArchiveRecord {
     initiatedBy?: string;
     commissionPercent?: number;
     commissionMinor?: number;
+    commissionLiability?: CommissionLiability;
     requestedTo?: string;
     requestedToActorId?: string;
     requestedCurrency?: Currency;
@@ -388,6 +392,7 @@ export interface ArchiveRecord {
     requestedRate?: string | number;
     requestedCommissionPercent?: number;
     requestedCommissionMinor?: number;
+    requestedCommissionLiability?: CommissionLiability;
     forwardedBy?: string;
     forwardedAt?: string;
     acceptedBy?: string;
@@ -452,6 +457,7 @@ export interface InternalTransferDraft {
   payoutAmount: string;
   rate: string;
   commissionPercent: string;
+  commissionLiability: CommissionLiability | "";
   remarks: string;
 }
 
@@ -461,6 +467,7 @@ export interface InternalTransferForwardDraft {
   payoutAmount: string;
   rate: string;
   commissionPercent: string;
+  commissionLiability: CommissionLiability | "";
 }
 
 export interface InviteRecord {

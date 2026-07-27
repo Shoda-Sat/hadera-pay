@@ -2839,6 +2839,15 @@
                       <label for="transferPercent">Commission %</label>
                       <input id="transferPercent" inputmode="decimal" value="0">
                     </div>
+                    <div class="field hidden" id="transferCommissionLiabilityField">
+                      <label for="transferCommissionLiability">Whose liability is the commission?</label>
+                      <select id="transferCommissionLiability">
+                        <option value="">Choose liability</option>
+                        <option>Sender</option>
+                        <option>Master</option>
+                        <option>Receiver</option>
+                      </select>
+                    </div>
                     <div class="field full">
                       <label for="transferRemarks">Remarks</label>
                       <textarea id="transferRemarks" placeholder="Add transfer notes"></textarea>
@@ -2889,6 +2898,19 @@
                       <label for="ledgerJournalAmount">Ledger amount</label>
                       <input id="ledgerJournalAmount" class="ledger-tool-input" inputmode="decimal" placeholder="0.00">
                     </div>
+                    <div class="field">
+                      <label for="ledgerJournalPercent">Commission %</label>
+                      <input id="ledgerJournalPercent" class="ledger-tool-input" inputmode="decimal" value="0">
+                    </div>
+                    <div class="field hidden" id="ledgerJournalCommissionLiabilityField">
+                      <label for="ledgerJournalCommissionLiability">Whose liability is the commission?</label>
+                      <select id="ledgerJournalCommissionLiability" class="ledger-tool-input">
+                        <option value="">Choose liability</option>
+                        <option>Sender</option>
+                        <option>Master</option>
+                        <option>Receiver</option>
+                      </select>
+                    </div>
                     <div class="field full">
                       <label for="ledgerJournalRemarks">Remarks</label>
                       <textarea id="ledgerJournalRemarks" class="ledger-tool-input" placeholder="Add journal notes"></textarea>
@@ -2922,6 +2944,19 @@
                     <div class="field">
                       <label for="ledgerWithdrawalAmount">Amount</label>
                       <input id="ledgerWithdrawalAmount" class="ledger-tool-input" inputmode="decimal" placeholder="0.00">
+                    </div>
+                    <div class="field">
+                      <label for="ledgerWithdrawalPercent">Commission %</label>
+                      <input id="ledgerWithdrawalPercent" class="ledger-tool-input" inputmode="decimal" value="0">
+                    </div>
+                    <div class="field hidden" id="ledgerWithdrawalCommissionLiabilityField">
+                      <label for="ledgerWithdrawalCommissionLiability">Whose liability is the commission?</label>
+                      <select id="ledgerWithdrawalCommissionLiability" class="ledger-tool-input">
+                        <option value="">Choose liability</option>
+                        <option>Sender</option>
+                        <option>Master</option>
+                        <option>Receiver</option>
+                      </select>
                     </div>
                     <div class="field full">
                       <label for="ledgerWithdrawalRemarks">Remarks</label>
@@ -4109,6 +4144,27 @@
       return Math.round(sourceAmountMinor * transferCommissionPercent(transfer) / 100);
     }
 
+    const commissionLiabilityOptions = ["Sender", "Master", "Receiver"];
+
+    function normalizedCommissionLiability(value, commissionMinor = 0) {
+      const clean = String(value || "").trim();
+      if (commissionLiabilityOptions.includes(clean)) return clean;
+      return Number(commissionMinor || 0) > 0 ? "Sender" : "";
+    }
+
+    function commissionLiabilityAccount(liability, senderName, receiverName, actorClearingSuffix = false) {
+      const normalized = normalizedCommissionLiability(liability, 1) || "Sender";
+      const liableName = normalized === "Sender" ? senderName : normalized === "Receiver" ? receiverName : "";
+      const master = masterName();
+      if (!liableName || liableName === "Master" || liableName === master || normalized === "Master") {
+        return { account: "MASTER_COMMISSION_EXPENSE", actorName: "" };
+      }
+      return {
+        account: actorClearingSuffix ? `${liableName} ACTOR_CLEARING` : liableName,
+        actorName: liableName
+      };
+    }
+
     const state = loadState();
 
     function assignCurrentMasterTransactionCycle() {
@@ -5071,6 +5127,8 @@
       transferRate: document.getElementById("transferRate"),
       transferPayoutAmount: document.getElementById("transferPayoutAmount"),
       transferPercent: document.getElementById("transferPercent"),
+      transferCommissionLiabilityField: document.getElementById("transferCommissionLiabilityField"),
+      transferCommissionLiability: document.getElementById("transferCommissionLiability"),
       transferCurrency: document.getElementById("transferCurrency"),
       transferRemarks: document.getElementById("transferRemarks"),
       transferError: document.getElementById("transferError"),
@@ -5085,12 +5143,18 @@
       ledgerJournalRate: document.getElementById("ledgerJournalRate"),
       ledgerJournalCurrency: document.getElementById("ledgerJournalCurrency"),
       ledgerJournalAmount: document.getElementById("ledgerJournalAmount"),
+      ledgerJournalPercent: document.getElementById("ledgerJournalPercent"),
+      ledgerJournalCommissionLiabilityField: document.getElementById("ledgerJournalCommissionLiabilityField"),
+      ledgerJournalCommissionLiability: document.getElementById("ledgerJournalCommissionLiability"),
       ledgerJournalRemarks: document.getElementById("ledgerJournalRemarks"),
       ledgerJournalError: document.getElementById("ledgerJournalError"),
       ledgerWithdrawalForm: document.getElementById("ledgerWithdrawalForm"),
       ledgerWithdrawalActor: document.getElementById("ledgerWithdrawalActor"),
       ledgerWithdrawalCurrency: document.getElementById("ledgerWithdrawalCurrency"),
       ledgerWithdrawalAmount: document.getElementById("ledgerWithdrawalAmount"),
+      ledgerWithdrawalPercent: document.getElementById("ledgerWithdrawalPercent"),
+      ledgerWithdrawalCommissionLiabilityField: document.getElementById("ledgerWithdrawalCommissionLiabilityField"),
+      ledgerWithdrawalCommissionLiability: document.getElementById("ledgerWithdrawalCommissionLiability"),
       ledgerWithdrawalRemarks: document.getElementById("ledgerWithdrawalRemarks"),
       ledgerWithdrawalError: document.getElementById("ledgerWithdrawalError"),
       chatConversationList: document.getElementById("chatConversationList"),
@@ -6430,6 +6494,14 @@
         els.transferSubmitLabel.textContent = "Send Transfer";
         els.cancelTransferEditButton.classList.add("hidden");
       }
+      updateCommissionLiabilityVisibility(els.transferPercent, els.transferCommissionLiabilityField, els.transferCommissionLiability);
+    }
+
+    function updateCommissionLiabilityVisibility(percentInput, field, select) {
+      if (!percentInput || !field || !select) return;
+      const hasCommission = Number(percentInput.value || 0) > 0;
+      field.classList.toggle("hidden", !hasCommission);
+      if (!hasCommission) select.value = "";
     }
 
     function renderLedgerActorSelector() {
@@ -6525,6 +6597,8 @@
       els.ledgerJournalCurrency.value = supportedCurrencies.includes(previousJournalCurrency) ? previousJournalCurrency : "USD";
       els.ledgerWithdrawalCurrency.value = supportedCurrencies.includes(previousWithdrawalCurrency) ? previousWithdrawalCurrency : "USD";
       updateJournalConversion("rate", false);
+      updateCommissionLiabilityVisibility(els.ledgerJournalPercent, els.ledgerJournalCommissionLiabilityField, els.ledgerJournalCommissionLiability);
+      updateCommissionLiabilityVisibility(els.ledgerWithdrawalPercent, els.ledgerWithdrawalCommissionLiabilityField, els.ledgerWithdrawalCommissionLiability);
     }
 
     function updateJournalConversion(changedField, recordTouch = true) {
@@ -6573,7 +6647,7 @@
       }
     }
 
-    function postActorJournal({ actorName, sourceCurrency, sourceAmountMinor, currency, amountMinor, rate, remarks }) {
+    function postActorJournal({ actorName, sourceCurrency, sourceAmountMinor, currency, amountMinor, rate, commissionPercent, commissionMinor, commissionLiability, remarks }) {
       const journalId = nextJournalId();
       const postedAt = new Date().toISOString();
       const entryId = nextManualJournalEntryId();
@@ -6582,6 +6656,7 @@
       const detailBits = [
         `Journal add ${money(sourceCurrency, sourceAmountMinor)} to ${money(currency, amountMinor)}`,
         `Rate ${formatRate(rate)}`,
+        commissionMinor > 0 ? `Commission: ${money(sourceCurrency, commissionMinor)} - Liability: ${commissionLiability}` : "",
         remarks ? `Remarks: ${remarks}` : ""
       ].filter(Boolean);
       state.ledger.unshift({
@@ -6596,25 +6671,46 @@
         sourceCurrency,
         sourceAmountMinor,
         rate,
+        commissionPercent,
+        commissionMinor,
+        commissionLiability: commissionLiability || "",
         masterTransactionCycle,
         details: detailBits.join(" - "),
         postedAt
       });
+      if (commissionMinor > 0) {
+        const liabilityAccount = commissionLiabilityAccount(commissionLiability, masterName(), actorName, true);
+        state.ledger.unshift(
+          { journal: journalId, entryId, actorLedgerNumber: liabilityAccount.actorName ? actorLedgerNumber : "", source: "JOURNAL_COMMISSION", account: liabilityAccount.account, direction: "Debit", currency: sourceCurrency, amountMinor: commissionMinor, commissionPercent, commissionLiability, masterTransactionCycle, details: detailBits.join(" - "), postedAt },
+          { journal: journalId, entryId, source: "JOURNAL_COMMISSION", account: "MASTER_FEE_REVENUE", direction: "Credit", currency: sourceCurrency, amountMinor: commissionMinor, commissionPercent, commissionLiability, masterTransactionCycle, details: detailBits.join(" - "), postedAt }
+        );
+      }
       syncSettlementsFromLedger();
       return entryId;
     }
 
-    function postActorWithdrawal({ actorName, currency, amountMinor, remarks }) {
+    function postActorWithdrawal({ actorName, currency, amountMinor, commissionPercent, commissionMinor, commissionLiability, remarks }) {
       const journalId = nextJournalId();
       const postedAt = new Date().toISOString();
       const entryId = nextWithdrawalEntryId();
       const actorLedgerNumber = nextActorLedgerNumber(actorName, entryId);
       const masterTransactionCycle = Number(state.masterTransactionCycle || 0);
-      const details = [`Withdrawal ${money(currency, amountMinor)} from ${actorName}`, remarks ? `Remarks: ${remarks}` : ""].filter(Boolean).join(" - ");
+      const details = [
+        `Withdrawal ${money(currency, amountMinor)} from ${actorName}`,
+        commissionMinor > 0 ? `Commission: ${money(currency, commissionMinor)} - Liability: ${commissionLiability}` : "",
+        remarks ? `Remarks: ${remarks}` : ""
+      ].filter(Boolean).join(" - ");
       state.ledger.unshift(
-        { journal: journalId, entryId, actorLedgerNumber, source: "WITHDRAWAL", account: `${actorName} ACTOR_CLEARING`, direction: "Credit", currency, amountMinor, masterTransactionCycle, details, postedAt },
-        { journal: journalId, entryId, source: "WITHDRAWAL", account: "MASTER_FX_CLEARING", direction: "Debit", currency, amountMinor, masterTransactionCycle, details, postedAt }
+        { journal: journalId, entryId, actorLedgerNumber, source: "WITHDRAWAL", account: `${actorName} ACTOR_CLEARING`, direction: "Credit", currency, amountMinor, commissionPercent, commissionMinor, commissionLiability: commissionLiability || "", masterTransactionCycle, details, postedAt },
+        { journal: journalId, entryId, source: "WITHDRAWAL", account: "MASTER_FX_CLEARING", direction: "Debit", currency, amountMinor, commissionPercent, commissionMinor, commissionLiability: commissionLiability || "", masterTransactionCycle, details, postedAt }
       );
+      if (commissionMinor > 0) {
+        const liabilityAccount = commissionLiabilityAccount(commissionLiability, actorName, masterName(), true);
+        state.ledger.unshift(
+          { journal: journalId, entryId, actorLedgerNumber: liabilityAccount.actorName ? actorLedgerNumber : "", source: "WITHDRAWAL_COMMISSION", account: liabilityAccount.account, direction: "Debit", currency, amountMinor: commissionMinor, commissionPercent, commissionLiability, masterTransactionCycle, details, postedAt },
+          { journal: journalId, entryId, source: "WITHDRAWAL_COMMISSION", account: "MASTER_FEE_REVENUE", direction: "Credit", currency, amountMinor: commissionMinor, commissionPercent, commissionLiability, masterTransactionCycle, details, postedAt }
+        );
+      }
       syncSettlementsFromLedger();
       return entryId;
     }
@@ -6765,6 +6861,8 @@
       els.transferRate.value = transfer.rate || "1.00";
       els.transferPayoutAmount.value = formatMinor(transfer.amountMinor, transfer.currency);
       els.transferPercent.value = formatRate(transferCommissionPercent(transfer));
+      els.transferCommissionLiability.value = normalizedCommissionLiability(transfer.commissionLiability, transferCommissionMinor(transfer));
+      updateCommissionLiabilityVisibility(els.transferPercent, els.transferCommissionLiabilityField, els.transferCommissionLiability);
       els.transferCurrency.value = transfer.currency;
       els.transferRemarks.value = transfer.remarks || "";
     }
@@ -8842,13 +8940,14 @@
       const payoutCurrency = transfer.currency || sourceCurrency;
       const commissionPercent = transferCommissionPercent(transfer);
       const commissionMinor = transferCommissionMinor(transfer);
+      const commissionLiability = normalizedCommissionLiability(transfer.commissionLiability, commissionMinor);
       const bits = [
         `${transfer.from || "Unknown"} -> ${transfer.to || "Unknown"}`,
         transfer.forwardedAt && transfer.requestedTo ? `Originally sent to ${transfer.requestedTo}` : "",
         `Source: ${money(sourceCurrency, transfer.sourceAmountMinor || transfer.amountMinor || 0)}`,
         `Payout: ${money(payoutCurrency, transfer.amountMinor || 0)}`,
         `Rate: ${formatRate(transfer.rate || 1)}`,
-        commissionPercent > 0 ? `Commission: ${money(sourceCurrency, commissionMinor)} (${formatRate(commissionPercent)}%)` : "",
+        commissionPercent > 0 ? `Commission: ${money(sourceCurrency, commissionMinor)} (${formatRate(commissionPercent)}%) - Liability: ${commissionLiability}` : "",
         transfer.forwardedBy ? `Forwarded by: ${transfer.forwardedBy}` : "",
         transfer.acceptedBy ? `Accepted by: ${transfer.acceptedBy}` : "",
         transfer.remarks ? `Remarks: ${transfer.remarks}` : ""
@@ -10199,6 +10298,7 @@
       const payoutCurrency = transfer.currency || sourceCurrency;
       const commissionPercent = transferCommissionPercent(transfer);
       const commissionMinor = transferCommissionMinor(transfer);
+      const commissionLiability = normalizedCommissionLiability(transfer.commissionLiability, commissionMinor);
       return [
         transfer.from ? `From: ${transfer.from}` : "",
         transfer.to ? `To: ${transfer.to}` : "",
@@ -10206,7 +10306,7 @@
         `Source Amount: ${money(sourceCurrency, transfer.sourceAmountMinor || transfer.amountMinor || 0)}`,
         `Payout Amount: ${money(payoutCurrency, transfer.amountMinor || 0)}`,
         transfer.rate ? `Rate: ${formatRate(transfer.rate)}` : "",
-        commissionPercent > 0 ? `Commission: ${money(sourceCurrency, commissionMinor)} (${formatRate(commissionPercent)}%)` : "",
+        commissionPercent > 0 ? `Commission: ${money(sourceCurrency, commissionMinor)} (${formatRate(commissionPercent)}%) - Liability: ${commissionLiability}` : "",
         transfer.remarks ? `Remarks: ${transfer.remarks}` : "",
         transfer.journal ? `Journal: ${transfer.journal}` : "",
         transfer.reversalJournal ? `Reversal Journal: ${transfer.reversalJournal}` : "",
@@ -11182,6 +11282,12 @@
               <label>Percent (%)
                 <input class="forward-transfer-percent" data-id="${actionId}" inputmode="decimal" value="${escapeHtml(forwardContext.draft.commissionPercent)}">
               </label>
+              <label class="forward-transfer-liability-field ${Number(forwardContext.draft.commissionPercent || 0) > 0 ? "" : "hidden"}">Commission liability
+                <select class="forward-transfer-liability" data-id="${actionId}">
+                  <option value="">Choose liability</option>
+                  ${commissionLiabilityOptions.map((option) => `<option value="${option}" ${forwardContext.draft.commissionLiability === option ? "selected" : ""}>${option}</option>`).join("")}
+                </select>
+              </label>
               <button class="btn primary forward-transfer-submit" data-id="${actionId}" type="button" ${!forwardContext.receiver || processingTransferIds.has(transfer.id) ? "disabled" : ""}>Forward for Acceptance</button>
             </div>
           `
@@ -11222,6 +11328,7 @@
         ].filter(Boolean);
         const transferPercent = transferCommissionPercent(transfer);
         const transferCommission = transferCommissionMinor(transfer);
+        const transferCommissionLiability = normalizedCommissionLiability(transfer.commissionLiability, transferCommission);
         return `
         <div class="transfer-row" data-search-target="${escapeHtml(transferSearchTargetKey(transfer))}" tabindex="-1">
           <div>
@@ -11229,7 +11336,7 @@
             ${transfer.forwardedAt && transfer.requestedTo ? `<span>Originally sent to ${escapeHtml(transfer.requestedTo)} · Forwarded by ${escapeHtml(transfer.forwardedBy || "Master")}</span>` : ""}
             ${transfer.remarks ? `<span>Remarks: ${escapeHtml(transfer.remarks)}</span>` : ""}
             <span>${money(transfer.sourceCurrency || transfer.currency, transfer.sourceAmountMinor || transfer.amountMinor)} -> ${money(transfer.currency, transfer.amountMinor)} at ${escapeHtml(transfer.rate || "1")} · ${transfer.state}</span>
-            ${transferPercent > 0 ? `<span>Commission: ${escapeHtml(formatRate(transferPercent))}% (${money(transfer.sourceCurrency || transfer.currency, transferCommission)})</span>` : ""}
+            ${transferPercent > 0 ? `<span>Commission: ${escapeHtml(formatRate(transferPercent))}% (${money(transfer.sourceCurrency || transfer.currency, transferCommission)}) · Liability: ${escapeHtml(transferCommissionLiability)}</span>` : ""}
             <span>Sent: ${escapeHtml(displayDate(transfer.sentAt || transfer.createdAt))}${transfer.paidOutAt ? ` · Paid out: ${escapeHtml(displayDate(transfer.paidOutAt))}` : ""}</span>
             <span>${escapeHtml(dateBits.join(" - "))}</span>
           </div>
@@ -11774,6 +11881,8 @@
       const payoutAmountMinor = Number(transfer.amountMinor || 0);
       const commissionMinor = transferCommissionMinor(transfer);
       transfer.commissionMinor = commissionMinor;
+      const commissionLiability = normalizedCommissionLiability(transfer.commissionLiability, commissionMinor);
+      transfer.commissionLiability = commissionLiability || "";
       transfer.recordKey ||= transferIdentity(transfer);
       transfer.masterTransactionCycle = Number(transfer.masterTransactionCycle || state.masterTransactionCycle || 0);
       const transferRecordKey = transferIdentity(transfer);
@@ -11787,9 +11896,15 @@
         { journal: journalId, transferId: transfer.id, transferRecordKey, actorLedgerNumber: sendingLedgerNumber, source: "TRANSFER", account: transfer.from, direction: "Credit", currency: sourceCurrency, amountMinor: sourceAmountMinor, masterTransactionCycle: transfer.masterTransactionCycle, details, postedAt }
       );
       if (commissionMinor > 0) {
+        const liabilityAccount = commissionLiabilityAccount(commissionLiability || "Sender", transfer.from, transfer.to);
+        const liabilityLedgerNumber = liabilityAccount.actorName === transfer.to
+          ? receivingLedgerNumber
+          : liabilityAccount.actorName === transfer.from
+            ? sendingLedgerNumber
+            : "";
         state.ledger.unshift(
-          { journal: journalId, transferId: transfer.id, transferRecordKey, actorLedgerNumber: sendingLedgerNumber, source: "TRANSFER", account: transfer.from, direction: "Debit", currency: sourceCurrency, amountMinor: commissionMinor, masterTransactionCycle: transfer.masterTransactionCycle, details, postedAt },
-          { journal: journalId, transferId: transfer.id, transferRecordKey, source: "TRANSFER", account: "MASTER_FEE_REVENUE", direction: "Credit", currency: sourceCurrency, amountMinor: commissionMinor, masterTransactionCycle: transfer.masterTransactionCycle, details, postedAt }
+          { journal: journalId, transferId: transfer.id, transferRecordKey, actorLedgerNumber: liabilityLedgerNumber, source: "TRANSFER", account: liabilityAccount.account, direction: "Debit", currency: sourceCurrency, amountMinor: commissionMinor, commissionLiability, masterTransactionCycle: transfer.masterTransactionCycle, details, postedAt },
+          { journal: journalId, transferId: transfer.id, transferRecordKey, source: "TRANSFER", account: "MASTER_FEE_REVENUE", direction: "Credit", currency: sourceCurrency, amountMinor: commissionMinor, commissionLiability, masterTransactionCycle: transfer.masterTransactionCycle, details, postedAt }
         );
       }
       syncTransferLedgerDetails(transfer);
@@ -11837,8 +11952,12 @@
             payoutCurrency: defaultCurrency,
             rate: formatRate(defaultRate),
             payoutAmount: formatMajorInput(sourceMajor * defaultRate, defaultCurrency),
-            commissionPercent: formatRate(Math.max(0, transferCommissionPercent(transfer)))
+            commissionPercent: formatRate(Math.max(0, transferCommissionPercent(transfer))),
+            commissionLiability: normalizedCommissionLiability(transfer.commissionLiability, transferCommissionMinor(transfer))
           };
+      if (!Object.prototype.hasOwnProperty.call(draft, "commissionLiability")) {
+        draft.commissionLiability = normalizedCommissionLiability(transfer.commissionLiability, transferCommissionMinor(transfer));
+      }
       forwardTransferDrafts.set(transfer.id, draft);
       return { draft, receiver, targets, currencies, sourceMajor };
     }
@@ -11850,7 +11969,10 @@
       const rate = Number(draft?.rate || 0);
       const payoutMajor = Number(draft?.payoutAmount || 0);
       const commissionPercent = Number(draft?.commissionPercent || 0);
-      if (!receiver || !actorTransferReceiveCurrencies(receiver).includes(payoutCurrency) || rate <= 0 || payoutMajor <= 0 || commissionPercent < 0) return false;
+      const commissionLiability = commissionPercent > 0 && commissionLiabilityOptions.includes(draft?.commissionLiability)
+        ? draft.commissionLiability
+        : "";
+      if (!receiver || !actorTransferReceiveCurrencies(receiver).includes(payoutCurrency) || rate <= 0 || payoutMajor <= 0 || commissionPercent < 0 || (commissionPercent > 0 && !commissionLiability)) return false;
       processingTransferIds.add(transfer.id);
       try {
         const forwardedAt = new Date().toISOString();
@@ -11865,6 +11987,7 @@
         transfer.requestedCommissionMinor = Number.isFinite(Number(transfer.requestedCommissionMinor))
           ? Number(transfer.requestedCommissionMinor)
           : transferCommissionMinor(transfer);
+        transfer.requestedCommissionLiability ||= normalizedCommissionLiability(transfer.commissionLiability, transferCommissionMinor(transfer));
         transfer.to = receiver.name;
         transfer.toActorId = receiver.id;
         transfer.currency = payoutCurrency;
@@ -11872,6 +11995,7 @@
         transfer.rate = rate;
         transfer.commissionPercent = commissionPercent;
         transfer.commissionMinor = Math.round(Number(transfer.sourceAmountMinor || 0) * commissionPercent / 100);
+        transfer.commissionLiability = commissionLiability;
         transfer.state = "Pending Acceptance";
         transfer.forwardedBy = actorName;
         transfer.forwardedAt = forwardedAt;
@@ -12218,6 +12342,7 @@
         rate: transfer.rate || "1",
         commissionPercent: transferCommissionPercent(transfer),
         commissionMinor: transferCommissionMinor(transfer),
+        commissionLiability: normalizedCommissionLiability(transfer.commissionLiability, transferCommissionMinor(transfer)),
         remarks: transfer.remarks || "",
         state: transfer.state,
         journal: transfer.journal || "",
@@ -12327,7 +12452,7 @@
         return false;
       }
       const manualLines = state.ledger.filter((line) =>
-        ["JOURNAL", "WITHDRAWAL"].includes(line.source) && !line.masterTransactionClosedAt
+        ["JOURNAL", "WITHDRAWAL", "JOURNAL_COMMISSION", "WITHDRAWAL_COMMISSION"].includes(line.source) && !line.masterTransactionClosedAt
       );
       if (!transfers.length && !manualLines.length) {
         notifyEvent("Nothing to close", "There are no open transfers, journals, or withdrawals in this period.");
@@ -12341,7 +12466,8 @@
       const transferJournals = new Set(transfers.flatMap((transfer) => [transfer.journal, transfer.reversalJournal]).filter(Boolean));
       const reportLedgerLines = manualLines.filter((line) =>
         line.source === "JOURNAL" ||
-        (line.source === "WITHDRAWAL" && line.direction === "Credit" && actorNameFromAccount(line.account))
+        (line.source === "WITHDRAWAL" && line.direction === "Credit" && actorNameFromAccount(line.account)) ||
+        (["JOURNAL_COMMISSION", "WITHDRAWAL_COMMISSION"].includes(line.source) && line.direction === "Debit" && actorNameFromAccount(line.account))
       );
 
       state.transfers = state.transfers.map((transfer) =>
@@ -12350,7 +12476,7 @@
           : transfer
       );
       state.ledger = state.ledger.map((line) => {
-        const closesManualLine = ["JOURNAL", "WITHDRAWAL"].includes(line.source) && !line.masterTransactionClosedAt;
+        const closesManualLine = ["JOURNAL", "WITHDRAWAL", "JOURNAL_COMMISSION", "WITHDRAWAL_COMMISSION"].includes(line.source) && !line.masterTransactionClosedAt;
         const closesTransferLine = ["TRANSFER", "TRANSFER_REVERSAL"].includes(line.source) && (
           (line.transferRecordKey && transferKeys.has(line.transferRecordKey)) ||
           transferJournals.has(line.journal)
@@ -13270,6 +13396,9 @@
       if (event.target === els.transferPayoutAmount) {
         updateTransferConversion("payout");
       }
+      if (event.target === els.transferPercent) {
+        updateCommissionLiabilityVisibility(els.transferPercent, els.transferCommissionLiabilityField, els.transferCommissionLiability);
+      }
     });
 
     els.transferFrom.addEventListener("change", () => {
@@ -13323,6 +13452,13 @@
         }
       } else {
         draft.commissionPercent = input.value;
+        const hasCommission = Number(input.value || 0) > 0;
+        if (!hasCommission) draft.commissionLiability = "";
+        form?.querySelector(".forward-transfer-liability-field")?.classList.toggle("hidden", !hasCommission);
+        if (!hasCommission) {
+          const liabilitySelect = form?.querySelector(".forward-transfer-liability");
+          if (liabilitySelect) liabilitySelect.value = "";
+        }
       }
       forwardTransferDrafts.set(transfer.id, draft);
     });
@@ -13330,12 +13466,14 @@
     els.transferList.addEventListener("change", (event) => {
       const select = event.target;
       const transferId = select?.dataset?.id || "";
-      if (!transferId || !select.matches(".forward-transfer-actor, .forward-transfer-currency")) return;
+      if (!transferId || !select.matches(".forward-transfer-actor, .forward-transfer-currency, .forward-transfer-liability")) return;
       const transfer = transferByIdentity(transferId);
       if (!transfer) return;
       const context = forwardTransferDraft(transfer);
       const draft = { ...context.draft };
-      if (select.matches(".forward-transfer-actor")) {
+      if (select.matches(".forward-transfer-liability")) {
+        draft.commissionLiability = select.value;
+      } else if (select.matches(".forward-transfer-actor")) {
         draft.toActorId = select.value;
         const receiver = forwardTransferTargets(transfer).find((actor) => actor.id === draft.toActorId);
         const currencies = actorTransferReceiveCurrencies(receiver);
@@ -13358,6 +13496,9 @@
       if (event.target === els.ledgerJournalAmount) {
         updateJournalConversion("payout");
       }
+      if (event.target === els.ledgerJournalPercent) {
+        updateCommissionLiabilityVisibility(els.ledgerJournalPercent, els.ledgerJournalCommissionLiabilityField, els.ledgerJournalCommissionLiability);
+      }
     });
 
     els.ledgerJournalSourceCurrency.addEventListener("change", () => {
@@ -13376,8 +13517,11 @@
       els.ledgerJournalError.classList.remove("visible");
     });
 
-    els.ledgerWithdrawalForm.addEventListener("input", () => {
+    els.ledgerWithdrawalForm.addEventListener("input", (event) => {
       els.ledgerWithdrawalError.classList.remove("visible");
+      if (event.target === els.ledgerWithdrawalPercent) {
+        updateCommissionLiabilityVisibility(els.ledgerWithdrawalPercent, els.ledgerWithdrawalCommissionLiabilityField, els.ledgerWithdrawalCommissionLiability);
+      }
     });
 
     els.ledgerWithdrawalForm.addEventListener("change", () => {
@@ -13998,6 +14142,8 @@
       els.transferPayoutAmount.value = "";
       els.transferRate.value = "1.00";
       els.transferPercent.value = "0";
+      els.transferCommissionLiability.value = "";
+      updateCommissionLiabilityVisibility(els.transferPercent, els.transferCommissionLiabilityField, els.transferCommissionLiability);
       els.transferRemarks.value = "";
       els.transferError.classList.remove("visible");
       renderAll();
@@ -14016,6 +14162,9 @@
       const sourceAmountMinor = parseMoney(els.transferAmount.value, sourceCurrency);
       const amountMinor = parseMoney(els.transferPayoutAmount.value, currency);
       const commissionMinor = Math.round(sourceAmountMinor * commissionPercent / 100);
+      const commissionLiability = commissionPercent > 0 && commissionLiabilityOptions.includes(els.transferCommissionLiability.value)
+        ? els.transferCommissionLiability.value
+        : "";
       const remarks = els.transferRemarks.value.trim();
       const sendingActor = activeActors().find((item) => item.name === from);
       const receivingActor = activeActors().find((item) => item.name === to);
@@ -14023,7 +14172,7 @@
       const receivingCurrencies = actorTransferReceiveCurrencies(receivingActor);
       const sourceCurrencyAllowed = sendingCurrencies.includes(sourceCurrency);
       const payoutCurrencyAllowed = receivingCurrencies.includes(currency);
-      const invalid = !from || !to || !sourceCurrency || !currency || !sendingActor || !sourceCurrencyAllowed || !receivingActor || !payoutCurrencyAllowed || from === to || sourceAmountMinor <= 0 || amountMinor <= 0 || rate <= 0 || commissionPercent < 0;
+      const invalid = !from || !to || !sourceCurrency || !currency || !sendingActor || !sourceCurrencyAllowed || !receivingActor || !payoutCurrencyAllowed || from === to || sourceAmountMinor <= 0 || amountMinor <= 0 || rate <= 0 || commissionPercent < 0 || (commissionPercent > 0 && !commissionLiability);
       if (from === to) {
         els.transferError.textContent = "Sender and receiver must be different.";
       } else if (!sourceCurrency || !currency) {
@@ -14038,6 +14187,8 @@
         els.transferError.textContent = `${receivingActor.name} can only receive this transfer in ${receivingActor.currency}.`;
       } else if (commissionPercent < 0) {
         els.transferError.textContent = "Enter a percentage of zero or more.";
+      } else if (commissionPercent > 0 && !commissionLiability) {
+        els.transferError.textContent = "Choose whether the commission is the Sender's, Master's, or Receiver's liability.";
       } else {
         els.transferError.textContent = "Enter transfer amount, rate, payout amount, and choose both actors.";
       }
@@ -14067,6 +14218,7 @@
         sourceAmountMinor,
         commissionPercent,
         commissionMinor,
+        commissionLiability,
         rate,
         remarks,
         state: actor?.role === "Master" ? "Approved" : "Pending Approval",
@@ -14100,6 +14252,8 @@
         els.transferAmount.value = "";
         els.transferPayoutAmount.value = "";
         els.transferPercent.value = "0";
+        els.transferCommissionLiability.value = "";
+        updateCommissionLiabilityVisibility(els.transferPercent, els.transferCommissionLiabilityField, els.transferCommissionLiability);
         els.transferRemarks.value = "";
         els.transferError.classList.remove("visible");
         notifyEvent(isResubmission ? "Transfer resubmitted" : "New transfer", transfer.state === "Pending Approval"
@@ -14121,18 +14275,28 @@
       const sourceAmountMinor = parseMoney(els.ledgerJournalSourceAmount.value, sourceCurrency);
       const amountMinor = parseMoney(els.ledgerJournalAmount.value, currency);
       const rate = Number(els.ledgerJournalRate.value) || 0;
+      const commissionPercent = Number(els.ledgerJournalPercent.value) || 0;
+      const commissionMinor = Math.round(sourceAmountMinor * commissionPercent / 100);
+      const commissionLiability = commissionPercent > 0 && commissionLiabilityOptions.includes(els.ledgerJournalCommissionLiability.value)
+        ? els.ledgerJournalCommissionLiability.value
+        : "";
       const remarks = els.ledgerJournalRemarks.value.trim();
-      const invalid = !actorName || !sourceCurrency || !currency || sourceAmountMinor <= 0 || amountMinor <= 0 || rate <= 0;
+      const invalid = !actorName || !sourceCurrency || !currency || sourceAmountMinor <= 0 || amountMinor <= 0 || rate <= 0 || commissionPercent < 0 || (commissionPercent > 0 && !commissionLiability);
       els.ledgerJournalError.textContent = invalid
-        ? "Choose an actor, currencies, rate, and amount."
+        ? commissionPercent > 0 && !commissionLiability
+          ? "Choose whether the commission is the Sender's, Master's, or Receiver's liability."
+          : "Choose an actor, currencies, rate, amount, and a commission percentage of zero or more."
         : "";
       els.ledgerJournalError.classList.toggle("visible", invalid);
       if (invalid) return;
       confirmAction("Post this journal amount to the selected actor?", () => {
-        const entryId = postActorJournal({ actorName, sourceCurrency, sourceAmountMinor, currency, amountMinor, rate, remarks });
+        const entryId = postActorJournal({ actorName, sourceCurrency, sourceAmountMinor, currency, amountMinor, rate, commissionPercent, commissionMinor, commissionLiability, remarks });
         journalConversionTouches = [];
         els.ledgerJournalSourceAmount.value = "";
         els.ledgerJournalAmount.value = "";
+        els.ledgerJournalPercent.value = "0";
+        els.ledgerJournalCommissionLiability.value = "";
+        updateCommissionLiabilityVisibility(els.ledgerJournalPercent, els.ledgerJournalCommissionLiabilityField, els.ledgerJournalCommissionLiability);
         els.ledgerJournalRemarks.value = "";
         els.ledgerJournalError.classList.remove("visible");
         notifyEvent("Journal posted", `${entryId} added to ${actorName}.`);
@@ -14180,16 +14344,26 @@
       const actorName = els.ledgerWithdrawalActor.value;
       const currency = els.ledgerWithdrawalCurrency.value;
       const amountMinor = parseMoney(els.ledgerWithdrawalAmount.value, currency);
+      const commissionPercent = Number(els.ledgerWithdrawalPercent.value) || 0;
+      const commissionMinor = Math.round(amountMinor * commissionPercent / 100);
+      const commissionLiability = commissionPercent > 0 && commissionLiabilityOptions.includes(els.ledgerWithdrawalCommissionLiability.value)
+        ? els.ledgerWithdrawalCommissionLiability.value
+        : "";
       const remarks = els.ledgerWithdrawalRemarks.value.trim();
-      const invalid = !actorName || !currency || amountMinor <= 0;
+      const invalid = !actorName || !currency || amountMinor <= 0 || commissionPercent < 0 || (commissionPercent > 0 && !commissionLiability);
       els.ledgerWithdrawalError.textContent = invalid
-        ? "Choose an actor, currency, and withdrawal amount."
+        ? commissionPercent > 0 && !commissionLiability
+          ? "Choose whether the commission is the Sender's, Master's, or Receiver's liability."
+          : "Choose an actor, currency, withdrawal amount, and a commission percentage of zero or more."
         : "";
       els.ledgerWithdrawalError.classList.toggle("visible", invalid);
       if (invalid) return;
       confirmAction("Record this withdrawal from the selected actor?", () => {
-        const entryId = postActorWithdrawal({ actorName, currency, amountMinor, remarks });
+        const entryId = postActorWithdrawal({ actorName, currency, amountMinor, commissionPercent, commissionMinor, commissionLiability, remarks });
         els.ledgerWithdrawalAmount.value = "";
+        els.ledgerWithdrawalPercent.value = "0";
+        els.ledgerWithdrawalCommissionLiability.value = "";
+        updateCommissionLiabilityVisibility(els.ledgerWithdrawalPercent, els.ledgerWithdrawalCommissionLiabilityField, els.ledgerWithdrawalCommissionLiability);
         els.ledgerWithdrawalRemarks.value = "";
         els.ledgerWithdrawalError.classList.remove("visible");
         notifyEvent("Withdrawal recorded", `${entryId} withdrew ${money(currency, amountMinor)} from ${actorName}.`);
@@ -14898,8 +15072,13 @@
         const rate = Number(context.draft.rate || 0);
         const payoutMajor = Number(String(context.draft.payoutAmount || "").replace(/,/g, "")) || 0;
         const percent = Number(context.draft.commissionPercent || 0);
-        if (!receiver || !context.currencies.includes(context.draft.payoutCurrency) || rate <= 0 || payoutMajor <= 0 || percent < 0) {
-          notifyEvent("Cannot forward transfer", "Choose a receiving Actor, currency, positive rate and payout, and a percentage of zero or more.");
+        const commissionLiability = percent > 0 && commissionLiabilityOptions.includes(context.draft.commissionLiability)
+          ? context.draft.commissionLiability
+          : "";
+        if (!receiver || !context.currencies.includes(context.draft.payoutCurrency) || rate <= 0 || payoutMajor <= 0 || percent < 0 || (percent > 0 && !commissionLiability)) {
+          notifyEvent("Cannot forward transfer", percent > 0 && !commissionLiability
+            ? "Choose whether the commission is the Sender's, Master's, or Receiver's liability."
+            : "Choose a receiving Actor, currency, positive rate and payout, and a percentage of zero or more.");
           return;
         }
         confirmAction(`Forward ${transfer.id} to ${receiver.name} for acceptance?`, async () => {
