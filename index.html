@@ -3669,6 +3669,7 @@
     let saveTimer = null;
     let suppressRemoteSave = false;
     let remoteRefreshTimer = null;
+    let actorPermissionSavePending = 0;
     let inactivityCheckTimer = null;
     let lastSessionActivityPingAt = 0;
     let sessionActivityPingPending = false;
@@ -4708,8 +4709,9 @@
     async function refreshSharedState() {
       if (!currentAuth || !remoteStateReady) return;
       refreshAccountDeviceWarning();
-      if (settingsRateInputIsFocused()) return;
+      if (actorPermissionSavePending > 0 || settingsRateInputIsFocused()) return;
       const remote = await api("/api/app-state").catch(() => null);
+      if (actorPermissionSavePending > 0) return;
       if (!mergeSharedState(remote?.state)) return;
       suppressRemoteSave = true;
       try {
@@ -13217,7 +13219,7 @@
       renderAll();
     });
 
-    document.addEventListener("change", (event) => {
+    document.addEventListener("change", async (event) => {
       const proofInput = event.target.closest(".payment-proof-input");
       if (proofInput) {
         updatePaymentProofStatus(proofInput);
@@ -13246,7 +13248,13 @@
       if (state.selectedActorId === actor.id && state.activeView === "transfers" && actor.transferEnabled === false) {
         setView("dashboard", { historyMode: "replace" });
       }
-      renderAll();
+      actorPermissionSavePending += 1;
+      try {
+        renderAll();
+        await saveStateNow();
+      } finally {
+        actorPermissionSavePending = Math.max(0, actorPermissionSavePending - 1);
+      }
     });
 
     document.addEventListener("toggle", (event) => {
