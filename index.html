@@ -4189,8 +4189,15 @@
 
     function commissionLedgerRouting(liability, senderName, receiverName, actorClearingSuffix = false) {
       const normalized = normalizedCommissionLiability(liability, 1) || "Sender";
+      const senderDebit = commissionPartyAccount(senderName, actorClearingSuffix);
       const senderCredit = commissionPartyAccount(senderName, actorClearingSuffix, "MASTER_COMMISSION_CLEARING");
       const receiverDebit = commissionPartyAccount(receiverName, actorClearingSuffix);
+      if (normalized === "Sender") {
+        return {
+          debit: senderDebit,
+          credit: { account: "MASTER_FEE_REVENUE", actorName: "" }
+        };
+      }
       if (normalized === "Receiver") {
         return {
           debit: receiverDebit,
@@ -6826,8 +6833,10 @@
         }
         const commissionMinor = transferCommissionMinor(transfer);
         const commissionLiability = normalizedCommissionLiability(transfer.commissionLiability, commissionMinor);
-        const masterReceivesCommission = commissionLiability === "Receiver" && !isMasterName(transfer.to);
-        const masterPaysCommission = commissionLiability !== "Receiver" && !isMasterName(transfer.from);
+        const masterReceivesCommission =
+          (commissionLiability === "Sender" && !isMasterName(transfer.from)) ||
+          (commissionLiability === "Receiver" && !isMasterName(transfer.to));
+        const masterPaysCommission = commissionLiability === "Master" && !isMasterName(transfer.from);
         if (commissionMinor > 0 && (masterReceivesCommission || masterPaysCommission)) {
           recordMasterBankEntry({
             id: `BANK-TRANSFER-${bankReference}-FEE`,

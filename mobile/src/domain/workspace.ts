@@ -726,8 +726,15 @@ function commissionLedgerRouting(
   receiverName: string,
   actorClearingSuffix = false
 ): { debit: { account: string; actorName: string }; credit: { account: string; actorName: string } } {
+  const senderDebit = commissionPartyAccount(state, senderName, actorClearingSuffix);
   const senderCredit = commissionPartyAccount(state, senderName, actorClearingSuffix, "MASTER_COMMISSION_CLEARING");
   const receiverDebit = commissionPartyAccount(state, receiverName, actorClearingSuffix);
+  if (liability === "Sender") {
+    return {
+      debit: senderDebit,
+      credit: { account: "MASTER_FEE_REVENUE", actorName: "" }
+    };
+  }
   if (liability === "Receiver") {
     return {
       debit: receiverDebit,
@@ -781,8 +788,10 @@ export function masterBankEntriesWithRunningBalances(state: WorkspaceState): Mas
     }
     const commissionMinor = transferCommissionMinor(transfer);
     const commissionLiability = normalizedCommissionLiability(transfer.commissionLiability, commissionMinor);
-    const masterReceivesCommission = commissionLiability === "Receiver" && !isMasterName(transfer.to);
-    const masterPaysCommission = commissionLiability !== "Receiver" && !isMasterName(transfer.from);
+    const masterReceivesCommission =
+      (commissionLiability === "Sender" && !isMasterName(transfer.from)) ||
+      (commissionLiability === "Receiver" && !isMasterName(transfer.to));
+    const masterPaysCommission = commissionLiability === "Master" && !isMasterName(transfer.from);
     if (commissionMinor > 0 && (masterReceivesCommission || masterPaysCommission)) {
       record({ id: `BANK-TRANSFER-${transfer.id}-FEE`, type: masterReceivesCommission ? "Transfer Fee Income" : "Transfer Fee Expense", reference: transfer.id, direction: masterReceivesCommission ? "Credit" : "Debit", currency: sourceCurrency, amountMinor: commissionMinor, details: `Commission (${commissionLiability}) for ${transfer.from} to ${transfer.to}${transfer.remarks ? ` - ${transfer.remarks}` : ""}`, postedAt });
     }
