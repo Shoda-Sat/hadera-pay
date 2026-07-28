@@ -15,6 +15,7 @@ export const colors = {
   assignedSoft: "#fff0d6",
   returned: "#6d3da0",
   returnedSoft: "#f2e7ff",
+  reversed: "#4a2a1a",
   cancelled: "#a33124",
   cancelledSoft: "#ffe7e3",
   voided: "#b42318",

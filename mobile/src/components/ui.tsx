@@ -23,7 +23,7 @@ function reportUserActivity(): void {
 }
 
 type ButtonVariant = "primary" | "secondary" | "danger";
-export type PillTone = "neutral" | "good" | "warn" | "danger" | "assigned" | "returned" | "cancelled" | "voided";
+export type PillTone = "neutral" | "good" | "warn" | "danger" | "assigned" | "returned" | "reversed" | "cancelled" | "voided";
 
 export function BrandHeader({ subtitle }: { subtitle?: string }) {
   return (
@@ -194,6 +194,7 @@ export function Pill({ label, tone = "neutral" }: { label: string; tone?: PillTo
       tone === "danger" && styles.pillDanger,
       tone === "assigned" && styles.pillAssigned,
       tone === "returned" && styles.pillReturned,
+      tone === "reversed" && styles.pillReversed,
       tone === "cancelled" && styles.pillCancelled,
       tone === "voided" && styles.pillVoided
     ]}>
@@ -204,6 +205,7 @@ export function Pill({ label, tone = "neutral" }: { label: string; tone?: PillTo
         tone === "danger" && styles.pillDangerText,
         tone === "assigned" && styles.pillAssignedText,
         tone === "returned" && styles.pillReturnedText,
+        tone === "reversed" && styles.pillReversedText,
         tone === "cancelled" && styles.pillCancelledText,
         tone === "voided" && styles.pillVoidedText
       ]}>
@@ -387,6 +389,9 @@ export const styles = StyleSheet.create({
   pillReturned: {
     backgroundColor: colors.returnedSoft
   },
+  pillReversed: {
+    backgroundColor: colors.reversed
+  },
   pillCancelled: {
     backgroundColor: colors.cancelledSoft
   },
@@ -413,6 +418,9 @@ export const styles = StyleSheet.create({
   },
   pillReturnedText: {
     color: colors.returned
+  },
+  pillReversedText: {
+    color: "#ffffff"
   },
   pillCancelledText: {
     color: colors.cancelled

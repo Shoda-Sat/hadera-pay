@@ -1230,6 +1230,16 @@
       color: var(--danger);
     }
 
+    .state-pill.returned {
+      background: #f2e7ff;
+      color: #6d3da0;
+    }
+
+    .state-pill.reversed {
+      background: #4a2a1a;
+      color: #ffffff;
+    }
+
     .timeline {
       display: grid;
       grid-template-columns: repeat(6, minmax(110px, 1fr));
@@ -1282,6 +1292,18 @@
       display: block;
       margin-bottom: 4px;
       overflow-wrap: anywhere;
+    }
+
+    .transfer-row-title {
+      align-items: center;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 4px;
+    }
+
+    .transfer-row-title strong {
+      margin-bottom: 0;
     }
 
     .transfer-row span {
@@ -11314,6 +11336,15 @@
         return;
       }
       els.transferList.innerHTML = visibleTransfers.map((transfer) => {
+        const statusClass = transfer.state === "Approved"
+          ? "good"
+          : transfer.state === "Rejected"
+            ? "danger"
+            : transfer.state === "Returned"
+              ? "returned"
+              : transfer.state === "Reversed"
+                ? "reversed"
+                : "";
         const actionId = escapeHtml(transferIdentity(transfer));
         const canApprove = actor?.role === "Master" && transfer.state === "Pending Approval";
         const canForward = canApprove && transferArrivedAtMaster(transfer) && !transferWasSentByMaster(transfer);
@@ -11403,10 +11434,13 @@
         return `
         <div class="transfer-row" data-search-target="${escapeHtml(transferSearchTargetKey(transfer))}" tabindex="-1">
           <div>
-            <strong>${escapeHtml(transfer.id)} - ${escapeHtml(transfer.from)} -> ${escapeHtml(transfer.to)}</strong>
+            <div class="transfer-row-title">
+              <strong>${escapeHtml(transfer.id)} - ${escapeHtml(transfer.from)} -> ${escapeHtml(transfer.to)}</strong>
+              <span class="state-pill ${statusClass}">${escapeHtml(transfer.state)}</span>
+            </div>
             ${transfer.forwardedAt && transfer.requestedTo ? `<span>Originally sent to ${escapeHtml(transfer.requestedTo)} · Forwarded by ${escapeHtml(transfer.forwardedBy || "Master")}</span>` : ""}
             ${transfer.remarks ? `<span>Remarks: ${escapeHtml(transfer.remarks)}</span>` : ""}
-            <span>${money(transfer.sourceCurrency || transfer.currency, transfer.sourceAmountMinor || transfer.amountMinor)} -> ${money(transfer.currency, transfer.amountMinor)} at ${escapeHtml(transfer.rate || "1")} · ${transfer.state}</span>
+            <span>${money(transfer.sourceCurrency || transfer.currency, transfer.sourceAmountMinor || transfer.amountMinor)} -> ${money(transfer.currency, transfer.amountMinor)} at ${escapeHtml(transfer.rate || "1")}</span>
             ${transferPercent > 0 ? `<span>Commission: ${escapeHtml(formatRate(transferPercent))}% (${money(transfer.sourceCurrency || transfer.currency, transferCommission)}) · Liability: ${escapeHtml(transferCommissionLiability)}</span>` : ""}
             ${transferSenderCommission > 0 ? `<span>Master owes ${money(transfer.sourceCurrency || transfer.currency, transferSenderCommission)} original commission to ${escapeHtml(transfer.from)}</span>` : ""}
             <span>Sent: ${escapeHtml(displayDate(transfer.sentAt || transfer.createdAt))}${transfer.paidOutAt ? ` · Paid out: ${escapeHtml(displayDate(transfer.paidOutAt))}` : ""}</span>

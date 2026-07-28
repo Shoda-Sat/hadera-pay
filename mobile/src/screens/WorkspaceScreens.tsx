@@ -174,6 +174,14 @@ function orderStatusTone(state: OrderRecord["state"]): PillTone {
   return tone(state);
 }
 
+function transferStatusTone(state: string): PillTone {
+  if (state === "Approved") return "good";
+  if (state === "Rejected") return "danger";
+  if (state === "Returned") return "returned";
+  if (state === "Reversed") return "reversed";
+  return tone(state);
+}
+
 function orderNumber(order: OrderRecord, session: UserSession): string {
   const payer = order.agent === session.actorName || order.agentActorId === session.actorId;
   if (payer && ["Agent", "Special Agent", "Special Broker"].includes(session.actorRole)) {
@@ -900,7 +908,7 @@ export function TransfersScreen(props: CommonProps) {
                 </Text>
                 {Number(transfer.commissionMinor || 0) > 0 ? <Text style={styles.muted}>Commission liability: {transfer.commissionLiability || "Sender"}</Text> : null}
               </View>
-              <Pill label={transfer.state} tone={tone(transfer.state)} />
+              <Pill label={transfer.state} tone={transferStatusTone(transfer.state)} />
               {pendingMaster ? (
                 <View style={styles.actionBlock}>
                   <View style={styles.rowButtons}>
