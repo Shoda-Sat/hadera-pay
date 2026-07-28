@@ -215,6 +215,17 @@ function id(prefix) {
   return `${prefix}_${crypto.randomBytes(8).toString("hex")}`;
 }
 
+function workspaceStateRevision(db, workspaceId) {
+  return String(db.appStates?.[workspaceId]?._syncRevision || "0");
+}
+
+function markWorkspaceStateChanged(db, workspaceId, state = db.appStates?.[workspaceId] || {}) {
+  const revision = `${Date.now().toString(36)}-${crypto.randomBytes(6).toString("hex")}`;
+  state._syncRevision = revision;
+  db.appStates[workspaceId] = state;
+  return revision;
+}
+
 function httpError(statusCode, message) {
   const error = new Error(message);
   error.statusCode = statusCode;
@@ -422,8 +433,11 @@ async function migrateLegacyAttachments(db, session, limit) {
     }
   }
   db.appStates[session.workspace.id] = state;
+  const revision = migrated > 0
+    ? markWorkspaceStateChanged(db, session.workspace.id, state)
+    : workspaceStateRevision(db, session.workspace.id);
   if (migrated > 0) await saveDb(db);
-  return { attempted, migrated, failed, remaining: legacyAttachmentCount(state), state };
+  return { attempted, migrated, failed, remaining: legacyAttachmentCount(state), state, revision };
 }
 
 function inviteCode() {
@@ -614,7 +628,10 @@ function clearLoginAttempts(db, login) {
 }
 
 function sendJson(response, status, data) {
-  response.writeHead(status, { "content-type": "application/json; charset=utf-8" });
+  response.writeHead(status, {
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store",
+  });
   response.end(JSON.stringify(data));
 }
 
@@ -1297,6 +1314,7 @@ function stripRestrictedCreditReminders(state, session) {
 function sanitizeIncomingWorkspaceState(state, session, db) {
   if (!state || typeof state !== "object") return {};
   const sanitized = { ...state };
+  delete sanitized._syncRevision;
   if (session?.membership?.role !== "Master") delete sanitized.chatHistoryResetAt;
   if (Array.isArray(state.receivables)) {
     sanitized.receivables = state.receivables.map((receivable) => {
@@ -1555,6 +1573,7 @@ async function handleApi(request, response, url) {
 
     db.users.push(user);
     db.memberships.push(membership);
+    markWorkspaceStateChanged(db, workspace.id);
     clearLoginAttempts(db, email);
     const session = createSession(db, user.id, workspace.id, requestDeviceId(request));
     await saveDb(db);
@@ -1649,7 +1668,7 @@ async function handleApi(request, response, url) {
   }
 
   const backgroundRead = method === "GET" && (
-    ["/api/app-state", "/api/auth/device-warning", "/api/files/status"].includes(url.pathname) ||
+    ["/api/app-state", "/api/app-state/version", "/api/auth/device-warning", "/api/files/status"].includes(url.pathname) ||
     /^\/api\/files\/[^/]+\/(?:download-url|content)$/.test(url.pathname)
   );
   const session = await requireSession(request, response, db, { touch: !backgroundRead });
@@ -1814,6 +1833,7 @@ async function handleApi(request, response, url) {
       failed: result.failed,
       remaining: result.remaining,
       state: stripRestrictedCreditReminders(result.state, session),
+      revision: result.revision,
     });
     return;
   }
@@ -2078,12 +2098,18 @@ async function handleApi(request, response, url) {
     return;
   }
 
+  if (url.pathname === "/api/app-state/version" && method === "GET") {
+    sendJson(response, 200, { revision: workspaceStateRevision(db, session.workspace.id) });
+    return;
+  }
+
   if (url.pathname === "/api/app-state" && method === "GET") {
     const currentState = db.appStates[session.workspace.id] || {};
     const state = mergeWorkspaceState(db, session.workspace.id, currentState);
-    db.appStates[session.workspace.id] = state;
-    await saveDb(db);
-    sendJson(response, 200, { state: stripRestrictedCreditReminders(state, session) });
+    sendJson(response, 200, {
+      state: stripRestrictedCreditReminders(state, session),
+      revision: workspaceStateRevision(db, session.workspace.id),
+    });
     return;
   }
 
@@ -2124,9 +2150,9 @@ async function handleApi(request, response, url) {
     if (nextState.selectedLedgerActor === actorName) nextState.selectedLedgerActor = "";
     if (nextState.expandedFixedRateActorId === actorId) nextState.expandedFixedRateActorId = "";
     if (nextState.expandedSpecialDividerActorId === actorId) nextState.expandedSpecialDividerActorId = "";
-    db.appStates[session.workspace.id] = nextState;
+    const revision = markWorkspaceStateChanged(db, session.workspace.id, nextState);
     await saveDb(db, { replace: true });
-    sendJson(response, 200, { ok: true, state: stripRestrictedCreditReminders(nextState, session) });
+    sendJson(response, 200, { ok: true, state: stripRestrictedCreditReminders(nextState, session), revision });
     return;
   }
 
@@ -2141,13 +2167,14 @@ async function handleApi(request, response, url) {
     const nextState = structuredClone(currentState);
     nextState.actors = actors;
     const counts = resetSpecificActorData(nextState, actor);
-    db.appStates[session.workspace.id] = nextState;
+    const revision = markWorkspaceStateChanged(db, session.workspace.id, nextState);
     await saveDb(db, { replace: true });
     sendJson(response, 200, {
       ok: true,
       actor: { id: actor.id, name: actor.name },
       counts,
-      state: stripRestrictedCreditReminders(nextState, session)
+      state: stripRestrictedCreditReminders(nextState, session),
+      revision,
     });
     return;
   }
@@ -2186,18 +2213,23 @@ async function handleApi(request, response, url) {
       nextState.deletedActorNames = Array.from(new Set([...(nextState.deletedActorNames || []), ...removedActorNames]));
       nextState.actors = (nextState.actors || []).filter((actor) => actor?.role === "Master");
     }
-    db.appStates[session.workspace.id] = nextState;
+    const revision = markWorkspaceStateChanged(db, session.workspace.id, nextState);
     await saveDb(db, { replace: scope === "wipe" });
-    sendJson(response, 200, { ok: true, state: stripRestrictedCreditReminders(nextState, session) });
+    sendJson(response, 200, { ok: true, state: stripRestrictedCreditReminders(nextState, session), revision });
     return;
   }
 
   if (url.pathname === "/api/app-state" && method === "PUT") {
     const body = await readJson(request);
     const incomingState = sanitizeIncomingWorkspaceState(body.state || {}, session, db);
-    db.appStates[session.workspace.id] = mergeWorkspaceState(db, session.workspace.id, incomingState);
+    const nextState = mergeWorkspaceState(db, session.workspace.id, incomingState);
+    const revision = markWorkspaceStateChanged(db, session.workspace.id, nextState);
     await saveDb(db);
-    sendJson(response, 200, { ok: true });
+    sendJson(response, 200, {
+      ok: true,
+      state: stripRestrictedCreditReminders(nextState, session),
+      revision,
+    });
     return;
   }
 

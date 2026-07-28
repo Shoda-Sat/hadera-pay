@@ -33,6 +33,9 @@ const deviceIdCacheKey = "haderapay.mobile.device.v1";
 const workspaceCachePrefix = "haderapay.mobile.workspace.v1.";
 let activeSession: UserSession | null = null;
 let activeDeviceId: string | null = null;
+let activeWorkspaceRevision: string | null = null;
+let activeWorkspaceSnapshotJson: string | null = null;
+let activeWorkspaceSnapshotSessionKey = "";
 
 export const allowedIdleTimeoutSeconds = [10, 20, 30, 60, 300, 900, 1800, 3600, 7200] as const;
 
@@ -163,10 +166,13 @@ export async function getR2StorageStatus(): Promise<{ configured: boolean; store
 }
 
 export async function migrateR2Attachments(limit = 10): Promise<{ attempted: number; migrated: number; failed: number; remaining: number; state: WorkspaceState }> {
-  return api<{ attempted: number; migrated: number; failed: number; remaining: number; state: WorkspaceState }>("/api/files/migrate", {
+  const result = await api<{ attempted: number; migrated: number; failed: number; remaining: number; state: WorkspaceState; revision?: string }>("/api/files/migrate", {
     method: "POST",
     body: { limit }
   });
+  const state = normalizeState(result.state);
+  await rememberWorkspaceSnapshot(state, result.revision);
+  return { ...result, state };
 }
 
 async function readCache<T>(key: string): Promise<T | null> {
@@ -186,7 +192,38 @@ async function writeCache(key: string, value: unknown): Promise<void> {
   }
 }
 
+function workspaceSnapshotSessionKey(session: UserSession | null | undefined): string {
+  return session ? `${session.workspaceId}:${session.userId}` : "";
+}
+
+function resetWorkspaceSnapshot(): void {
+  activeWorkspaceRevision = null;
+  activeWorkspaceSnapshotJson = null;
+  activeWorkspaceSnapshotSessionKey = "";
+}
+
+async function rememberWorkspaceSnapshot(state: WorkspaceState, revision?: string): Promise<void> {
+  if (!activeSession?.workspaceId) return;
+  const cachedState = cacheableWorkspaceState(state);
+  const serialized = JSON.stringify(cachedState);
+  activeWorkspaceRevision = typeof revision === "string"
+    ? revision
+    : typeof state._syncRevision === "string"
+      ? state._syncRevision
+      : null;
+  activeWorkspaceSnapshotJson = serialized;
+  activeWorkspaceSnapshotSessionKey = workspaceSnapshotSessionKey(activeSession);
+  try {
+    await AsyncStorage.setItem(workspaceCacheKey(activeSession.workspaceId), serialized);
+  } catch {
+    // The live in-memory snapshot still avoids unnecessary network reloads.
+  }
+}
+
 async function cacheSession(session: UserSession): Promise<void> {
+  if (workspaceSnapshotSessionKey(activeSession) !== workspaceSnapshotSessionKey(session)) {
+    resetWorkspaceSnapshot();
+  }
   activeSession = session;
   await writeCache(sessionCacheKey, session);
 }
@@ -339,6 +376,7 @@ export async function getCurrentSession(): Promise<UserSession | null> {
     }
     else {
       activeSession = null;
+      resetWorkspaceSnapshot();
       await AsyncStorage.multiRemove([sessionCacheKey, sessionActivityCacheKey]);
     }
     return session;
@@ -394,6 +432,7 @@ export async function signup(input: {
 
 export async function logout(): Promise<void> {
   activeSession = null;
+  resetWorkspaceSnapshot();
   await AsyncStorage.multiRemove([sessionCacheKey, sessionActivityCacheKey]);
   try {
     await api<{ ok: boolean }>("/api/auth/logout", { method: "POST" });
@@ -433,62 +472,106 @@ export async function changePassword(currentPassword: string, newPassword: strin
 
 export async function loadWorkspaceState(): Promise<WorkspaceState> {
   try {
-    const result = await api<{ state: WorkspaceState }>("/api/app-state");
+    const result = await api<{ state: WorkspaceState; revision?: string }>("/api/app-state");
     const state = { ...normalizeState(result.state), offlineSnapshot: false, lastSyncedAt: new Date().toISOString() };
-    if (activeSession?.workspaceId) await writeCache(workspaceCacheKey(activeSession.workspaceId), cacheableWorkspaceState(state));
+    await rememberWorkspaceSnapshot(state, result.revision);
     return state;
   } catch (error) {
     if (!(error instanceof OfflineError) || !activeSession?.workspaceId) throw error;
     const cached = await readCache<WorkspaceState>(workspaceCacheKey(activeSession.workspaceId));
     if (!cached) throw new Error("Connect once to download this account before using it offline.");
-    return { ...normalizeState(cached), offlineSnapshot: true, lastSyncedAt: cached.lastSyncedAt };
+    const state = { ...normalizeState(cached), offlineSnapshot: true, lastSyncedAt: cached.lastSyncedAt };
+    activeWorkspaceSnapshotJson = JSON.stringify(cacheableWorkspaceState(state));
+    activeWorkspaceSnapshotSessionKey = workspaceSnapshotSessionKey(activeSession);
+    activeWorkspaceRevision = null;
+    return state;
   }
 }
 
-export async function saveWorkspaceState(state: WorkspaceState): Promise<void> {
+export async function loadWorkspaceStateIfChanged(): Promise<WorkspaceState | null> {
+  try {
+    const result = await api<{ revision: string }>("/api/app-state/version");
+    if (
+      activeWorkspaceRevision !== null &&
+      activeWorkspaceSnapshotSessionKey === workspaceSnapshotSessionKey(activeSession) &&
+      result.revision === activeWorkspaceRevision
+    ) {
+      return null;
+    }
+    return await loadWorkspaceState();
+  } catch (error) {
+    if (error instanceof OfflineError) return null;
+    throw error;
+  }
+}
+
+async function loadWorkspaceStateForUpdate(): Promise<WorkspaceState> {
+  if (
+    activeWorkspaceRevision !== null &&
+    activeWorkspaceSnapshotJson &&
+    activeWorkspaceSnapshotSessionKey === workspaceSnapshotSessionKey(activeSession)
+  ) {
+    try {
+      const result = await api<{ revision: string }>("/api/app-state/version");
+      if (result.revision === activeWorkspaceRevision) {
+        return normalizeState(JSON.parse(activeWorkspaceSnapshotJson) as WorkspaceState);
+      }
+    } catch (error) {
+      if (!(error instanceof OfflineError)) throw error;
+    }
+  }
+  return loadWorkspaceState();
+}
+
+export async function saveWorkspaceState(state: WorkspaceState): Promise<WorkspaceState> {
   if (state.offlineSnapshot) throw new Error("Reconnect to the internet before making financial changes.");
-  await api<{ ok: boolean }>("/api/app-state", {
+  const result = await api<{ ok: boolean; state: WorkspaceState; revision?: string }>("/api/app-state", {
     method: "PUT",
     body: { state: { ...state, offlineSnapshot: undefined, lastSyncedAt: undefined } }
   });
-  if (activeSession?.workspaceId) {
-    await writeCache(workspaceCacheKey(activeSession.workspaceId), cacheableWorkspaceState({
-      ...state,
-      offlineSnapshot: false,
-      lastSyncedAt: new Date().toISOString()
-    }));
-  }
+  const savedState = {
+    ...normalizeState(result.state || state),
+    offlineSnapshot: false,
+    lastSyncedAt: new Date().toISOString()
+  };
+  await rememberWorkspaceSnapshot(savedState, result.revision);
+  return savedState;
 }
 
 export async function updateWorkspaceState(mutator: (state: WorkspaceState) => void): Promise<WorkspaceState> {
-  const state = await loadWorkspaceState();
+  const state = await loadWorkspaceStateForUpdate();
   mutator(state);
-  await saveWorkspaceState(state);
-  return state;
+  return saveWorkspaceState(state);
 }
 
 export async function removeWorkspaceActor(actorId: string, actorName: string): Promise<WorkspaceState> {
-  const result = await api<{ state: WorkspaceState }>("/api/app-state/remove-actor", {
+  const result = await api<{ state: WorkspaceState; revision?: string }>("/api/app-state/remove-actor", {
     method: "POST",
     body: { actorId, actorName }
   });
-  return normalizeState(result.state);
+  const state = normalizeState(result.state);
+  await rememberWorkspaceSnapshot(state, result.revision);
+  return state;
 }
 
 export async function resetWorkspaceActorData(actorId: string): Promise<WorkspaceState> {
-  const result = await api<{ state: WorkspaceState }>("/api/app-state/reset-actor", {
+  const result = await api<{ state: WorkspaceState; revision?: string }>("/api/app-state/reset-actor", {
     method: "POST",
     body: { actorId }
   });
-  return normalizeState(result.state);
+  const state = normalizeState(result.state);
+  await rememberWorkspaceSnapshot(state, result.revision);
+  return state;
 }
 
 export async function resetWorkspaceData(scope: "data" | "wipe"): Promise<WorkspaceState> {
-  const result = await api<{ state: WorkspaceState }>("/api/app-state/reset", {
+  const result = await api<{ state: WorkspaceState; revision?: string }>("/api/app-state/reset", {
     method: "POST",
     body: { scope }
   });
-  return normalizeState(result.state);
+  const state = normalizeState(result.state);
+  await rememberWorkspaceSnapshot(state, result.revision);
+  return state;
 }
 
 export async function loadInvites(): Promise<InviteRecord[]> {
@@ -651,7 +734,7 @@ export async function submitTransferOrder(session: UserSession, draft: TransferD
     throw new Error("Choose Cash or Credit before sending.");
   }
 
-  const state = await loadWorkspaceState();
+  const state = await loadWorkspaceStateForUpdate();
   const actor = sessionActor(session, state);
   const existingOrder = editingOrderId ? state.orders.find((order) => order.id === editingOrderId) : undefined;
   if (editingOrderId && (!existingOrder || existingOrder.state !== "Returned" || existingOrder.broker !== session.actorName)) {
@@ -720,12 +803,12 @@ export async function submitTransferOrder(session: UserSession, draft: TransferD
     state.receivables.splice(existingReceivableIndex, 1);
   }
 
-  await saveWorkspaceState(state);
+  const savedState = await saveWorkspaceState(state);
   return {
     orderId: order.id,
     orderNumber: order.brokerOrderNumber || order.id,
     status: "Pending Master Approval",
     createdAt: now,
-    state
+    state: savedState
   };
 }

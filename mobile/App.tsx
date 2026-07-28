@@ -40,6 +40,7 @@ import {
   getLastSessionActivityAt,
   getCurrentSession,
   loadWorkspaceState,
+  loadWorkspaceStateIfChanged,
   login,
   logout,
   rememberSessionActivity,
@@ -52,6 +53,7 @@ import type { PillTone } from "./src/components/ui";
 import { colors, radius, shadow, spacing } from "./src/theme";
 import { actingSessionFor, activeActors, calculableLedgerLines, isMasterView, orderRecordIsVoided, orderSortForSession, transferTargetsFor } from "./src/domain/workspace";
 import { ledgerLineBelongsToActor } from "./src/domain/ledgerNumbering";
+import { useProgressiveLimit } from "./src/hooks/useProgressiveLimit";
 import { notifyNewRequiredActions, subscribeToActionNotificationResponses } from "./src/notifications/actionNotifications";
 import {
   ActorsScreen,
@@ -307,9 +309,9 @@ export default function App() {
     let mounted = true;
     const timer = setInterval(() => {
       if (AppState.currentState !== "active") return;
-      loadWorkspaceState()
+      loadWorkspaceStateIfChanged()
         .then((state) => {
-          if (mounted) setWorkspaceState(state);
+          if (mounted && state) setWorkspaceState(state);
         })
         .catch(() => undefined);
     }, 10000);
@@ -913,7 +915,7 @@ function HomeScreen({
         )}
       </View>
       <Panel title="Orderbook" badge={session.actorRole}>
-        {orders.length ? orders.map((order) => (
+        {orders.length ? orders.slice(0, 10).map((order) => (
           <View key={order.id} style={styles.orderRow}>
             <View style={{ flex: 1 }}>
               <Text style={styles.orderId}>{orderNumber(order, session)}</Text>
@@ -927,6 +929,7 @@ function HomeScreen({
         )) : (
           <Text style={styles.mutedText}>{stateLoading ? "Loading orders..." : "No active orders."}</Text>
         )}
+        {orders.length > 10 ? <Button label={`View all ${orders.length} orders`} variant="secondary" onPress={onOrders} /> : null}
       </Panel>
       {!actorCanSendOrders ? (
         <Panel title="Assigned Work" badge="Payout">
@@ -1004,18 +1007,27 @@ function ArchiveScreen({
   const [receivablesExpanded, setReceivablesExpanded] = useState(false);
   const [expandedReceivableMonths, setExpandedReceivableMonths] = useState<string[]>([]);
   const [transactionSort, setTransactionSort] = useState<"Date" | "Order / Transfer No.">("Date");
+  const [statementDetailLimits, setStatementDetailLimits] = useState<Record<string, number>>({});
+  const [receivableDetailLimits, setReceivableDetailLimits] = useState<Record<string, number>>({});
   const archives = visibleArchivesFor(session, workspaceState);
   const months = Array.from(new Set(archives.map((archive) => archiveMonthKey(archive.closedAt)).filter(Boolean))).sort().reverse();
   const activeMonth = months.includes(selectedMonth) ? selectedMonth : "";
   const filteredArchives = activeMonth
     ? archives.filter((archive) => archiveMonthKey(archive.closedAt) === activeMonth)
     : archives;
+  const archivePage = useProgressiveLimit(`${session.actorId}:${activeMonth}`, 10);
+  const displayedArchives = filteredArchives.slice(0, archivePage.limit);
   const monthOptions = ["", ...months];
   const archivedReceivables = filteredArchives.flatMap((archive) => (archive.receivables || []).map((receivable) => ({
     archive,
     receivable
   })));
   const receivableMonths = Array.from(new Set(archivedReceivables.map(({ archive, receivable }) => archiveMonthKey(receivable.archivedAt || archive.closedAt)).filter(Boolean))).sort().reverse();
+
+  useEffect(() => {
+    setStatementDetailLimits({});
+    setReceivableDetailLimits({});
+  }, [activeMonth, transactionSort]);
 
   const toggleStatement = (statementId: string) => {
     setExpandedStatements((current) => current.includes(statementId)
@@ -1088,6 +1100,8 @@ function ArchiveScreen({
           receivableMonths.length ? receivableMonths.map((month) => {
             const monthExpanded = expandedReceivableMonths.includes(month);
             const monthlyReceivables = archivedReceivables.filter(({ archive, receivable }) => archiveMonthKey(receivable.archivedAt || archive.closedAt) === month);
+            const receivableLimit = receivableDetailLimits[month] || 20;
+            const displayedReceivables = monthlyReceivables.slice(0, receivableLimit);
             return (
               <View key={`receivables-${month}`}>
                 <Pressable
@@ -1101,7 +1115,7 @@ function ArchiveScreen({
                 </Pressable>
                 {monthExpanded ? (
                   <View style={styles.archiveDetails}>
-                    {monthlyReceivables.map(({ archive, receivable }: { archive: ArchiveRecord; receivable: ReceivableRecord }) => {
+                    {displayedReceivables.map(({ archive, receivable }: { archive: ArchiveRecord; receivable: ReceivableRecord }) => {
                       const paidMinor = (receivable.payments || []).reduce((sum, payment) => sum + Number(payment.amountMinor || 0), 0);
                       const lastPayment = (receivable.payments || []).slice().sort((a, b) => new Date(b.paidAt || 0).getTime() - new Date(a.paidAt || 0).getTime())[0];
                       return (
@@ -1113,6 +1127,13 @@ function ArchiveScreen({
                         </View>
                       );
                     })}
+                    {displayedReceivables.length < monthlyReceivables.length ? (
+                      <Button
+                        label={`Load 20 more receivables (${monthlyReceivables.length - displayedReceivables.length} remaining)`}
+                        variant="secondary"
+                        onPress={() => setReceivableDetailLimits((current) => ({ ...current, [month]: receivableLimit + 20 }))}
+                      />
+                    ) : null}
                   </View>
                 ) : null}
               </View>
@@ -1121,7 +1142,7 @@ function ArchiveScreen({
         ) : null}
       </Panel>
 
-      {filteredArchives.length ? filteredArchives.map((archive, index) => {
+      {filteredArchives.length ? displayedArchives.map((archive, index) => {
         const statementId = archive.id || `${archive.actor || "actor"}-${archive.closedAt || index}`;
         const expanded = expandedStatements.includes(statementId);
         const actorBaseCurrency = archive.actorCurrency || workspaceState?.actors.find((actor) => actor.id === archive.actorId || actor.name === archive.actor)?.currency || session.currency;
@@ -1140,6 +1161,13 @@ function ArchiveScreen({
           ? new Date(b.postedAt || 0).getTime() - new Date(a.postedAt || 0).getTime()
           : referenceCompare(String(a.journal || a.orderId || a.transferId || a.entryId || ""), String(b.journal || b.orderId || b.transferId || b.entryId || "")));
         const detailCount = orders.length + transfers.length + ledger.length;
+        const detailLimit = statementDetailLimits[statementId] || 30;
+        const displayedOrders = orders.slice(0, detailLimit);
+        const transferLimit = Math.max(0, detailLimit - displayedOrders.length);
+        const displayedTransfers = transfers.slice(0, transferLimit);
+        const ledgerLimit = Math.max(0, detailLimit - displayedOrders.length - displayedTransfers.length);
+        const displayedLedger = ledger.slice(0, ledgerLimit);
+        const displayedDetailCount = displayedOrders.length + displayedTransfers.length + displayedLedger.length;
 
         return (
           <Panel
@@ -1186,7 +1214,7 @@ function ArchiveScreen({
 
             {expanded ? (
               <View style={styles.archiveDetails}>
-                {orders.map((order) => {
+                {displayedOrders.map((order) => {
                   const voided = orderRecordIsVoided(order);
                   return <View key={`order-${statementId}-${order.id}`} style={[styles.archiveDetailRow, voided && styles.reportVoidRow]}>
                     <Text style={styles.archiveDetailTitle}>Order {orderNumber(order, session)}</Text>
@@ -1198,7 +1226,7 @@ function ArchiveScreen({
                     </Text>
                   </View>;
                 })}
-                {transfers.map((transfer, transferIndex) => {
+                {displayedTransfers.map((transfer, transferIndex) => {
                   const currency = transfer.currency || transfer.sourceCurrency || session.currency;
                   return (
                     <View key={`transfer-${statementId}-${transfer.id || transferIndex}`} style={styles.archiveDetailRow}>
@@ -1209,7 +1237,7 @@ function ArchiveScreen({
                     </View>
                   );
                 })}
-                {ledger.map((line, lineIndex) => {
+                {displayedLedger.map((line, lineIndex) => {
                   const signedMinor = line.direction === "Debit" ? Number(line.amountMinor || 0) : -Number(line.amountMinor || 0);
                   const position = financialPosition(line.currency, signedMinor, isMasterView(session));
                   return (
@@ -1225,6 +1253,13 @@ function ArchiveScreen({
                   );
                 })}
                 {!detailCount ? <Text style={styles.mutedText}>No archived transaction details.</Text> : null}
+                {displayedDetailCount < detailCount ? (
+                  <Button
+                    label={`Load 30 more transactions (${detailCount - displayedDetailCount} remaining)`}
+                    variant="secondary"
+                    onPress={() => setStatementDetailLimits((current) => ({ ...current, [statementId]: detailLimit + 30 }))}
+                  />
+                ) : null}
               </View>
             ) : null}
           </Panel>
@@ -1234,6 +1269,9 @@ function ArchiveScreen({
           <Text style={styles.mutedText}>{activeMonth ? `No balances were closed in ${archiveMonthLabel(activeMonth)}.` : "No closed balance reports are available yet."}</Text>
         </Panel>
       )}
+      {displayedArchives.length < filteredArchives.length ? (
+        <Button label={`Load 10 more reports (${filteredArchives.length - displayedArchives.length} remaining)`} variant="secondary" onPress={archivePage.showMore} />
+      ) : null}
     </View>
   );
 }

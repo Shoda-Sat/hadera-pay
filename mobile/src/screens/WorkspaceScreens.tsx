@@ -12,7 +12,7 @@ import Constants from "expo-constants";
 import * as FileSystem from "expo-file-system";
 import * as ImageManipulator from "expo-image-manipulator";
 import * as Sharing from "expo-sharing";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Image, Pressable, ScrollView, Share, StyleSheet, Text, TextInput, View } from "react-native";
 import {
   Check,
@@ -108,6 +108,7 @@ import {
   visibleChatsFor
 } from "../domain/workspace";
 import { actorLedgerReferenceForLine, ledgerAccountBelongsToActor, ledgerLineBelongsToActor } from "../domain/ledgerNumbering";
+import { useProgressiveLimit } from "../hooks/useProgressiveLimit";
 import { colors, radius, spacing } from "../theme";
 import type {
   ActorRecord,
@@ -376,7 +377,9 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
   const [proofStatus, setProofStatus] = useState<Record<string, string>>({});
   const [preparingProof, setPreparingProof] = useState("");
   const [busy, setBusy] = useState("");
-  const orders = visibleOrders(session, state);
+  const orders = useMemo(() => visibleOrders(session, state), [session, state.orders]);
+  const orderPage = useProgressiveLimit(`${session.actorId}:${session.actorName}`, 20);
+  const displayedOrders = orders.slice(0, orderPage.limit);
 
   const run = async (id: string, task: () => Promise<WorkspaceState>) => {
     if (offline) return Alert.alert("Offline", "Reconnect before making this change.");
@@ -503,7 +506,7 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
         ) : null}
         <Button label="Refresh" icon={<RefreshCw size={17} color={colors.ink} />} variant="secondary" onPress={onRefresh} style={styles.flexButton} />
       </View>
-      {orders.length ? orders.map((order) => {
+      {orders.length ? displayedOrders.map((order) => {
         const isExpanded = expanded.includes(order.id);
         const isPayer = order.agent === session.actorName || order.agentActorId === session.actorId;
         const payerOptions = activeActors(state).filter((actor) => actor.name !== order.broker && actorCanPayoutCurrency(actor, order.payoutCurrency));
@@ -590,6 +593,9 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
           </Panel>
         );
       }) : <Panel><Text style={styles.muted}>No active orders.</Text></Panel>}
+      {displayedOrders.length < orders.length ? (
+        <Button label={`Load 20 more orders (${orders.length - displayedOrders.length} remaining)`} variant="secondary" onPress={orderPage.showMore} />
+      ) : null}
     </View>
   );
 }
@@ -614,6 +620,8 @@ export function PendingCancelledScreen({ session, state, offline, onState, onNav
     .filter((order) => pendingCancelledOrderStates.has(order.state))
     .slice()
     .sort((a, b) => new Date(pendingCancelledDate(b)).getTime() - new Date(pendingCancelledDate(a)).getTime());
+  const orderPage = useProgressiveLimit(`${session.actorId}:${session.actorName}`, 20);
+  const displayedOrders = orders.slice(0, orderPage.limit);
 
   const sendReminder = async (order: OrderRecord) => {
     if (offline) return Alert.alert("Offline", "Reconnect before sending an order reminder.");
@@ -635,7 +643,7 @@ export function PendingCancelledScreen({ session, state, offline, onState, onNav
       <ScreenTitle title="Pending & Cancelled" subtitle="Assigned, returned, voided, and cancelled orders" />
       <OfflineGuard offline={offline} />
       <Button label="Orderbook" variant="secondary" onPress={() => onNavigate("orders")} />
-      {orders.length ? orders.map((order) => {
+      {orders.length ? displayedOrders.map((order) => {
         const payer = reminderPayer(state, order);
         const payoutActor = payer?.name || (!["Unassigned", "Cancelled", "Forwarded"].includes(order.agent) ? order.agent : "Unassigned");
         const stateLabel = order.state === "Assigned" && payoutActor !== "Unassigned" ? `Assigned to ${payoutActor}` : order.state;
@@ -650,6 +658,9 @@ export function PendingCancelledScreen({ session, state, offline, onState, onNav
           </Panel>
         );
       }) : <Panel><Text style={styles.muted}>No assigned, returned, voided, or cancelled orders.</Text></Panel>}
+      {displayedOrders.length < orders.length ? (
+        <Button label={`Load 20 more orders (${orders.length - displayedOrders.length} remaining)`} variant="secondary" onPress={orderPage.showMore} />
+      ) : null}
     </View>
   );
 }
@@ -689,7 +700,12 @@ export function TransfersScreen(props: CommonProps) {
   const targets = transferTargetsFor(session, state);
   const receivingActor = targets.find((target) => target.id === draft.toActorId);
   const payoutCurrencies = actorTransferReceiveCurrencies(receivingActor);
-  const transfers = state.transfers.filter((item) => isMasterView(session) || item.from === session.actorName || item.to === session.actorName);
+  const transfers = useMemo(
+    () => state.transfers.filter((item) => isMasterView(session) || item.from === session.actorName || item.to === session.actorName),
+    [session, state.transfers]
+  );
+  const transferPage = useProgressiveLimit(`${session.actorId}:${session.actorName}`, 20);
+  const displayedTransfers = transfers.slice(0, transferPage.limit);
   const master = isMasterView(session);
   const masterActor = activeActors(state).find((item) => item.role === "Master");
   const [forwardingTransferId, setForwardingTransferId] = useState("");
@@ -887,7 +903,7 @@ export function TransfersScreen(props: CommonProps) {
         </Panel>
       )}
       <Panel title="Transfer history" badge={String(transfers.length)}>
-        {transfers.map((transfer) => {
+        {displayedTransfers.map((transfer) => {
           const pendingMaster = master && transfer.state === "Pending Approval";
           const canForward = pendingMaster && transferArrivedAtMaster(transfer) && transfer.from !== masterActor?.name;
           const receivingForward = !master && transfer.state === "Pending Acceptance" && (transfer.toActorId === session.actorId || transfer.to === session.actorName);
@@ -954,6 +970,9 @@ export function TransfersScreen(props: CommonProps) {
             </View>
           );
         })}
+        {displayedTransfers.length < transfers.length ? (
+          <Button label={`Load 20 more transfers (${transfers.length - displayedTransfers.length} remaining)`} variant="secondary" onPress={transferPage.showMore} />
+        ) : null}
       </Panel>
     </View>
   );
@@ -1361,13 +1380,12 @@ export function ChatScreen({ session, state, offline, onState, onRefresh, onScro
   const [members, setMembers] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [attachmentStatus, setAttachmentStatus] = useState("");
+  const [messageLimit, setMessageLimit] = useState(50);
   const busyRef = useRef(false);
   const recordingChatIdRef = useRef("");
   const composerRef = useRef<TextInput>(null);
   const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const audioRecorderState = useAudioRecorderState(audioRecorder, 250);
-  const refreshRef = useRef(onRefresh);
-  refreshRef.current = onRefresh;
   const selected = chats.find((chat) => chat.id === chatId) || chats[0];
   const replyingTo = selected?.messages.find((item) => item.id === replyToId);
   const forwardingMessage = selected?.messages.find((item) => item.id === forwardMessageId);
@@ -1389,13 +1407,8 @@ export function ChatScreen({ session, state, offline, onState, onRefresh, onScro
   }, []);
 
   useEffect(() => {
-    if (offline) return;
-    refreshRef.current();
-    const timer = setInterval(() => {
-      if (!busyRef.current) refreshRef.current();
-    }, 15000);
-    return () => clearInterval(timer);
-  }, [offline]);
+    setMessageLimit(50);
+  }, [selected?.id]);
 
   useEffect(() => () => {
     if (audioRecorder.isRecording) void audioRecorder.stop().catch(() => undefined);
@@ -1568,7 +1581,14 @@ export function ChatScreen({ session, state, offline, onState, onRefresh, onScro
       {selected ? (
         <Panel title={chatTitle(selected)} badge={selected.type}>
           <View style={styles.messages}>
-            {selected.messages.slice(-50).map((item) => {
+            {selected.messages.length > messageLimit ? (
+              <Button
+                label={`Load 50 older messages (${selected.messages.length - messageLimit} remaining)`}
+                variant="secondary"
+                onPress={() => setMessageLimit((current) => current + 50)}
+              />
+            ) : null}
+            {selected.messages.slice(-messageLimit).map((item) => {
               const repliedMessage = selected.messages.find((candidate) => candidate.id === item.replyTo);
               const myReaction = item.reactions?.[session.actorName];
               return (
@@ -1730,7 +1750,7 @@ export function ChatScreen({ session, state, offline, onState, onRefresh, onScro
 }
 
 export function LedgerScreen({ session, state, onState }: CommonProps) {
-  const actorChoices = activeActors(state).filter((actor) => actor.role !== "Master");
+  const actorChoices = useMemo(() => activeActors(state).filter((actor) => actor.role !== "Master"), [state]);
   const [actorId, setActorId] = useState(isMasterView(session) ? actorChoices[0]?.id || "" : session.actorId);
   const [incomeExpanded, setIncomeExpanded] = useState(false);
   const [bankExpanded, setBankExpanded] = useState(false);
@@ -1743,36 +1763,54 @@ export function LedgerScreen({ session, state, onState }: CommonProps) {
   const actorName = selected?.name || session.actorName;
   const masterFinancialView = isMasterView(session);
   const referenceForLine = (line: WorkspaceState["ledger"][number]) => actorLedgerReferenceForLine(state, line, actorName);
-  const lines = state.ledger
-    .filter((line) =>
-      line.archived !== true &&
-      (isMasterView(session)
-        ? !selected || ledgerLineBelongsToActor(line, actorName)
-        : ledgerLineBelongsToActor(line, session.actorName))
-    )
-    .slice()
-    .sort((a, b) => transactionSort === "Date"
-      ? new Date(b.postedAt || 0).getTime() - new Date(a.postedAt || 0).getTime()
-      : referenceForLine(a).localeCompare(referenceForLine(b), undefined, { numeric: true, sensitivity: "base" }));
-  const balanceLines = calculableLedgerLines(state, lines);
-  const balances = supportedCurrencies.map((currency) => ({ currency, minor: balanceLines.filter((line) => line.currency === currency).reduce((sum, line) => sum + (line.direction === "Debit" ? 1 : -1) * Number(line.amountMinor || 0), 0) }));
-  const incomeOrders = state.orders.filter((order) => order.state === "Paid" && order.journal && !order.voidJournal && order.excludedFromCalculations !== true && Number.isFinite(Number(order.incomeProfitMinor)));
+  const lines = useMemo(() => state.ledger
+      .filter((line) =>
+        line.archived !== true &&
+        (isMasterView(session)
+          ? !selected || ledgerLineBelongsToActor(line, actorName)
+          : ledgerLineBelongsToActor(line, session.actorName))
+      )
+      .slice()
+      .sort((a, b) => transactionSort === "Date"
+        ? new Date(b.postedAt || 0).getTime() - new Date(a.postedAt || 0).getTime()
+        : referenceForLine(a).localeCompare(referenceForLine(b), undefined, { numeric: true, sensitivity: "base" })),
+    [actorName, selected, session, state, transactionSort]);
+  const ledgerPage = useProgressiveLimit(`${actorName}:${transactionSort}`, 30);
+  const displayedLines = lines.slice(0, ledgerPage.limit);
+  const balanceLines = useMemo(() => calculableLedgerLines(state, lines), [lines, state]);
+  const balances = useMemo(() => supportedCurrencies.map((currency) => ({
+    currency,
+    minor: balanceLines
+      .filter((line) => line.currency === currency)
+      .reduce((sum, line) => sum + (line.direction === "Debit" ? 1 : -1) * Number(line.amountMinor || 0), 0)
+  })), [balanceLines]);
+  const incomeOrders = useMemo(
+    () => state.orders.filter((order) => order.state === "Paid" && order.journal && !order.voidJournal && order.excludedFromCalculations !== true && Number.isFinite(Number(order.incomeProfitMinor))),
+    [state.orders]
+  );
   const totalIncomeUsdMinor = incomeOrders.reduce((sum, order) => sum + Number(order.incomeProfitMinor || 0), 0);
-  const bankEntries = masterBankEntriesWithRunningBalances(state);
+  const bankEntries = useMemo(() => masterBankEntriesWithRunningBalances(state), [state]);
   const bankMonths = Array.from(new Set(bankEntries.map((entry) => entry.postedAt.slice(0, 7)).filter(Boolean))).sort().reverse();
   const [bankMonth, setBankMonth] = useState(bankMonths[0] || new Date().toISOString().slice(0, 7));
   const selectedBankMonth = bankMonths.includes(bankMonth) ? bankMonth : bankMonths[0] || bankMonth;
-  const bankRows = bankEntries.filter((entry) => entry.postedAt.slice(0, 7) === selectedBankMonth);
-  const bankBalances = supportedCurrencies.map((currency) => ({
+  const bankRows = useMemo(
+    () => bankEntries.filter((entry) => entry.postedAt.slice(0, 7) === selectedBankMonth),
+    [bankEntries, selectedBankMonth]
+  );
+  const incomePage = useProgressiveLimit(`${actorName}:income`, 20);
+  const displayedIncomeOrders = incomeOrders.slice(0, incomePage.limit);
+  const bankPage = useProgressiveLimit(`${selectedBankMonth}:bank`, 30);
+  const displayedBankRows = bankRows.slice().reverse().slice(0, bankPage.limit);
+  const bankBalances = useMemo(() => supportedCurrencies.map((currency) => ({
     currency,
     minor: bankEntries.filter((entry) => entry.currency === currency).at(-1)?.runningMinor || 0
-  }));
-  const bankPeriodTotals = supportedCurrencies.map((currency) => {
+  })), [bankEntries]);
+  const bankPeriodTotals = useMemo(() => supportedCurrencies.map((currency) => {
     const currencyRows = bankRows.filter((entry) => entry.currency === currency);
     const moneyIn = currencyRows.filter((entry) => entry.direction === "Credit").reduce((sum, entry) => sum + entry.amountMinor, 0);
     const moneyOut = currencyRows.filter((entry) => entry.direction === "Debit").reduce((sum, entry) => sum + entry.amountMinor, 0);
     return { currency, moneyIn, moneyOut, net: moneyIn - moneyOut };
-  }).filter((item) => item.moneyIn || item.moneyOut);
+  }).filter((item) => item.moneyIn || item.moneyOut), [bankRows]);
   const signedBankAmount = (currency: Currency, minor: number) => `${minor >= 0 ? "+" : "-"}${compactAmount(currency, majorFromMinor(Math.abs(minor), currency))}`;
   const fundBank = async () => {
     if (state.offlineSnapshot) return Alert.alert("Offline", "Reconnect before funding the Master Bank Account.");
@@ -1825,7 +1863,7 @@ export function LedgerScreen({ session, state, onState }: CommonProps) {
       <ScrollView horizontal showsHorizontalScrollIndicator>
         <View style={styles.ledgerTable}>
           <View style={[styles.ledgerRow, styles.ledgerHead]}><Text style={styles.colDate}>Date</Text><Text style={styles.colRef}>Journal / No.</Text><Text style={styles.colDirection}>Type</Text><Text style={styles.colAmount}>Amount</Text><Text style={styles.colDetails}>Details</Text></View>
-          {lines.map((line, index) => {
+          {displayedLines.map((line, index) => {
             const voided = ledgerLineIsForVoidedOrder(state, line);
             const signedMinor = line.direction === "Debit" ? Number(line.amountMinor || 0) : -Number(line.amountMinor || 0);
             const position = financialPosition(line.currency, signedMinor, masterFinancialView);
@@ -1847,6 +1885,9 @@ export function LedgerScreen({ session, state, onState }: CommonProps) {
           })}
         </View>
       </ScrollView>
+      {displayedLines.length < lines.length ? (
+        <Button label={`Load 30 more ledger entries (${lines.length - displayedLines.length} remaining)`} variant="secondary" onPress={ledgerPage.showMore} />
+      ) : null}
       {isMasterView(session) ? (
         <Panel title="Income statement" badge="USD total">
           <Pressable accessibilityRole="button" accessibilityLabel={incomeExpanded ? "Collapse income statement" : "Expand income statement"} onPress={() => setIncomeExpanded((current) => !current)} style={styles.showMore}>
@@ -1854,7 +1895,7 @@ export function LedgerScreen({ session, state, onState }: CommonProps) {
             {incomeExpanded ? <ChevronUp size={17} color={colors.accent} /> : <ChevronDown size={17} color={colors.accent} />}
           </Pressable>
           {incomeExpanded ? <>
-            {incomeOrders.map((order) => {
+            {displayedIncomeOrders.map((order) => {
               const collectedCurrency = order.incomeCollectedCurrency || order.sourceCurrency || "USD";
               const collectedMinor = Number(
                 order.incomeCollectedOriginalMinor ||
@@ -1872,6 +1913,9 @@ export function LedgerScreen({ session, state, onState }: CommonProps) {
                 </View>
               );
             })}
+            {displayedIncomeOrders.length < incomeOrders.length ? (
+              <Button label={`Load 20 more income rows (${incomeOrders.length - displayedIncomeOrders.length} remaining)`} variant="secondary" onPress={incomePage.showMore} />
+            ) : null}
             <SummaryRow label="Total profit" value={compactAmount("USD", majorFromMinor(totalIncomeUsdMinor, "USD"))} strong />
           </> : null}
         </Panel>
@@ -1898,7 +1942,7 @@ export function LedgerScreen({ session, state, onState }: CommonProps) {
               <Text style={styles.sectionLabel}>Monthly statement</Text>
               <SelectRow label="Statement month" options={bankMonths.length ? bankMonths : [selectedBankMonth]} value={selectedBankMonth} onChange={setBankMonth} />
               <Button label="Share monthly statement" icon={<Share2 size={17} color={colors.ink} />} variant="secondary" disabled={!bankRows.length} onPress={shareBankStatement} />
-              {bankRows.length ? bankRows.slice().reverse().map((entry) => {
+              {bankRows.length ? displayedBankRows.map((entry) => {
                 const moneyIn = entry.direction === "Credit";
                 return <View key={entry.id} style={styles.bankStatementRow}>
                   <View style={styles.bankStatementHead}><Text style={styles.primaryLine}>{entry.type}</Text><Text style={styles.muted}>{formatDateTime(entry.postedAt)}</Text></View>
@@ -1911,6 +1955,9 @@ export function LedgerScreen({ session, state, onState }: CommonProps) {
                   </View>
                 </View>;
               }) : <Text style={styles.muted}>No Master Bank Account transactions for this month.</Text>}
+              {displayedBankRows.length < bankRows.length ? (
+                <Button label={`Load 30 more bank entries (${bankRows.length - displayedBankRows.length} remaining)`} variant="secondary" onPress={bankPage.showMore} />
+              ) : null}
               {bankPeriodTotals.length ? <View style={styles.bankPeriodTotals}>{bankPeriodTotals.map((item) => <View key={`bank-total-${item.currency}`} style={styles.bankPeriodRow}><Text style={styles.bankBalanceCurrency}>{item.currency}</Text><Text style={styles.bankMoneyIn}>In {compactAmount(item.currency, majorFromMinor(item.moneyIn, item.currency))}</Text><Text style={styles.bankMoneyOut}>Out {compactAmount(item.currency, majorFromMinor(item.moneyOut, item.currency))}</Text><Text style={item.net >= 0 ? styles.bankMoneyIn : styles.bankMoneyOut}>Net {signedBankAmount(item.currency, item.net)}</Text></View>)}</View> : null}
             </View>
           </> : null}
