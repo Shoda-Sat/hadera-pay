@@ -6823,34 +6823,35 @@
               postedAt: transfer.reversedAt || postedAt
             });
           }
-        } else if (!isMasterName(transfer.from) && !isMasterName(transfer.to)) {
-          const commissionMinor = transferCommissionMinor(transfer);
-          const commissionLiability = normalizedCommissionLiability(transfer.commissionLiability, commissionMinor);
-          if (commissionMinor > 0) {
-            recordMasterBankEntry({
-              id: `BANK-TRANSFER-${bankReference}-FEE`,
-              type: commissionLiability === "Receiver" ? "Transfer Fee Income" : "Transfer Fee Expense",
-              reference: transfer.id,
-              direction: commissionLiability === "Receiver" ? "Credit" : "Debit",
-              currency: sourceCurrency,
-              amountMinor: commissionMinor,
-              details: `Commission (${commissionLiability}) for ${transfer.from} to ${transfer.to}${transfer.remarks ? ` - ${transfer.remarks}` : ""}`,
-              postedAt
-            });
-          }
-          const senderCommissionMinor = originalSenderCommissionMinor(transfer);
-          if (senderCommissionMinor > 0) {
-            recordMasterBankEntry({
-              id: `BANK-TRANSFER-${bankReference}-ORIGINAL-SENDER-COMMISSION`,
-              type: "Original Sender Commission",
-              reference: transfer.id,
-              direction: "Debit",
-              currency: sourceCurrency,
-              amountMinor: senderCommissionMinor,
-              details: `Original commission owed to ${transfer.from} after Master changed the forwarded percentage`,
-              postedAt
-            });
-          }
+        }
+        const commissionMinor = transferCommissionMinor(transfer);
+        const commissionLiability = normalizedCommissionLiability(transfer.commissionLiability, commissionMinor);
+        const masterReceivesCommission = commissionLiability === "Receiver" && !isMasterName(transfer.to);
+        const masterPaysCommission = commissionLiability !== "Receiver" && !isMasterName(transfer.from);
+        if (commissionMinor > 0 && (masterReceivesCommission || masterPaysCommission)) {
+          recordMasterBankEntry({
+            id: `BANK-TRANSFER-${bankReference}-FEE`,
+            type: masterReceivesCommission ? "Transfer Fee Income" : "Transfer Fee Expense",
+            reference: transfer.id,
+            direction: masterReceivesCommission ? "Credit" : "Debit",
+            currency: sourceCurrency,
+            amountMinor: commissionMinor,
+            details: `Commission (${commissionLiability}) for ${transfer.from} to ${transfer.to}${transfer.remarks ? ` - ${transfer.remarks}` : ""}`,
+            postedAt
+          });
+        }
+        const senderCommissionMinor = originalSenderCommissionMinor(transfer);
+        if (senderCommissionMinor > 0 && !isMasterName(transfer.from)) {
+          recordMasterBankEntry({
+            id: `BANK-TRANSFER-${bankReference}-ORIGINAL-SENDER-COMMISSION`,
+            type: "Original Sender Commission",
+            reference: transfer.id,
+            direction: "Debit",
+            currency: sourceCurrency,
+            amountMinor: senderCommissionMinor,
+            details: `Original commission owed to ${transfer.from} after Master changed the forwarded percentage`,
+            postedAt
+          });
         }
       });
 

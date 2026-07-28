@@ -82,7 +82,7 @@ import type {
   WorkspaceState
 } from "./src/types";
 import { formatDateTime, formatMonthYear } from "./src/utils/date";
-import { calculateQuote, compactAmount, currencies, formatAmount, inputAmount, majorFromMinor, reconcileOrderConversion } from "./src/utils/money";
+import { calculateQuote, compactAmount, currencies, financialPosition, formatAmount, inputAmount, majorFromMinor, reconcileOrderConversion } from "./src/utils/money";
 import type { OrderConversionField } from "./src/utils/money";
 
 type IconComponent = React.ComponentType<LucideProps>;
@@ -960,21 +960,20 @@ function SettlementScreen({
         <View key={group.label} style={styles.settlementGroup}>
           <Text style={styles.settlementGroupTitle}>{group.label}</Text>
           {group.rows.length ? group.rows.map((row) => {
-            const positive = row.netMinor > 0;
-            const settled = row.netMinor === 0;
-            const positiveTone = session.actorRole === "Master" ? styles.settlementOwed : styles.settlementDue;
-            const negativeTone = session.actorRole === "Master" ? styles.settlementDue : styles.settlementOwed;
+            const position = financialPosition(row.currency, row.netMinor, isMasterView(session));
             return (
               <View key={`${row.actor.id}-${row.currency}`} style={styles.settlementRow}>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.orderId}>{row.actor.name}</Text>
-                  <Text style={styles.mutedText}>{settled ? "Zero balance" : positive ? "Actor owes Master" : "Master owes actor"}</Text>
+                  <Text style={styles.mutedText}>{position.label}</Text>
                 </View>
                 <Text style={[
                   styles.settlementAmount,
-                  settled ? styles.settlementZero : positive ? positiveTone : negativeTone
+                  position.tone === "good" && styles.financialGood,
+                  position.tone === "danger" && styles.financialDanger,
+                  position.tone === "neutral" && styles.financialNeutral
                 ]}>
-                  {settled ? compactAmount(row.currency, 0) : `${positive ? "+" : "-"}${compactAmount(row.currency, majorFromMinor(Math.abs(row.netMinor), row.currency))}`}
+                  {position.amount}
                 </Text>
               </View>
             );
@@ -1154,18 +1153,19 @@ function ArchiveScreen({
             </View>
 
             {balanceRows.length ? balanceRows.map((row) => {
-              const actorOwesMaster = row.netMinor > 0;
-              const goodForViewer = session.actorRole === "Master" ? actorOwesMaster : !actorOwesMaster;
+              const position = financialPosition(row.currency, row.netMinor, isMasterView(session));
               return (
                 <View key={`${statementId}-${row.currency}`} style={styles.archiveBalanceRow}>
                   <View style={{ flex: 1 }}>
                     <Text style={styles.archiveBalanceCurrency}>{row.currency}</Text>
-                    <Text style={styles.archiveBalanceDirection}>
-                      {actorOwesMaster ? "Actor owes Master" : "Master owes Actor"}
-                    </Text>
+                    <Text style={styles.archiveBalanceDirection}>{position.label}</Text>
                   </View>
-                  <Text style={[styles.archiveBalanceAmount, goodForViewer ? styles.archiveBalanceGood : styles.archiveBalanceDanger]}>
-                    {row.netMinor >= 0 ? "+" : "-"}{compactAmount(row.currency, majorFromMinor(Math.abs(row.netMinor), row.currency))}
+                  <Text style={[
+                    styles.archiveBalanceAmount,
+                    position.tone === "good" && styles.financialGood,
+                    position.tone === "danger" && styles.financialDanger
+                  ]}>
+                    {position.amount}
                   </Text>
                 </View>
               );
@@ -1206,13 +1206,21 @@ function ArchiveScreen({
                     </View>
                   );
                 })}
-                {ledger.map((line, lineIndex) => (
-                  <View key={`ledger-${statementId}-${line.entryId || line.journal || lineIndex}`} style={styles.archiveDetailRow}>
-                    <Text style={styles.archiveDetailTitle}>{line.source || "Ledger"} - {line.direction}</Text>
-                    <Text style={styles.archiveDetailMeta}>{line.details || line.account}</Text>
-                    <Text style={styles.archiveDetailAmount}>{compactAmount(line.currency, majorFromMinor(line.amountMinor, line.currency))}</Text>
-                  </View>
-                ))}
+                {ledger.map((line, lineIndex) => {
+                  const signedMinor = line.direction === "Debit" ? Number(line.amountMinor || 0) : -Number(line.amountMinor || 0);
+                  const position = financialPosition(line.currency, signedMinor, isMasterView(session));
+                  return (
+                    <View key={`ledger-${statementId}-${line.entryId || line.journal || lineIndex}`} style={styles.archiveDetailRow}>
+                      <Text style={styles.archiveDetailTitle}>{line.source || "Ledger"} - {line.direction}</Text>
+                      <Text style={styles.archiveDetailMeta}>{line.details || line.account}</Text>
+                      <Text style={[
+                        styles.archiveDetailAmount,
+                        position.tone === "good" && styles.financialGood,
+                        position.tone === "danger" && styles.financialDanger
+                      ]}>{position.amount}</Text>
+                    </View>
+                  );
+                })}
                 {!detailCount ? <Text style={styles.mutedText}>No archived transaction details.</Text> : null}
               </View>
             ) : null}
@@ -1765,13 +1773,13 @@ const styles = StyleSheet.create({
     fontWeight: "900",
     textAlign: "right"
   },
-  settlementOwed: {
+  financialGood: {
     color: colors.good
   },
-  settlementDue: {
+  financialDanger: {
     color: colors.danger
   },
-  settlementZero: {
+  financialNeutral: {
     color: colors.muted
   },
   archiveSelector: {
@@ -1846,12 +1854,6 @@ const styles = StyleSheet.create({
   archiveBalanceAmount: {
     fontWeight: "900",
     textAlign: "right"
-  },
-  archiveBalanceGood: {
-    color: colors.good
-  },
-  archiveBalanceDanger: {
-    color: colors.danger
   },
   archiveToggle: {
     minHeight: 42,

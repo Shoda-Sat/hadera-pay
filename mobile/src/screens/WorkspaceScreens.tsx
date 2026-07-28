@@ -127,7 +127,7 @@ import type {
   WorkspaceState
 } from "../types";
 import { formatDate, formatDateTime } from "../utils/date";
-import { compactAmount, inputAmount, majorFromMinor, parseAmount, reconcileOrderConversion } from "../utils/money";
+import { compactAmount, financialPosition, inputAmount, majorFromMinor, parseAmount, parseDecimalNumber, reconcileOrderConversion } from "../utils/money";
 import type { OrderConversionField } from "../utils/money";
 
 type CommonProps = {
@@ -849,8 +849,8 @@ export function TransfersScreen(props: CommonProps) {
           <SelectRow label="Payout currency" options={payoutCurrencies.length ? payoutCurrencies : [draft.payoutCurrency]} value={draft.payoutCurrency} onChange={(value) => setDraft({ ...draft, payoutCurrency: value })} />
           <Field label="Rate" value={draft.rate} onChangeText={(value) => setConversionField("rate", value)} keyboardType="decimal-pad" />
           <Field label="Payout amount" value={draft.payoutAmount} onChangeText={(value) => setConversionField("payoutAmount", value)} keyboardType="decimal-pad" />
-          <Field label="Commission %" value={draft.commissionPercent} onChangeText={(value) => setDraft({ ...draft, commissionPercent: value, commissionLiability: Number(value || 0) > 0 ? draft.commissionLiability : "" })} keyboardType="decimal-pad" />
-          {Number(draft.commissionPercent || 0) > 0 ? (
+          <Field label="Commission %" value={draft.commissionPercent} onChangeText={(value) => setDraft({ ...draft, commissionPercent: value, commissionLiability: parseDecimalNumber(value || 0) > 0 ? draft.commissionLiability : "" })} keyboardType="decimal-pad" />
+          {parseDecimalNumber(draft.commissionPercent || 0) > 0 ? (
             <SelectRow label="Whose liability is the commission?" options={commissionLiabilityOptions} value={draft.commissionLiability as CommissionLiability} onChange={(value) => setDraft({ ...draft, commissionLiability: value })} />
           ) : null}
           <Field label="Remarks" value={draft.remarks} onChangeText={(value) => setDraft({ ...draft, remarks: value })} multiline />
@@ -870,8 +870,8 @@ export function TransfersScreen(props: CommonProps) {
             <Field label="Rate" value={journal.rate} onChangeText={(value) => setJournal({ ...journal, rate: value, amount: inputAmount(journal.currency, parseAmount(journal.sourceAmount) * Number(value || 0)) })} keyboardType="decimal-pad" />
             <Field label="Converted amount" value={journal.amount} onChangeText={(value) => setJournal({ ...journal, amount: value })} keyboardType="decimal-pad" />
           </> : <><SelectRow label="Currency" options={supportedCurrencies} value={journal.currency} onChange={(value) => setJournal({ ...journal, currency: value })} /><Field label="Amount" value={journal.amount} onChangeText={(value) => setJournal({ ...journal, amount: value })} keyboardType="decimal-pad" /></>}
-          <Field label="Commission %" value={journal.commissionPercent} onChangeText={(value) => setJournal({ ...journal, commissionPercent: value, commissionLiability: Number(value || 0) > 0 ? journal.commissionLiability : "" })} keyboardType="decimal-pad" />
-          {Number(journal.commissionPercent || 0) > 0 ? (
+          <Field label="Commission %" value={journal.commissionPercent} onChangeText={(value) => setJournal({ ...journal, commissionPercent: value, commissionLiability: parseDecimalNumber(value || 0) > 0 ? journal.commissionLiability : "" })} keyboardType="decimal-pad" />
+          {parseDecimalNumber(journal.commissionPercent || 0) > 0 ? (
             <SelectRow label="Whose liability is the commission?" options={commissionLiabilityOptions} value={journal.commissionLiability as CommissionLiability} onChange={(value) => setJournal({ ...journal, commissionLiability: value })} />
           ) : null}
           <Field label="Remarks" value={journal.remarks} onChangeText={(value) => setJournal({ ...journal, remarks: value })} multiline />
@@ -919,8 +919,8 @@ export function TransfersScreen(props: CommonProps) {
                       <SelectRow label="Payout currency" options={forwardCurrencies.length ? forwardCurrencies : [forwardDraft.payoutCurrency]} value={forwardDraft.payoutCurrency} onChange={(value) => setForwardDrafts((current) => ({ ...current, [transfer.id]: { ...(current[transfer.id] || forwardDraft), payoutCurrency: value } }))} />
                       <Field label="Rate" value={forwardDraft.rate} onChangeText={(value) => updateForwardRate(transfer, value)} keyboardType="decimal-pad" />
                       <Field label="Payout amount" value={forwardDraft.payoutAmount} onChangeText={(value) => updateForwardPayout(transfer, value)} keyboardType="decimal-pad" />
-                      <Field label="Commission %" value={forwardDraft.commissionPercent} onChangeText={(value) => setForwardDrafts((current) => ({ ...current, [transfer.id]: { ...(current[transfer.id] || forwardDraft), commissionPercent: value, commissionLiability: Number(value || 0) > 0 ? (current[transfer.id] || forwardDraft).commissionLiability : "" } }))} keyboardType="decimal-pad" />
-                      {Number(forwardDraft.commissionPercent || 0) > 0 ? (
+                      <Field label="Commission %" value={forwardDraft.commissionPercent} onChangeText={(value) => setForwardDrafts((current) => ({ ...current, [transfer.id]: { ...(current[transfer.id] || forwardDraft), commissionPercent: value, commissionLiability: parseDecimalNumber(value || 0) > 0 ? (current[transfer.id] || forwardDraft).commissionLiability : "" } }))} keyboardType="decimal-pad" />
+                      {parseDecimalNumber(forwardDraft.commissionPercent || 0) > 0 ? (
                         <SelectRow label="Whose liability is the commission?" options={commissionLiabilityOptions} value={forwardDraft.commissionLiability as CommissionLiability} onChange={(value) => setForwardDrafts((current) => ({ ...current, [transfer.id]: { ...(current[transfer.id] || forwardDraft), commissionLiability: value } }))} />
                       ) : null}
                       <Button label="Forward for acceptance" disabled={offline || busy || !forwardReceiver} loading={busy} onPress={() => submitForward(transfer)} />
@@ -1733,6 +1733,7 @@ export function LedgerScreen({ session, state, onState }: CommonProps) {
   const [transactionSort, setTransactionSort] = useState<"Date" | "Order / Transfer No.">("Date");
   const selected = isMasterView(session) ? actorChoices.find((actor) => actor.id === actorId) : actorForSession(session, state);
   const actorName = selected?.name || session.actorName;
+  const masterFinancialView = isMasterView(session);
   const referenceForLine = (line: WorkspaceState["ledger"][number]) => actorLedgerReferenceForLine(state, line, actorName);
   const lines = state.ledger
     .filter((line) => line.archived !== true && (isMasterView(session) ? (!selected || String(line.account).includes(actorName)) : String(line.account).includes(session.actorName)))
@@ -1802,7 +1803,10 @@ export function LedgerScreen({ session, state, onState }: CommonProps) {
         </ScrollView>
       ) : null}
       <Panel title="Running balance" badge={actorName}>
-        {balances.map((item) => <SummaryRow key={item.currency} label={item.currency} value={`${item.minor >= 0 ? "+" : "-"}${compactAmount(item.currency, majorFromMinor(Math.abs(item.minor), item.currency))}`} strong />)}
+        {balances.map((item) => {
+          const position = financialPosition(item.currency, item.minor, masterFinancialView);
+          return <SummaryRow key={item.currency} label={item.currency} value={position.amount} valueTone={position.tone} strong />;
+        })}
       </Panel>
       <SelectRow label="Sort transactions by" options={["Date", "Order / Transfer No."]} value={transactionSort} onChange={setTransactionSort} />
       <ScrollView horizontal showsHorizontalScrollIndicator>
@@ -1810,14 +1814,20 @@ export function LedgerScreen({ session, state, onState }: CommonProps) {
           <View style={[styles.ledgerRow, styles.ledgerHead]}><Text style={styles.colDate}>Date</Text><Text style={styles.colRef}>Journal / No.</Text><Text style={styles.colDirection}>Type</Text><Text style={styles.colAmount}>Amount</Text><Text style={styles.colDetails}>Details</Text></View>
           {lines.map((line, index) => {
             const voided = ledgerLineIsForVoidedOrder(state, line);
-            const commissionCredit = line.direction === "Credit" && Boolean(line.commissionLiability);
+            const signedMinor = line.direction === "Debit" ? Number(line.amountMinor || 0) : -Number(line.amountMinor || 0);
+            const position = financialPosition(line.currency, signedMinor, masterFinancialView);
+            const financialStyle = position.tone === "good"
+              ? styles.ledgerGood
+              : position.tone === "danger"
+                ? styles.ledgerDanger
+                : undefined;
             const details = [voided ? "VOIDED - Excluded from all calculations" : "", line.details || line.source || ""].filter(Boolean).join(" - ");
             return (
               <View key={`${line.journal}-${index}`} style={[styles.ledgerRow, voided && styles.ledgerVoidRow]}>
                 <Text style={[styles.colDate, voided && styles.ledgerVoidText]}>{formatDate(line.postedAt)}</Text>
                 <Text style={[styles.colRef, voided && styles.ledgerVoidText]}>{referenceForLine(line) || "-"}</Text>
-                <Text style={[styles.colDirection, commissionCredit && styles.ledgerCommissionCredit, voided && styles.ledgerVoidText]}>{line.direction}</Text>
-                <Text style={[styles.colAmount, commissionCredit && styles.ledgerCommissionCredit, voided && styles.ledgerVoidText]}>{compactAmount(line.currency, majorFromMinor(line.amountMinor, line.currency))}</Text>
+                <Text style={[styles.colDirection, financialStyle, voided && styles.ledgerVoidText]}>{line.direction}</Text>
+                <Text style={[styles.colAmount, financialStyle, voided && styles.ledgerVoidText]}>{position.amount}</Text>
                 <Text style={[styles.colDetails, voided && styles.ledgerVoidText]} numberOfLines={3}>{details}</Text>
               </View>
             );
@@ -2245,7 +2255,8 @@ const styles = StyleSheet.create({
   ledgerHead: { minHeight: 48, backgroundColor: colors.panel2 },
   ledgerVoidRow: { backgroundColor: colors.dangerSoft, borderBottomColor: colors.cancelledSoft },
   ledgerVoidText: { color: colors.danger },
-  ledgerCommissionCredit: { color: colors.danger, fontWeight: "900" },
+  ledgerGood: { color: colors.good, fontWeight: "900" },
+  ledgerDanger: { color: colors.danger, fontWeight: "900" },
   colDate: { width: 95, padding: spacing.sm, color: colors.ink },
   colRef: { width: 130, padding: spacing.sm, color: colors.ink, fontWeight: "800" },
   colDirection: { width: 90, padding: spacing.sm, color: colors.ink },

@@ -8,6 +8,14 @@ export function parseAmount(value: string): number {
   return Number.isFinite(numeric) && numeric > 0 ? numeric : 0;
 }
 
+export function parseDecimalNumber(value: string | number): number {
+  const raw = String(value ?? "").trim();
+  const normalized = raw.includes(",") && !raw.includes(".")
+    ? raw.replace(",", ".")
+    : raw.replace(/,/g, "");
+  return Number(normalized);
+}
+
 export function currencyDecimals(currency: Currency): number {
   return decimalCurrencies.has(currency) ? 2 : 0;
 }
@@ -44,6 +52,30 @@ export function compactAmount(currency: Currency, amount: number): string {
     .replace(/(\.\d*?[1-9])0+$/, "$1")
     .replace(/\.0+$/, "");
   return `${currency}${formatted}`;
+}
+
+export type FinancialTone = "good" | "danger" | "neutral";
+
+export function financialPosition(
+  currency: Currency,
+  netMinor: number,
+  masterView: boolean
+): { amount: string; label: string; tone: FinancialTone } {
+  const net = Number(netMinor || 0);
+  if (net === 0) {
+    return {
+      amount: compactAmount(currency, 0),
+      label: "Zero balance",
+      tone: "neutral"
+    };
+  }
+  const actorOwesMaster = net > 0;
+  const favorableForViewer = masterView ? actorOwesMaster : !actorOwesMaster;
+  return {
+    amount: `${actorOwesMaster ? "+" : "-"}${compactAmount(currency, majorFromMinor(Math.abs(net), currency))}`,
+    label: actorOwesMaster ? "Actor owes Master" : "Master owes Actor",
+    tone: favorableForViewer ? "good" : "danger"
+  };
 }
 
 export function inputAmount(currency: Currency, amount: number): string {
@@ -104,7 +136,7 @@ export function calculateQuote(draft: TransferDraft): TransferQuote {
   const sourceAmount = normalizedMajor(parseAmount(draft.sourceAmount), draft.sourceCurrency);
   const manualPayout = normalizedMajor(parseAmount(draft.payoutAmount), draft.payoutCurrency);
   const rate = parseAmount(draft.rate);
-  const commissionPercent = parseAmount(draft.commissionPercent);
+  const commissionPercent = Math.max(0, parseDecimalNumber(draft.commissionPercent) || 0);
   const commissionAmount = normalizedMajor(sourceAmount * commissionPercent / 100, draft.sourceCurrency);
   const payoutAmount = manualPayout > 0
     ? manualPayout

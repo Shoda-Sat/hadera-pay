@@ -17,7 +17,7 @@ import type {
   UserSession,
   WorkspaceState
 } from "../types";
-import { compactAmount, majorFromMinor, minorFromMajor, parseAmount } from "../utils/money";
+import { compactAmount, majorFromMinor, minorFromMajor, parseAmount, parseDecimalNumber } from "../utils/money";
 import { actorLedgerSequenceWidth, nextActorLedgerNumber, nextActorLedgerSequence } from "./ledgerNumbering";
 
 export const supportedCurrencies: Currency[] = ["USD", "ETB", "EUR", "ERN", "SSP", "SDG"];
@@ -672,7 +672,7 @@ function transferDetails(transfer: InternalTransferRecord): string {
 function transferCommissionMinor(transfer: Partial<InternalTransferRecord>): number {
   const stored = Number(transfer.commissionMinor || 0);
   if (stored > 0) return stored;
-  return Math.round(Number(transfer.sourceAmountMinor || 0) * Math.max(0, Number(transfer.commissionPercent || 0)) / 100);
+  return Math.round(Number(transfer.sourceAmountMinor || 0) * Math.max(0, parseDecimalNumber(transfer.commissionPercent || 0)) / 100);
 }
 
 function requestedTransferCommissionMinor(transfer: Partial<InternalTransferRecord>): number {
@@ -688,7 +688,7 @@ function forwardedCommissionChangedByMaster(transfer: Partial<InternalTransferRe
   return Boolean(
     transfer.forwardedAt &&
     Number.isFinite(requestedPercent) &&
-    Math.abs(requestedPercent - Math.max(0, Number(transfer.commissionPercent || 0))) > 0.000000001
+    Math.abs(requestedPercent - Math.max(0, parseDecimalNumber(transfer.commissionPercent || 0))) > 0.000000001
   );
 }
 
@@ -778,16 +778,17 @@ export function masterBankEntriesWithRunningBalances(state: WorkspaceState): Mas
       if (transfer.reversalJournal) {
         record({ id: `BANK-TRANSFER-${transfer.id}-REVERSAL`, type: "Transfer Reversal", reference: transfer.reversalJournal, direction: "Credit", currency: sourceCurrency, amountMinor: sourceAmountMinor, details: `Reversal of ${transfer.id}${details ? ` - ${details}` : ""}`, postedAt: transfer.reversedAt || postedAt });
       }
-    } else if (!isMasterName(transfer.from) && !isMasterName(transfer.to)) {
-      const commissionMinor = transferCommissionMinor(transfer);
-      const commissionLiability = normalizedCommissionLiability(transfer.commissionLiability, commissionMinor);
-      if (commissionMinor > 0) {
-        record({ id: `BANK-TRANSFER-${transfer.id}-FEE`, type: commissionLiability === "Receiver" ? "Transfer Fee Income" : "Transfer Fee Expense", reference: transfer.id, direction: commissionLiability === "Receiver" ? "Credit" : "Debit", currency: sourceCurrency, amountMinor: commissionMinor, details: `Commission (${commissionLiability}) for ${transfer.from} to ${transfer.to}${transfer.remarks ? ` - ${transfer.remarks}` : ""}`, postedAt });
-      }
-      const senderCommission = originalSenderCommissionMinor(transfer);
-      if (senderCommission > 0) {
-        record({ id: `BANK-TRANSFER-${transfer.id}-ORIGINAL-SENDER-COMMISSION`, type: "Original Sender Commission", reference: transfer.id, direction: "Debit", currency: sourceCurrency, amountMinor: senderCommission, details: `Original commission owed to ${transfer.from} after Master changed the forwarded percentage`, postedAt });
-      }
+    }
+    const commissionMinor = transferCommissionMinor(transfer);
+    const commissionLiability = normalizedCommissionLiability(transfer.commissionLiability, commissionMinor);
+    const masterReceivesCommission = commissionLiability === "Receiver" && !isMasterName(transfer.to);
+    const masterPaysCommission = commissionLiability !== "Receiver" && !isMasterName(transfer.from);
+    if (commissionMinor > 0 && (masterReceivesCommission || masterPaysCommission)) {
+      record({ id: `BANK-TRANSFER-${transfer.id}-FEE`, type: masterReceivesCommission ? "Transfer Fee Income" : "Transfer Fee Expense", reference: transfer.id, direction: masterReceivesCommission ? "Credit" : "Debit", currency: sourceCurrency, amountMinor: commissionMinor, details: `Commission (${commissionLiability}) for ${transfer.from} to ${transfer.to}${transfer.remarks ? ` - ${transfer.remarks}` : ""}`, postedAt });
+    }
+    const senderCommission = originalSenderCommissionMinor(transfer);
+    if (senderCommission > 0 && !isMasterName(transfer.from)) {
+      record({ id: `BANK-TRANSFER-${transfer.id}-ORIGINAL-SENDER-COMMISSION`, type: "Original Sender Commission", reference: transfer.id, direction: "Debit", currency: sourceCurrency, amountMinor: senderCommission, details: `Original commission owed to ${transfer.from} after Master changed the forwarded percentage`, postedAt });
     }
   });
 
@@ -900,7 +901,7 @@ export async function createInternalTransfer(session: UserSession, draft: Intern
     const sourceMajor = parseAmount(draft.sourceAmount);
     const rate = Number(draft.rate || 0);
     const payoutMajor = parseAmount(draft.payoutAmount) || sourceMajor * rate;
-    const commissionPercent = Number(draft.commissionPercent || 0);
+    const commissionPercent = parseDecimalNumber(draft.commissionPercent || 0);
     const commissionLiability = commissionPercent > 0 && commissionLiabilityOptions.includes(draft.commissionLiability as CommissionLiability)
       ? draft.commissionLiability as CommissionLiability
       : "";
@@ -965,7 +966,7 @@ export async function resubmitInternalTransfer(
       const sourceMajor = parseAmount(draft.sourceAmount);
       const rate = Number(draft.rate || 0);
       const payoutMajor = parseAmount(draft.payoutAmount) || sourceMajor * rate;
-      const commissionPercent = Number(draft.commissionPercent || 0);
+      const commissionPercent = parseDecimalNumber(draft.commissionPercent || 0);
       const commissionLiability = commissionPercent > 0 && commissionLiabilityOptions.includes(draft.commissionLiability as CommissionLiability)
         ? draft.commissionLiability as CommissionLiability
         : "";
@@ -1028,7 +1029,7 @@ export async function forwardInternalTransfer(
       const sourceMajor = majorFromMinor(transfer.sourceAmountMinor, transfer.sourceCurrency);
       const rate = Number(draft.rate || 0);
       const payoutMajor = parseAmount(draft.payoutAmount) || sourceMajor * rate;
-      const commissionPercent = Number(draft.commissionPercent || 0);
+      const commissionPercent = parseDecimalNumber(draft.commissionPercent || 0);
       const commissionLiability = commissionPercent > 0 && commissionLiabilityOptions.includes(draft.commissionLiability as CommissionLiability)
         ? draft.commissionLiability as CommissionLiability
         : "";
@@ -1252,7 +1253,7 @@ export async function postActorJournal(input: { actorId: string; sourceCurrency:
     const sourceMajor = parseAmount(input.sourceAmount);
     const rate = Number(input.rate || 0);
     const amountMajor = parseAmount(input.amount) || sourceMajor * rate;
-    const commissionPercent = Number(input.commissionPercent || 0);
+    const commissionPercent = parseDecimalNumber(input.commissionPercent || 0);
     const commissionLiability = commissionPercent > 0 && commissionLiabilityOptions.includes(input.commissionLiability as CommissionLiability)
       ? input.commissionLiability as CommissionLiability
       : "";
@@ -1308,7 +1309,7 @@ export async function postActorWithdrawal(input: { actorId: string; currency: Cu
   return updateWorkspaceState((state) => {
     const actor = activeActors(state).find((item) => item.id === input.actorId);
     const amountMajor = parseAmount(input.amount);
-    const commissionPercent = Number(input.commissionPercent || 0);
+    const commissionPercent = parseDecimalNumber(input.commissionPercent || 0);
     const commissionLiability = commissionPercent > 0 && commissionLiabilityOptions.includes(input.commissionLiability as CommissionLiability)
       ? input.commissionLiability as CommissionLiability
       : "";

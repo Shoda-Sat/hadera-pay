@@ -213,11 +213,26 @@ export function Pill({ label, tone = "neutral" }: { label: string; tone?: PillTo
   );
 }
 
-export function SummaryRow({ label, value, strong = false }: { label: string; value: string; strong?: boolean }) {
+export function SummaryRow({
+  label,
+  value,
+  strong = false,
+  valueTone = "neutral"
+}: {
+  label: string;
+  value: string;
+  strong?: boolean;
+  valueTone?: "good" | "danger" | "neutral";
+}) {
   return (
     <View style={styles.summaryRow}>
       <Text style={styles.summaryLabel}>{label}</Text>
-      <Text style={[styles.summaryValue, strong && styles.summaryStrong]}>{value}</Text>
+      <Text style={[
+        styles.summaryValue,
+        strong && styles.summaryStrong,
+        valueTone === "good" && styles.summaryGood,
+        valueTone === "danger" && styles.summaryDanger
+      ]}>{value}</Text>
     </View>
   );
 }
@@ -429,5 +444,11 @@ export const styles = StyleSheet.create({
     color: colors.accent,
     fontSize: 16,
     fontWeight: "900"
+  },
+  summaryGood: {
+    color: colors.good
+  },
+  summaryDanger: {
+    color: colors.danger
   }
 });
