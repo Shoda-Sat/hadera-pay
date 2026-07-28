@@ -51,6 +51,7 @@ import { BrandHeader, Button, Field, Panel, Pill, SelectRow, setUserActivityHand
 import type { PillTone } from "./src/components/ui";
 import { colors, radius, shadow, spacing } from "./src/theme";
 import { actingSessionFor, activeActors, calculableLedgerLines, isMasterView, orderRecordIsVoided, orderSortForSession, transferTargetsFor } from "./src/domain/workspace";
+import { ledgerLineBelongsToActor } from "./src/domain/ledgerNumbering";
 import { notifyNewRequiredActions, subscribeToActionNotificationResponses } from "./src/notifications/actionNotifications";
 import {
   ActorsScreen,
@@ -218,7 +219,7 @@ function settlementRowsFor(session: UserSession, workspaceState: WorkspaceState 
   const visibleActors = session.actorRole === "Master" ? actors : actors.filter((actor) => actor.id === session.actorId);
   const balances = new Map<string, Partial<Record<Currency, number>>>();
   calculableLedgerLines(workspaceState).forEach((line) => {
-    const actor = actors.find((candidate) => line.account === candidate.name || line.account === `${candidate.name} ACTOR_CLEARING`);
+    const actor = actors.find((candidate) => ledgerLineBelongsToActor(line, candidate.name));
     if (!actor) return;
     const balance = balances.get(actor.id) || {};
     balance[line.currency] = Number(balance[line.currency] || 0) + (line.direction === "Debit" ? 1 : -1) * Number(line.amountMinor || 0);
@@ -884,7 +885,9 @@ function HomeScreen({
   const assignedOrders = orders.filter((order) => order.state === "Assigned");
   const actorCanSendOrders = canCreateOrders(session);
   const pendingTransfers = (workspaceState?.transfers || []).filter((transfer) => transfer.state === "Pending Approval").length;
-  const ledgerLines = (workspaceState?.ledger || []).filter((line) => session.actorRole === "Master" || String(line.account).includes(session.actorName)).length;
+  const ledgerLines = (workspaceState?.ledger || []).filter((line) =>
+    session.actorRole === "Master" || ledgerLineBelongsToActor(line, session.actorName)
+  ).length;
 
   return (
     <View style={styles.screen}>

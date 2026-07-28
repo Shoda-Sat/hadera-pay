@@ -107,7 +107,7 @@ import {
   updateUsdAgentIncomeRate,
   visibleChatsFor
 } from "../domain/workspace";
-import { actorLedgerReferenceForLine } from "../domain/ledgerNumbering";
+import { actorLedgerReferenceForLine, ledgerAccountBelongsToActor, ledgerLineBelongsToActor } from "../domain/ledgerNumbering";
 import { colors, radius, spacing } from "../theme";
 import type {
   ActorRecord,
@@ -1099,7 +1099,7 @@ export function SearchScreen({ session, state, onNavigate }: CommonProps) {
   };
 
   const ledgerParticipant = (account: string) => {
-    const actor = state.actors.find((candidate) => account === candidate.name || account.startsWith(`${candidate.name} `) || account.startsWith(`${candidate.name}_`));
+    const actor = state.actors.find((candidate) => ledgerAccountBelongsToActor(account, candidate.name));
     return actor?.name || (/^MASTER(?:_|\s|$)/i.test(account) ? "Master" : account);
   };
   const addLedger = (line: WorkspaceState["ledger"][number], type = "Ledger", archivedAt = "") => {
@@ -1744,7 +1744,12 @@ export function LedgerScreen({ session, state, onState }: CommonProps) {
   const masterFinancialView = isMasterView(session);
   const referenceForLine = (line: WorkspaceState["ledger"][number]) => actorLedgerReferenceForLine(state, line, actorName);
   const lines = state.ledger
-    .filter((line) => line.archived !== true && (isMasterView(session) ? (!selected || String(line.account).includes(actorName)) : String(line.account).includes(session.actorName)))
+    .filter((line) =>
+      line.archived !== true &&
+      (isMasterView(session)
+        ? !selected || ledgerLineBelongsToActor(line, actorName)
+        : ledgerLineBelongsToActor(line, session.actorName))
+    )
     .slice()
     .sort((a, b) => transactionSort === "Date"
       ? new Date(b.postedAt || 0).getTime() - new Date(a.postedAt || 0).getTime()

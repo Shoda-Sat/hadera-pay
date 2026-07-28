@@ -69,8 +69,13 @@ function sequenceDetails(reference: string, actorName: string): { value: number;
   return broker ? { value: Number(broker[1]), width: broker[1].length } : null;
 }
 
-function lineBelongsToActor(line: LedgerLine, actorName: string): boolean {
-  return line.account === actorName || line.account === `${actorName} ACTOR_CLEARING`;
+export function ledgerAccountBelongsToActor(account: unknown, actorName: string): boolean {
+  const accountName = String(account || "");
+  return accountName === actorName || accountName === `${actorName} ACTOR_CLEARING`;
+}
+
+export function ledgerLineBelongsToActor(line: LedgerLine, actorName: string): boolean {
+  return ledgerAccountBelongsToActor(line.account, actorName);
 }
 
 export function actorLedgerUsedSequences(state: WorkspaceState, actorName: string): Set<number> {
@@ -80,7 +85,7 @@ export function actorLedgerUsedSequences(state: WorkspaceState, actorName: strin
     if (details && Number.isFinite(details.value) && details.value > 0) used.add(details.value);
   });
   state.ledger
-    .filter((line) => line.archived !== true && lineBelongsToActor(line, actorName))
+    .filter((line) => line.archived !== true && ledgerLineBelongsToActor(line, actorName))
     .forEach((line) => {
       const match = String(line.actorLedgerNumber || "").match(/^(\d+)_/);
       if (match) used.add(Number(match[1]));
@@ -95,7 +100,7 @@ export function nextActorLedgerSequence(state: WorkspaceState, actorName: string
 
 export function actorLedgerSequenceWidth(state: WorkspaceState, actorName: string): number {
   const existingLedgerWidth = state.ledger
-    .filter((line) => line.archived !== true && lineBelongsToActor(line, actorName))
+    .filter((line) => line.archived !== true && ledgerLineBelongsToActor(line, actorName))
     .map((line) => String(line.actorLedgerNumber || "").match(/^(\d+)_/)?.[1]?.length || 0)
     .find((width) => width > 0);
   if (existingLedgerWidth) return existingLedgerWidth;
@@ -132,7 +137,7 @@ export function ensureActorLedgerNumbers(state: WorkspaceState): boolean {
         .filter((line) =>
           line.archived !== true &&
           ["TRANSFER", "TRANSFER_REVERSAL", "JOURNAL", "WITHDRAWAL"].includes(String(line.source || "")) &&
-          lineBelongsToActor(line, actor.name)
+          ledgerLineBelongsToActor(line, actor.name)
         )
         .forEach((line) => {
           const reference = String(line.transferId || line.entryId || line.journal || "");
