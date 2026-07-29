@@ -45,6 +45,6 @@ By default the app talks to `https://haderapay.com`. To point a build at another
 - Owner Master creation with selectable base currency and subscription controls.
 - Master-forwarded orders show the payout actor and payer-specific order number in their state.
 - Settlement balances grouped by Broker, Agent, and Special Agent roles.
-- Currency-safe storage for USD, ETB, EUR, ERN, SSP, and SDG. USD/EUR/SSP/SDG use hundredths, while existing ETB/ERN behavior remains whole-unit based.
+- Currency-safe storage for USD, ETB, EUR, ERN, SSP, SDG, and LYD. USD/EUR/SSP/SDG use hundredths, LYD uses thousandths, and existing ETB/ERN behavior remains whole-unit based.
 - Currency conversion flow screen.
 - Confirmation screen that submits Broker and Special Broker orders for Master routing.

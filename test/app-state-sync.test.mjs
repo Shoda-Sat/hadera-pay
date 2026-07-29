@@ -83,21 +83,30 @@ test("workspace revision checks stay read-only and detect saved changes", async 
       method: "POST",
       body: { email: "Owner", password: ownerPassword },
     });
-    await requestJson(baseUrl, "/api/owner/masters", {
+    const createdMaster = await requestJson(baseUrl, "/api/owner/masters", {
       cookie: ownerLogin.cookie,
       method: "POST",
       body: {
         name: "Sync Test Master",
         email: "sync-test@example.com",
         password: masterPassword,
-        currency: "USD",
+        currency: "LYD",
         plan: "one_month",
       },
     });
+    assert.equal(createdMaster.data.user.currency, "LYD");
     const masterLogin = await requestJson(baseUrl, "/api/auth/login", {
       method: "POST",
       body: { email: "sync-test@example.com", password: masterPassword },
     });
+    assert.equal(masterLogin.data.session.membership.currency, "LYD");
+    const invite = await requestJson(baseUrl, "/api/invites", {
+      cookie: masterLogin.cookie,
+      method: "POST",
+      body: { actorRole: "Special Broker", currency: "LYD", workingCurrencies: [] },
+    });
+    assert.equal(invite.data.invite.currency, "LYD");
+    assert.equal(invite.data.invite.workingCurrencies.includes("LYD"), true);
 
     const initialVersion = await requestJson(baseUrl, "/api/app-state/version", { cookie: masterLogin.cookie });
     const databasePath = path.join(dataDirectory, "auth-db.json");
@@ -107,6 +116,7 @@ test("workspace revision checks stay read-only and detect saved changes", async 
 
     assert.equal(afterStateRead.mtimeNs, beforeStateRead.mtimeNs);
     assert.equal(initialState.data.revision, initialVersion.data.revision);
+    assert.equal(initialState.data.state.actors.some((actor) => actor.role === "Master" && actor.currency === "LYD"), true);
 
     initialState.data.state.syncTestMarker = "changed";
     const saved = await requestJson(baseUrl, "/api/app-state", {

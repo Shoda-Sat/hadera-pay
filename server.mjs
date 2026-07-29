@@ -24,7 +24,7 @@ if (typeof ownerPassword !== "string" || ownerPassword.length < 12) {
   throw new Error("OWNER_PASSWORD is required and must contain at least 12 characters.");
 }
 const maxJsonBodyBytes = 12 * 1024 * 1024;
-const supportedCurrencies = ["USD", "ETB", "EUR", "ERN", "SSP", "SDG"];
+const supportedCurrencies = ["USD", "ETB", "EUR", "ERN", "SSP", "SDG", "LYD"];
 const supportedCurrencySet = new Set(supportedCurrencies);
 const r2AccountId = String(process.env.R2_ACCOUNT_ID || "").trim();
 const r2BucketName = String(process.env.R2_BUCKET_NAME || "").trim();

@@ -1999,7 +1999,8 @@ export function SettingsScreen({ session, state, offline, onState, onSessionTime
     usdToEtb: String(state.buyingRates?.usdToEtb || ""),
     usdToErn: String(state.buyingRates?.usdToErn || ""),
     usdToSsp: String(state.buyingRates?.usdToSsp || 1),
-    usdToSdg: String(state.buyingRates?.usdToSdg || 1)
+    usdToSdg: String(state.buyingRates?.usdToSdg || 1),
+    usdToLyd: String(state.buyingRates?.usdToLyd || 1)
   });
   const [statementRates, setStatementRates] = useState<Record<Currency, { enabled: boolean; divider: string; percent: string }>>(() => Object.fromEntries(supportedCurrencies.map((currency) => [currency, {
     enabled: state.masterRateDivisorSettings?.[currency]?.enabled === true,
@@ -2047,7 +2048,8 @@ export function SettingsScreen({ session, state, offline, onState, onSessionTime
         usdToEtb: Number(buying.usdToEtb),
         usdToErn: Number(buying.usdToErn),
         usdToSsp: Number(buying.usdToSsp),
-        usdToSdg: Number(buying.usdToSdg)
+        usdToSdg: Number(buying.usdToSdg),
+        usdToLyd: Number(buying.usdToLyd)
       }));
     } catch (error) {
       Alert.alert("Buying rates", errorMessage(error));
@@ -2140,6 +2142,7 @@ export function SettingsScreen({ session, state, offline, onState, onSessionTime
           <Field label="USD to ERN" value={buying.usdToErn} onChangeText={(value) => setBuying({ ...buying, usdToErn: value })} keyboardType="decimal-pad" />
           <Field label="USD to SSP" value={buying.usdToSsp} onChangeText={(value) => setBuying({ ...buying, usdToSsp: value })} keyboardType="decimal-pad" />
           <Field label="USD to SDG" value={buying.usdToSdg} onChangeText={(value) => setBuying({ ...buying, usdToSdg: value })} keyboardType="decimal-pad" />
+          <Field label="USD to LYD" value={buying.usdToLyd} onChangeText={(value) => setBuying({ ...buying, usdToLyd: value })} keyboardType="decimal-pad" />
           <Button label="Save buying rates" loading={busy === "buying"} disabled={offline} onPress={saveRates} />
         </Panel>
         <Panel title="Income statement rates" badge="Future orders only">

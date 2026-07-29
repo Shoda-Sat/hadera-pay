@@ -20,7 +20,7 @@ import type {
 import { compactAmount, majorFromMinor, minorFromMajor, parseAmount, parseDecimalNumber } from "../utils/money";
 import { actorLedgerSequenceWidth, nextActorLedgerNumber, nextActorLedgerSequence } from "./ledgerNumbering";
 
-export const supportedCurrencies: Currency[] = ["USD", "ETB", "EUR", "ERN", "SSP", "SDG"];
+export const supportedCurrencies: Currency[] = ["USD", "ETB", "EUR", "ERN", "SSP", "SDG", "LYD"];
 export const commissionLiabilityOptions: CommissionLiability[] = ["Sender", "Master", "Receiver"];
 export const pendingCancelledOrderStates = new Set<OrderRecord["state"]>(["Assigned", "Returned", "Voided", "Cancelled"]);
 const processingOrderIds = new Set<string>();
@@ -350,6 +350,7 @@ type BuyingRates = {
   usdToErn: number;
   usdToSsp: number;
   usdToSdg: number;
+  usdToLyd: number;
 };
 
 function buyingRates(state: WorkspaceState): BuyingRates {
@@ -358,7 +359,8 @@ function buyingRates(state: WorkspaceState): BuyingRates {
     usdToEtb: Number(state.buyingRates?.usdToEtb) > 0 ? Number(state.buyingRates?.usdToEtb) : 1,
     usdToErn: Number(state.buyingRates?.usdToErn) > 0 ? Number(state.buyingRates?.usdToErn) : 1,
     usdToSsp: Number(state.buyingRates?.usdToSsp) > 0 ? Number(state.buyingRates?.usdToSsp) : 1,
-    usdToSdg: Number(state.buyingRates?.usdToSdg) > 0 ? Number(state.buyingRates?.usdToSdg) : 1
+    usdToSdg: Number(state.buyingRates?.usdToSdg) > 0 ? Number(state.buyingRates?.usdToSdg) : 1,
+    usdToLyd: Number(state.buyingRates?.usdToLyd) > 0 ? Number(state.buyingRates?.usdToLyd) : 1
   };
 }
 
@@ -367,6 +369,7 @@ function usdToLocalBuyingRate(rates: BuyingRates, currency: Currency): number {
   if (currency === "ERN") return rates.usdToErn;
   if (currency === "SSP") return rates.usdToSsp;
   if (currency === "SDG") return rates.usdToSdg;
+  if (currency === "LYD") return rates.usdToLyd;
   return 0;
 }
 
@@ -417,6 +420,8 @@ function freezeIncome(state: WorkspaceState, order: OrderRecord, lines: LedgerLi
   }
   let collectedUsdMinor = sourceCurrency === "USD" ? collectedMinor : sourceCurrency === "EUR"
     ? minorFromMajor(majorFromMinor(collectedMinor, "EUR") * rates.eurToUsd, "USD")
+    : sourceCurrency === "LYD"
+      ? currencyToUsd(state, sourceCurrency, collectedMinor)
     : 0;
   let profitMinor = collectedUsdMinor - baseAmountMinor;
   const broker = activeActors(state).find((actor) => actor.name === order.broker);
@@ -424,7 +429,7 @@ function freezeIncome(state: WorkspaceState, order: OrderRecord, lines: LedgerLi
     const collectedEur = majorFromMinor(collectedMinor, "EUR");
     const payoutMajor = majorFromMinor(order.payoutAmountMinor, payoutCurrency);
     const localRate = payoutCurrency === "USD" ? rates.usdToEtb : usdToLocalBuyingRate(rates, payoutCurrency);
-    if (["ETB", "ERN", "SSP", "SDG", "USD"].includes(payoutCurrency) && localRate > 0) {
+    if (["ETB", "ERN", "SSP", "SDG", "LYD", "USD"].includes(payoutCurrency) && localRate > 0) {
       const payoutLocal = payoutCurrency === "USD" ? payoutMajor * rates.usdToEtb : payoutMajor;
       profitMinor = minorFromMajor(((collectedEur * rates.eurToUsd * localRate) - payoutLocal) / localRate, "USD");
       if (!usdPayoutActorBaseMinor && !(payingActor && actorHasSpecialPayout(payingActor.role))) baseAmountMinor = collectedUsdMinor - profitMinor;

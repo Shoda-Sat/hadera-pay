@@ -1,7 +1,15 @@
 import type { Currency, TransferDraft, TransferQuote } from "../types";
 
-export const currencies: Currency[] = ["USD", "ETB", "EUR", "ERN", "SSP", "SDG"];
-const decimalCurrencies = new Set<Currency>(["USD", "EUR", "SSP", "SDG"]);
+export const currencies: Currency[] = ["USD", "ETB", "EUR", "ERN", "SSP", "SDG", "LYD"];
+const currencyDecimalPlaces: Record<Currency, number> = {
+  USD: 2,
+  ETB: 0,
+  EUR: 2,
+  ERN: 0,
+  SSP: 2,
+  SDG: 2,
+  LYD: 3
+};
 
 export function parseAmount(value: string): number {
   const numeric = Number(String(value || "").replace(/,/g, "").trim());
@@ -17,11 +25,11 @@ export function parseDecimalNumber(value: string | number): number {
 }
 
 export function currencyDecimals(currency: Currency): number {
-  return decimalCurrencies.has(currency) ? 2 : 0;
+  return currencyDecimalPlaces[currency];
 }
 
 export function currencyFactor(currency: Currency): number {
-  return decimalCurrencies.has(currency) ? 100 : 1;
+  return 10 ** currencyDecimals(currency);
 }
 
 export function minorFromMajor(value: number, currency: Currency): number {

@@ -73,7 +73,7 @@ async function deviceId(): Promise<string> {
 }
 
 function safeCurrency(value: unknown, fallback: Currency = "USD"): Currency {
-  return ["USD", "ETB", "EUR", "ERN", "SSP", "SDG"].includes(String(value)) ? value as Currency : fallback;
+  return ["USD", "ETB", "EUR", "ERN", "SSP", "SDG", "LYD"].includes(String(value)) ? value as Currency : fallback;
 }
 
 async function api<T>(path: string, options: ApiOptions = {}): Promise<ApiEnvelope<T>> {

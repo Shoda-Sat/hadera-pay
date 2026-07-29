@@ -2535,7 +2535,7 @@
         </div>
         <div class="top-actions">
           <span class="badge good" id="balanceBadge">Balanced</span>
-          <span class="badge" id="currencyBadge">USD / ETB / EUR / ERN / SSP / SDG</span>
+          <span class="badge" id="currencyBadge">USD / ETB / EUR / ERN / SSP / SDG / LYD</span>
           <span class="badge" id="profileBadge">Master</span>
           <span class="badge" id="accountBadge">Not logged in</span>
           <a class="btn secondary app-download-link topbar-action" href="https://github.com/Shoda-Sat/hadera-pay/releases/latest/download/haderapay-android.apk" download aria-label="Download Android app" title="Download Android app">
@@ -3111,7 +3111,7 @@
               <div class="panel-body table-wrap ledger-table-wrap" id="ledgerTableWrap">
                 <table class="ledger-table" id="ledgerTable">
                   <thead>
-                    <tr id="ledgerHeadRow"><th>Date</th><th>Journal</th><th>Order / Transfer No.</th><th>Source</th><th>Details</th><th>Account</th><th>Direction</th><th>USD</th><th>ETB</th><th>EUR</th><th>ERN</th><th>SSP</th><th>SDG</th></tr>
+                    <tr id="ledgerHeadRow"><th>Date</th><th>Journal</th><th>Order / Transfer No.</th><th>Source</th><th>Details</th><th>Account</th><th>Direction</th><th>USD</th><th>ETB</th><th>EUR</th><th>ERN</th><th>SSP</th><th>SDG</th><th>LYD</th></tr>
                   </thead>
                   <tbody id="ledgerRows"></tbody>
                 </table>
@@ -3131,7 +3131,7 @@
               <div class="table-wrap" id="trialBalanceTableWrap">
                 <table>
                   <thead>
-                    <tr><th>Actor</th><th>Role</th><th>USD</th><th>ETB</th><th>EUR</th><th>ERN</th><th>SSP</th><th>SDG</th><th>Running Position</th></tr>
+                    <tr><th>Actor</th><th>Role</th><th>USD</th><th>ETB</th><th>EUR</th><th>ERN</th><th>SSP</th><th>SDG</th><th>LYD</th><th>Running Position</th></tr>
                   </thead>
                   <tbody id="trialBalanceRows"></tbody>
                 </table>
@@ -3406,6 +3406,7 @@
                         <option>ERN</option>
                         <option>SSP</option>
                         <option>SDG</option>
+                        <option>LYD</option>
                       </select>
                     </div>
                     <div class="field">
@@ -3722,7 +3723,7 @@
     const maxChatVoiceDurationMs = 5 * 60 * 1000;
     const attachmentDownloadCache = new Map();
     const paymentProofAccept = ".jpg,.jpeg,.png,image/jpeg,image/png";
-    const supportedCurrencies = ["USD", "ETB", "EUR", "ERN", "SSP", "SDG"];
+    const supportedCurrencies = ["USD", "ETB", "EUR", "ERN", "SSP", "SDG", "LYD"];
 
     function actorCanInitiateOrders(role) {
       return ["Broker", "Special Broker"].includes(role);
@@ -3756,7 +3757,8 @@
         usdToEtb: Number(settings.usdToEtb) > 0 ? Number(settings.usdToEtb) : 1,
         usdToErn: Number(settings.usdToErn) > 0 ? Number(settings.usdToErn) : 1,
         usdToSsp: Number(settings.usdToSsp) > 0 ? Number(settings.usdToSsp) : 1,
-        usdToSdg: Number(settings.usdToSdg) > 0 ? Number(settings.usdToSdg) : 1
+        usdToSdg: Number(settings.usdToSdg) > 0 ? Number(settings.usdToSdg) : 1,
+        usdToLyd: Number(settings.usdToLyd) > 0 ? Number(settings.usdToLyd) : 1
       };
     }
 
@@ -3893,7 +3895,7 @@
         { id: "ACT-0", name: "Master", role: "Master", currency: "USD", active: true, transferEnabled: true },
         { id: "ACT-1", name: "Eastline Broker", role: "Broker", currency: "USD", active: true, transferEnabled: true },
         { id: "ACT-2", name: "Hadera Agent", role: "Agent", currency: "USD", active: true, transferEnabled: true },
-        { id: "ACT-3", name: "Special Broker One", role: "Special Broker", currency: "ETB", workingCurrencies: ["USD", "ETB", "EUR", "ERN", "SSP", "SDG"], active: true, transferEnabled: true },
+        { id: "ACT-3", name: "Special Broker One", role: "Special Broker", currency: "ETB", workingCurrencies: ["USD", "ETB", "EUR", "ERN", "SSP", "SDG", "LYD"], active: true, transferEnabled: true },
         { id: "ACT-4", name: "Addis Agent", role: "Agent", currency: "ETB", active: true, transferEnabled: true },
         { id: "ACT-5", name: "Multi-Currency Agent", role: "Special Agent", currency: "USD", workingCurrencies: ["USD", "ETB", "EUR"], active: true, transferEnabled: true }
       ],
@@ -5245,9 +5247,9 @@
       subscriptionExpiryWarning: document.getElementById("subscriptionExpiryWarning")
     };
 
-    const decimalCurrencies = new Set(["USD", "EUR", "SSP", "SDG"]);
-    const currencyFactor = (currency) => decimalCurrencies.has(currency) ? 100 : 1;
-    const currencyDecimals = (currency) => decimalCurrencies.has(currency) ? 2 : 0;
+    const currencyDecimalPlaces = { USD: 2, ETB: 0, EUR: 2, ERN: 0, SSP: 2, SDG: 2, LYD: 3 };
+    const currencyDecimals = (currency) => currencyDecimalPlaces[currency] ?? 0;
+    const currencyFactor = (currency) => 10 ** currencyDecimals(currency);
 
     const money = (currency, amountMinor) => {
       const decimals = currencyDecimals(currency);
@@ -7000,6 +7002,7 @@
       if (currency === "ERN") return rates.usdToErn;
       if (currency === "SSP") return rates.usdToSsp;
       if (currency === "SDG") return rates.usdToSdg;
+      if (currency === "LYD") return rates.usdToLyd;
       return 1;
     }
 
@@ -8141,11 +8144,15 @@
                 <span>USD to SDG</span>
                 <input class="buying-rate-input" data-rate="usdToSdg" type="text" inputmode="decimal" value="${escapeHtml(formatRate(rates.usdToSdg))}" placeholder="Rate" aria-label="USD to SDG buying rate">
               </label>
+              <label class="manual-divider-field">
+                <span>USD to LYD</span>
+                <input class="buying-rate-input" data-rate="usdToLyd" type="text" inputmode="decimal" value="${escapeHtml(formatRate(rates.usdToLyd))}" placeholder="Rate" aria-label="USD to LYD buying rate">
+              </label>
               <button class="btn primary save-buying-rates" type="button">Save</button>
             </div>
           </td>
           <td>EUR/USD ${escapeHtml(formatRate(rates.eurToUsd))}</td>
-          <td><span class="muted">Local payout rates cover ETB, ERN, SSP, and SDG</span></td>
+          <td><span class="muted">Local payout rates cover ETB, ERN, SSP, SDG, and LYD</span></td>
         </tr>
         <tr>
           <td><strong>${escapeHtml(master?.name || "Master")}</strong><br><span class="muted">Base ${escapeHtml(masterBaseCurrency())}</span></td>
@@ -9203,6 +9210,7 @@
       if (code === "ERN" && rates.usdToErn > 0) return minorFromMajor(major / rates.usdToErn, "USD");
       if (code === "SSP" && rates.usdToSsp > 0) return minorFromMajor(major / rates.usdToSsp, "USD");
       if (code === "SDG" && rates.usdToSdg > 0) return minorFromMajor(major / rates.usdToSdg, "USD");
+      if (code === "LYD" && rates.usdToLyd > 0) return minorFromMajor(major / rates.usdToLyd, "USD");
       return 0;
     }
 
@@ -9293,7 +9301,7 @@
           : 0;
         const payoutMajor = majorAmount(ledgerPayoutMinor || Number(order.payoutAmountMinor || 0), payoutCurrency);
         let buyingProfitMinor = null;
-        if (brokerBaseCurrency === "EUR" && ["ETB", "ERN", "SSP", "SDG"].includes(payoutCurrency) && localRate > 0) {
+        if (brokerBaseCurrency === "EUR" && ["ETB", "ERN", "SSP", "SDG", "LYD"].includes(payoutCurrency) && localRate > 0) {
           buyingProfitMinor = minorFromMajor(((collectedEurMajor * rates.eurToUsd * localRate) - payoutMajor) / localRate, "USD");
         }
         if (brokerBaseCurrency === "EUR" && payoutCurrency === "USD" && rates.usdToEtb > 0) {
@@ -14833,7 +14841,7 @@
         for (const input of inputs) {
           const key = input.dataset.rate;
           const rate = Number(input.value || 0);
-          if (!["eurToUsd", "usdToEtb", "usdToErn", "usdToSsp", "usdToSdg"].includes(key)) continue;
+          if (!["eurToUsd", "usdToEtb", "usdToErn", "usdToSsp", "usdToSdg", "usdToLyd"].includes(key)) continue;
           if (!Number.isFinite(rate) || rate <= 0) {
             input.setCustomValidity("Enter a rate greater than zero.");
             input.reportValidity();

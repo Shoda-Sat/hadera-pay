@@ -1,4 +1,4 @@
-export type Currency = "USD" | "ETB" | "EUR" | "ERN" | "SSP" | "SDG";
+export type Currency = "USD" | "ETB" | "EUR" | "ERN" | "SSP" | "SDG" | "LYD";
 export type AuthMode = "login" | "signup";
 export type AppScreen =
   | "home"
@@ -435,6 +435,7 @@ export interface WorkspaceState {
     usdToErn?: number;
     usdToSsp?: number;
     usdToSdg?: number;
+    usdToLyd?: number;
   };
   orderCounter?: number;
   receivableCounter?: number;
