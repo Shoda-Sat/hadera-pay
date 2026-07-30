@@ -144,6 +144,23 @@ test("Special Agent report PDFs place converted base amounts in the base-currenc
   assert.equal(eurBaseRow.EUR, "123.45");
   assert.equal(eurBaseRow.ERN, "2,222");
 
+  const [voidedWebRow] = archiveExportRows([{
+    ...commonRecord,
+    baseCurrency: "USD",
+    currency: "ETB",
+    amountMinor: 500000,
+    convertedBaseAmountMinor: 272777,
+    details: "Excluded from all calculations",
+    status: "Voided - Excluded",
+    voided: true,
+  }], pdfOptions);
+  assert.equal(voidedWebRow.Amount, "500,000 ETB");
+  assert.equal(voidedWebRow.USD, "");
+  assert.equal(voidedWebRow.ETB, "");
+  assert.equal(voidedWebRow.__voided, true);
+  assert.equal(Object.keys(voidedWebRow).includes("__voided"), false);
+  assert.match(index, /fill: voided \? \[253, 232, 232\] : undefined/);
+
   const privilegeViews = evaluateFunction(index, "privilegeViews", { selectedActor: () => null });
   ["Broker", "Agent", "Special Broker", "Special Agent"].forEach((role) => {
     assert.equal(privilegeViews(role, { role, transferEnabled: true }).includes("archive"), true);
@@ -229,4 +246,49 @@ test("Android report PDF export is available to every Actor and preserves base-c
   }], [], { ...specialAgentViewer, currency: "EUR" });
   assert.equal(eurBaseRow.currencyAmounts.EUR, "123.45");
   assert.equal(eurBaseRow.currencyAmounts.ERN, "2,222");
+
+  const voidedArchive = {
+    id: "ARC-VOID",
+    actor: "Actor One",
+    actorId: "ACT-1",
+    actorRole: "Broker",
+    actorCurrency: "USD",
+    closedAt: "2026-07-25T00:00:00.000Z",
+    balances: {},
+    orders: [{
+      id: "ORD-VOID",
+      brokerOrderNumber: "007_ACT001",
+      broker: "Actor One",
+      agent: "Paying Actor",
+      sourceCurrency: "USD",
+      sourceAmountMinor: 10000,
+      payoutCurrency: "USD",
+      payoutAmountMinor: 10000,
+      state: "Voided",
+      createdAt: "2026-07-24T00:00:00.000Z",
+      updatedAt: "2026-07-25T00:00:00.000Z",
+      createdBy: "Actor One",
+    }],
+  };
+  const brokerViewer = {
+    actorId: "ACT-1",
+    actorName: "Actor One",
+    actorRole: "Broker",
+    currency: "USD",
+  };
+  const [voidedAndroidRow] = reportModule.archiveReportPdfRows([voidedArchive], [], brokerViewer);
+  assert.equal(voidedAndroidRow.voided, true);
+  assert.equal(voidedAndroidRow.amount, "100.00 USD");
+  assert.equal(voidedAndroidRow.currencyAmounts.USD, "100.00");
+  assert.equal(voidedAndroidRow.status, "Voided - Excluded");
+
+  const voidedAndroidHtml = reportModule.buildArchiveReportPdfHtml(
+    "Voided order report",
+    [voidedArchive],
+    [],
+    brokerViewer
+  );
+  assert.match(voidedAndroidHtml, /<tr class="void-row">/);
+  assert.match(voidedAndroidHtml, /background: #fde8e8; color: #9f1f26;/);
+  assert.match(voidedAndroidHtml, /100\.00 USD<\/td>\s*<td><\/td>\s*<td>Voided - Excluded<\/td>/);
 });

@@ -9723,6 +9723,7 @@
 
       let y = drawPageHeading();
       rows.forEach((row) => {
+        const voided = row.__voided === true || String(row.Status || "").startsWith("Voided");
         const cellLines = headers.map((header, index) => wrapCell(row[header], widths[index]));
         const rowLineCount = Math.max(...cellLines.map((lines) => lines.length), 1);
         let lineOffset = 0;
@@ -9737,9 +9738,12 @@
           const segmentLineCount = Math.min(rowLineCount - lineOffset, availableLines);
           const segmentLines = cellLines.map((lines) => lines.slice(lineOffset, lineOffset + segmentLineCount));
           const segmentHeight = segmentLineCount * lineHeight + cellPadding * 2;
-          doc.setTextColor(24, 36, 30);
+          doc.setTextColor(...(voided ? [159, 31, 38] : [24, 36, 30]));
           doc.setFontSize(bodyFontSize);
-          drawCells(segmentLines, y, segmentHeight, { fontSize: bodyFontSize });
+          drawCells(segmentLines, y, segmentHeight, {
+            fill: voided ? [253, 232, 232] : undefined,
+            fontSize: bodyFontSize
+          });
           y += segmentHeight;
           lineOffset += segmentLineCount;
         }
@@ -9857,6 +9861,7 @@
       const showCurrencyColumns = currencies.length > 1;
       const showPaidOut = orderedRecords.some((record) => Boolean(record.paidOut));
       const buildRow = (record) => {
+        const voided = record.voided === true || String(record.status || "").startsWith("Voided");
         const exportedAmountMinor = pdfMode && Number.isFinite(Number(record.signedAmountMinor))
           ? Number(record.signedAmountMinor)
           : Number(record.amountMinor || 0);
@@ -9882,7 +9887,9 @@
               record.convertedBaseAmountMinor !== null &&
               record.convertedBaseAmountMinor !== undefined &&
               Number.isFinite(convertedBaseAmountMinor);
-            row[currency] = record.currency === currency
+            row[currency] = voided
+              ? ""
+              : record.currency === currency
               ? formatMinor(exportedAmountMinor, currency)
               : hasConvertedBaseAmount && record.baseCurrency === currency
                 ? formatMinor(convertedBaseAmountMinor, currency)
@@ -9890,6 +9897,7 @@
           });
         }
         row.Status = record.status;
+        Object.defineProperty(row, "__voided", { value: voided, enumerable: false });
         return row;
       };
       return orderedRecords.map(buildRow);
@@ -11747,11 +11755,13 @@
         const date = receivable.archivedAt || lastPayment?.paidAt || archive.closedAt;
         const currency = receivable.currency || "USD";
         const amountMinor = Number(receivable.principalMinor || 0);
+        const voided = receivableIsVoided(receivable) || orderRecordIsVoided(linkedOrder);
         const direction = receivable.borrower ? `Borrower: ${receivable.borrower}` : "";
         const details = [
           receivable.receiverName ? `Receiver: ${receivable.receiverName}` : "",
           receivable.receiverCity ? `Receiver City: ${receivable.receiverCity}` : "",
-          `Collected: ${money(currency, receivablePaidMinor(receivable))}`
+          `Collected: ${money(currency, receivablePaidMinor(receivable))}`,
+          voided ? "Excluded from all calculations" : ""
         ].filter(Boolean).join(" - ");
         addRow({
           date,
@@ -11762,7 +11772,9 @@
           direction,
           details,
           currency,
-          amountMinor
+          amountMinor,
+          voided,
+          status: voided ? "Voided - Excluded" : "Locked"
         }, [
           receivable.id,
           receivable.orderId,
@@ -11818,7 +11830,11 @@
       (archive.ledger || []).forEach((line) => {
         const date = line.postedAt || archive.closedAt;
         const reference = line.actorLedgerNumber || line.entryId || line.transferId || line.orderId || line.journal;
-        const details = line.details || `${line.account} ${line.direction}`;
+        const voided = ledgerLineIsForVoidedOrder(line);
+        const details = [
+          line.details || `${line.account} ${line.direction}`,
+          voided ? "Excluded from all calculations" : ""
+        ].filter(Boolean).join(" - ");
         addRow({
           date,
           type: line.source === "JOURNAL" ? "Journal" : line.source === "WITHDRAWAL" ? "Withdrawal" : "Ledger",
@@ -11828,7 +11844,9 @@
           direction: line.direction || "",
           details,
           currency: line.currency || "USD",
-          amountMinor: Number(line.amountMinor || 0)
+          amountMinor: Number(line.amountMinor || 0),
+          voided,
+          status: voided ? "Voided - Excluded" : "Locked"
         }, [reference, line.journal, line.source, line.account, line.direction, line.details, details]);
       });
       return rows;

@@ -20,6 +20,7 @@ export interface ReportPdfRow {
   paidOut: string;
   currencyAmounts: Partial<Record<Currency, string>>;
   status: string;
+  voided: boolean;
 }
 
 function archiveMonthKey(value: string | undefined): string {
@@ -113,7 +114,9 @@ function orderRow(
   const paidOut = ["Special Agent", "Special Broker"].includes(archiveActorRole(archive, actors))
     ? moneyLabel(payoutCurrency, payoutAmountMinor)
     : "";
-  const voided = order.state === "Voided" || Boolean(order.voidJournal || order.excludedFromCalculations);
+  const voided = order.state === "Voided" || Boolean(
+    order.voidedAt || order.voidJournal || order.excludedFromCalculations
+  );
   return {
     date: formatDate(order.sentAt || order.createdAt || archive.closedAt),
     statement: statementLabel(archive),
@@ -133,6 +136,7 @@ function orderRow(
     paidOut,
     currencyAmounts: { [amount.currency]: formattedMinor(amount.currency, amount.amountMinor) },
     status: voided ? "Voided - Excluded" : "Locked",
+    voided,
   };
 }
 
@@ -171,6 +175,7 @@ function transferRow(
     paidOut: "",
     currencyAmounts,
     status: "Locked",
+    voided: false,
   };
 }
 
@@ -179,6 +184,14 @@ function archiveRows(archive: ArchiveRecord, actors: ActorRecord[], viewer: User
   (archive.orders || []).forEach((order) => rows.push(orderRow(archive, order, actors, viewer)));
   (archive.receivables || []).forEach((receivable) => {
     const currency = receivable.currency || "USD";
+    const linkedOrder = (archive.orders || []).find((order) =>
+      order.id === receivable.orderId ||
+      order.internalOrderId === receivable.orderId ||
+      order.brokerOrderNumber === receivable.brokerOrderNumber
+    );
+    const voided = receivable.voided === true || Boolean(receivable.voidedAt) ||
+      linkedOrder?.state === "Voided" ||
+      Boolean(linkedOrder?.voidedAt || linkedOrder?.voidJournal || linkedOrder?.excludedFromCalculations);
     rows.push({
       date: formatDate(receivable.archivedAt || archive.closedAt),
       statement: statementLabel(archive),
@@ -189,16 +202,19 @@ function archiveRows(archive: ArchiveRecord, actors: ActorRecord[], viewer: User
       details: [
         receivable.receiverName ? `Receiver: ${receivable.receiverName}` : "",
         receivable.receiverCity ? `Receiver City: ${receivable.receiverCity}` : "",
+        voided ? "Excluded from all calculations" : "",
       ].filter(Boolean).join(" - "),
       amount: moneyLabel(currency, Number(receivable.principalMinor || 0)),
       paidOut: "",
       currencyAmounts: { [currency]: formattedMinor(currency, Number(receivable.principalMinor || 0)) },
-      status: "Locked",
+      status: voided ? "Voided - Excluded" : "Locked",
+      voided,
     });
   });
   (archive.transfers || []).forEach((transfer) => rows.push(transferRow(archive, transfer, actors, viewer)));
   (archive.ledger || []).forEach((line) => {
     const currency = line.currency || "USD";
+    const voided = line.voided === true || line.excludedFromCalculations === true;
     rows.push({
       date: formatDate(line.postedAt || archive.closedAt),
       statement: statementLabel(archive),
@@ -206,11 +222,15 @@ function archiveRows(archive: ArchiveRecord, actors: ActorRecord[], viewer: User
       type: line.source === "JOURNAL" ? "Journal" : line.source === "WITHDRAWAL" ? "Withdrawal" : "Ledger",
       reference: String(line.actorLedgerNumber || line.entryId || line.transferId || line.orderId || line.journal || ""),
       direction: line.direction || "",
-      details: line.details || line.account || "",
+      details: [
+        line.details || line.account || "",
+        voided ? "Excluded from all calculations" : "",
+      ].filter(Boolean).join(" - "),
       amount: moneyLabel(currency, Number(line.amountMinor || 0)),
       paidOut: "",
       currencyAmounts: { [currency]: formattedMinor(currency, Number(line.amountMinor || 0)) },
-      status: "Locked",
+      status: voided ? "Voided - Excluded" : "Locked",
+      voided,
     });
   });
   currencies.forEach((currency) => {
@@ -230,6 +250,7 @@ function archiveRows(archive: ArchiveRecord, actors: ActorRecord[], viewer: User
       paidOut: "",
       currencyAmounts: { [currency]: formattedMinor(currency, netMinor) },
       status: "Locked",
+      voided: false,
     });
   });
   return rows;
@@ -264,7 +285,7 @@ export function buildArchiveReportPdfHtml(
     rows.some((row) => row.currencyAmounts[currency] !== undefined)
   );
   const body = rows.map((row) => `
-    <tr class="${row.status.startsWith("Voided") ? "void-row" : ""}">
+    <tr class="${row.voided ? "void-row" : ""}">
       <td>${escapeHtml(row.date)}</td>
       <td>${escapeHtml(row.statement)}</td>
       <td>${escapeHtml(row.actor)}</td>
@@ -274,7 +295,7 @@ export function buildArchiveReportPdfHtml(
       <td class="details">${escapeHtml(row.details)}</td>
       <td>${escapeHtml(row.amount)}</td>
       ${rows.some((item) => item.paidOut) ? `<td>${escapeHtml(row.paidOut)}</td>` : ""}
-      ${presentCurrencies.map((currency) => `<td>${escapeHtml(row.currencyAmounts[currency] || "")}</td>`).join("")}
+      ${presentCurrencies.map((currency) => `<td>${escapeHtml(row.voided ? "" : row.currencyAmounts[currency] || "")}</td>`).join("")}
       <td>${escapeHtml(row.status)}</td>
     </tr>
   `).join("");
@@ -297,7 +318,7 @@ export function buildArchiveReportPdfHtml(
         th { background: #e8f2ed; font-size: 7px; font-weight: 700; }
         td { line-height: 1.28; }
         .details { width: 22%; }
-        .void-row td { color: #9f1f26; text-decoration: line-through; }
+        .void-row td { background: #fde8e8; color: #9f1f26; }
         .empty { padding: 18px; color: #526058; }
       </style>
     </head>
