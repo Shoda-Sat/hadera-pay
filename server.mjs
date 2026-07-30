@@ -550,6 +550,11 @@ function masterSubscriptionRows(db) {
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
+function validEmailAddress(value) {
+  const email = String(value || "").trim();
+  return email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
 function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
   const hash = crypto.pbkdf2Sync(String(password), salt, 120000, 32, "sha256").toString("hex");
   return `${salt}:${hash}`;
@@ -1970,6 +1975,48 @@ async function handleApi(request, response, url) {
     targetUser.active = body.active === true;
     await saveDb(db);
     sendJson(response, 200, { ok: true, user: { id: targetUser.id, active: targetUser.active } });
+    return;
+  }
+
+  if (url.pathname === "/api/owner/masters/email" && method === "POST") {
+    if (!requireOwner(session, response)) return;
+    const body = await readJson(request);
+    const userId = String(body.userId || "");
+    const email = String(body.email || "").trim().toLowerCase();
+    const targetUser = db.users.find((user) => user.id === userId);
+    const targetMembership = db.memberships.find((membership) =>
+      membership.userId === userId && membership.role === "Master"
+    );
+    if (!targetUser || !targetMembership) {
+      return sendJson(response, 404, { error: "Master user was not found." });
+    }
+    if (!validEmailAddress(email)) {
+      return sendJson(response, 400, { error: "Enter a valid Gmail or email address." });
+    }
+    if (
+      email === ownerUser.toLowerCase() ||
+      db.users.some((user) => user.id !== userId && String(user.email || "").toLowerCase() === email)
+    ) {
+      return sendJson(response, 409, { error: "That email already has an account." });
+    }
+    const previousEmail = targetUser.email || "";
+    if (previousEmail === email) {
+      sendJson(response, 200, {
+        ok: true,
+        updated: false,
+        user: { id: targetUser.id, name: targetUser.name, email: targetUser.email },
+      });
+      return;
+    }
+    targetUser.email = email;
+    clearLoginAttempts(db, previousEmail);
+    clearLoginAttempts(db, email);
+    await saveDb(db);
+    sendJson(response, 200, {
+      ok: true,
+      updated: true,
+      user: { id: targetUser.id, name: targetUser.name, email: targetUser.email },
+    });
     return;
   }
 

@@ -2053,6 +2053,26 @@
       color: #c2410c;
     }
 
+    .subscription-email-editor {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 6px;
+      min-width: 240px;
+    }
+
+    .subscription-email-editor input {
+      min-width: 170px;
+      padding: 8px 10px;
+      font-size: 12px;
+    }
+
+    .subscription-email-editor .btn {
+      flex: 0 0 auto;
+      padding: 8px 10px;
+      font-size: 11px;
+    }
+
     .toast {
       border: 1px solid var(--line);
       border-left: 4px solid var(--accent);
@@ -8231,7 +8251,13 @@
           const statusClass = isActive && user.expiresSoon ? "warn" : isActive && !user.expired ? "good" : "danger";
           return `
             <tr>
-              <td><strong class="${user.expiresSoon ? "subscription-master-expiring" : ""}">${escapeHtml(user.name)}</strong><br><span class="muted">${escapeHtml(user.email)}</span></td>
+              <td>
+                <strong class="${user.expiresSoon ? "subscription-master-expiring" : ""}">${escapeHtml(user.name)}</strong>
+                <div class="subscription-email-editor">
+                  <input class="master-email-input" type="email" autocomplete="email" value="${escapeHtml(user.email)}" aria-label="Gmail or email for ${escapeHtml(user.name)}">
+                  <button class="btn secondary change-master-email" data-user-id="${escapeHtml(user.userId)}" data-user-name="${escapeHtml(user.name)}" data-current-email="${escapeHtml(user.email)}" type="button">Change Gmail</button>
+                </div>
+              </td>
               <td>${escapeHtml(user.workspace || "Workspace")}</td>
               <td><strong>${escapeHtml(user.currency || "USD")}</strong></td>
               <td>
@@ -13176,6 +13202,44 @@
     });
 
     els.subscriptionRows.addEventListener("click", async (event) => {
+      const emailButton = event.target.closest(".change-master-email");
+      if (emailButton && signedInAsOwner()) {
+        const row = emailButton.closest("tr");
+        const input = row?.querySelector(".master-email-input");
+        const userId = emailButton.dataset.userId;
+        const userName = emailButton.dataset.userName || "this Master";
+        const currentEmail = String(emailButton.dataset.currentEmail || "").trim().toLowerCase();
+        const email = String(input?.value || "").trim().toLowerCase();
+        if (!input?.checkValidity() || !email) {
+          input?.reportValidity();
+          els.subscriptionError.textContent = "Enter a valid Gmail or email address.";
+          els.subscriptionError.classList.add("visible");
+          return;
+        }
+        if (email === currentEmail) {
+          notifyEvent("Gmail unchanged", `${userName} already uses ${email}.`);
+          return;
+        }
+        confirmAction(
+          `Change ${userName}'s login Gmail from ${currentEmail} to ${email}? The workspace, subscription, Actors, transactions, and current sessions will not be changed.`,
+          async () => {
+            try {
+              emailButton.disabled = true;
+              await api("/api/owner/masters/email", {
+                method: "POST",
+                body: { userId, email }
+              });
+              notifyEvent("Master Gmail updated", `${userName} can now log in with ${email}.`);
+              await renderSubscriptions();
+            } catch (error) {
+              emailButton.disabled = false;
+              els.subscriptionError.textContent = error.message;
+              els.subscriptionError.classList.add("visible");
+            }
+          }
+        );
+        return;
+      }
       const removeButton = event.target.closest(".remove-master");
       if (removeButton && signedInAsOwner()) {
         const userId = removeButton.dataset.userId;

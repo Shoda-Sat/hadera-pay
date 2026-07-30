@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -51,6 +51,35 @@ async function requestJson(baseUrl, pathname, { cookie = "", method = "GET", bod
   assert.equal(response.ok, true, data.error || `${method} ${pathname} failed`);
   return { data, cookie: response.headers.get("set-cookie")?.split(";", 1)[0] || cookie };
 }
+
+async function requestError(baseUrl, pathname, { cookie = "", method = "GET", body } = {}) {
+  const response = await fetch(`${baseUrl}${pathname}`, {
+    method,
+    headers: {
+      Accept: "application/json",
+      ...(cookie ? { Cookie: cookie } : {}),
+      ...(body ? { "Content-Type": "application/json" } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await response.json();
+  assert.equal(response.ok, false, `${method} ${pathname} unexpectedly succeeded`);
+  return { status: response.status, data };
+}
+
+test("Owner Master Gmail controls are available on web and Android", async () => {
+  const [index, preview, mobileClient, mobileScreens] = await Promise.all([
+    readFile(path.join(repositoryRoot, "index.html"), "utf8"),
+    readFile(path.join(repositoryRoot, "preview.html"), "utf8"),
+    readFile(path.join(repositoryRoot, "mobile/src/api/client.ts"), "utf8"),
+    readFile(path.join(repositoryRoot, "mobile/src/screens/WorkspaceScreens.tsx"), "utf8"),
+  ]);
+  assert.equal(index, preview);
+  assert.match(index, /class="btn secondary change-master-email"/);
+  assert.match(index, /api\("\/api\/owner\/masters\/email"/);
+  assert.match(mobileClient, /export async function updateOwnerMasterEmail/);
+  assert.match(mobileScreens, /label="Change Gmail"/);
+});
 
 test("workspace revision checks stay read-only and detect saved changes", async () => {
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "haderapay-sync-"));
@@ -107,6 +136,71 @@ test("workspace revision checks stay read-only and detect saved changes", async 
     });
     assert.equal(invite.data.invite.currency, "LYD");
     assert.equal(invite.data.invite.workingCurrencies.includes("LYD"), true);
+
+    const masterRowsBeforeEmailChange = await requestJson(baseUrl, "/api/owner/masters", {
+      cookie: ownerLogin.cookie,
+    });
+    const masterBeforeEmailChange = masterRowsBeforeEmailChange.data.users.find(
+      (user) => user.userId === createdMaster.data.user.id
+    );
+    assert.ok(masterBeforeEmailChange);
+
+    const unauthorizedEmailChange = await requestError(baseUrl, "/api/owner/masters/email", {
+      cookie: masterLogin.cookie,
+      method: "POST",
+      body: { userId: createdMaster.data.user.id, email: "not-owner@example.com" },
+    });
+    assert.equal(unauthorizedEmailChange.status, 403);
+
+    const invalidEmailChange = await requestError(baseUrl, "/api/owner/masters/email", {
+      cookie: ownerLogin.cookie,
+      method: "POST",
+      body: { userId: createdMaster.data.user.id, email: "not-an-email" },
+    });
+    assert.equal(invalidEmailChange.status, 400);
+
+    const changedMasterEmail = await requestJson(baseUrl, "/api/owner/masters/email", {
+      cookie: ownerLogin.cookie,
+      method: "POST",
+      body: { userId: createdMaster.data.user.id, email: "Changed-Master@Example.com" },
+    });
+    assert.equal(changedMasterEmail.data.updated, true);
+    assert.equal(changedMasterEmail.data.user.email, "changed-master@example.com");
+
+    const currentMasterSession = await requestJson(baseUrl, "/api/session", {
+      cookie: masterLogin.cookie,
+    });
+    assert.equal(currentMasterSession.data.session.user.id, createdMaster.data.user.id);
+    assert.equal(currentMasterSession.data.session.user.email, "changed-master@example.com");
+    assert.equal(currentMasterSession.data.session.workspace.name, masterBeforeEmailChange.workspace);
+
+    const masterRowsAfterEmailChange = await requestJson(baseUrl, "/api/owner/masters", {
+      cookie: ownerLogin.cookie,
+    });
+    const masterAfterEmailChange = masterRowsAfterEmailChange.data.users.find(
+      (user) => user.userId === createdMaster.data.user.id
+    );
+    assert.deepEqual(
+      { ...masterAfterEmailChange, email: masterBeforeEmailChange.email },
+      masterBeforeEmailChange
+    );
+
+    const oldEmailLogin = await requestError(baseUrl, "/api/auth/login", {
+      method: "POST",
+      body: { email: "sync-test@example.com", password: masterPassword },
+    });
+    assert.equal(oldEmailLogin.status, 401);
+    const newEmailLogin = await requestJson(baseUrl, "/api/auth/login", {
+      method: "POST",
+      body: { email: "changed-master@example.com", password: masterPassword },
+    });
+    assert.equal(newEmailLogin.data.session.user.id, createdMaster.data.user.id);
+    assert.equal(newEmailLogin.data.session.membership.currency, "LYD");
+
+    const invitesAfterEmailChange = await requestJson(baseUrl, "/api/invites", {
+      cookie: masterLogin.cookie,
+    });
+    assert.equal(invitesAfterEmailChange.data.invites.some((item) => item.id === invite.data.invite.id), true);
 
     const initialVersion = await requestJson(baseUrl, "/api/app-state/version", { cookie: masterLogin.cookie });
     const databasePath = path.join(dataDirectory, "auth-db.json");

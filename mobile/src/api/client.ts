@@ -600,6 +600,10 @@ export async function setOwnerMasterActive(userId: string, active: boolean): Pro
   await api<{ ok: boolean }>("/api/owner/masters/active", { method: "POST", body: { userId, active } });
 }
 
+export async function updateOwnerMasterEmail(userId: string, email: string): Promise<void> {
+  await api<{ ok: boolean }>("/api/owner/masters/email", { method: "POST", body: { userId, email } });
+}
+
 export async function extendOwnerSubscription(userId: string, plan: string, mode: "extend" | "reset"): Promise<void> {
   await api<{ ok: boolean }>("/api/owner/subscriptions/extend", { method: "POST", body: { userId, plan, mode } });
 }

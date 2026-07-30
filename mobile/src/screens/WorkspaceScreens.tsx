@@ -54,6 +54,7 @@ import {
   resetWorkspaceData,
   setOwnerMasterActive,
   uploadR2Attachment,
+  updateOwnerMasterEmail,
   updateIdleTimeout
 } from "../api/client";
 import { Button, Field, Panel, Pill, SelectRow, SummaryRow, type PillTone } from "../components/ui";
@@ -2210,6 +2211,7 @@ export function OwnerScreen({ offline }: { offline: boolean }) {
   const [plans, setPlans] = useState<OwnerPlan[]>([]);
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
+  const [masterEmailDrafts, setMasterEmailDrafts] = useState<Record<string, string>>({});
   const [password, setPassword] = useState("");
   const [currency, setCurrency] = useState<Currency>("USD");
   const [plan, setPlan] = useState("one_month");
@@ -2217,7 +2219,17 @@ export function OwnerScreen({ offline }: { offline: boolean }) {
   const refresh = async () => {
     if (offline) return Alert.alert("Offline", "Subscription management needs an internet connection.");
     setBusy("refresh");
-    try { const result = await loadOwnerMasters(); setUsers(result.users); setPlans(result.plans); if (!result.plans.some((item) => item.id === plan)) setPlan(result.plans[0]?.id || "one_month"); } catch (error) { Alert.alert("Owner console", errorMessage(error)); } finally { setBusy(""); }
+    try {
+      const result = await loadOwnerMasters();
+      setUsers(result.users);
+      setPlans(result.plans);
+      setMasterEmailDrafts(Object.fromEntries(result.users.map((user) => [user.userId, user.email])));
+      if (!result.plans.some((item) => item.id === plan)) setPlan(result.plans[0]?.id || "one_month");
+    } catch (error) {
+      Alert.alert("Owner console", errorMessage(error));
+    } finally {
+      setBusy("");
+    }
   };
   useEffect(() => { if (!offline) void refresh(); }, [offline]);
   const create = async () => {
@@ -2230,7 +2242,123 @@ export function OwnerScreen({ offline }: { offline: boolean }) {
     setBusy(id);
     try { await task(); await refresh(); } catch (error) { Alert.alert("Subscription", errorMessage(error)); } finally { setBusy(""); }
   };
-  return <View style={styles.screen}><ScreenTitle title="Owner" subtitle="Create Masters and manage access" /><OfflineGuard offline={offline} /><Button label="Refresh subscriptions" icon={<RefreshCw size={17} color={colors.ink} />} variant="secondary" loading={busy === "refresh"} onPress={refresh} /><Panel title="Create Master"><Field label="Master name" value={name} onChangeText={setName} /><Field label="Email" value={email} onChangeText={setEmail} autoCapitalize="none" keyboardType="email-address" /><Field label="Password" value={password} onChangeText={setPassword} secureTextEntry /><SelectRow label="Base currency" options={supportedCurrencies} value={currency} onChange={setCurrency} /><Text style={styles.fieldLabel}>Subscription</Text><View style={styles.choiceWrap}>{(plans.length ? plans : [{ id: "one_month", label: "One month" }]).map((item) => <Pressable key={item.id} onPress={() => setPlan(item.id)} style={[styles.choice, plan === item.id && styles.choiceActive]}><Text style={[styles.choiceText, plan === item.id && styles.choiceTextActive]}>{item.label}</Text></Pressable>)}</View><Button label="Create Master" loading={busy === "create"} disabled={offline} onPress={create} /></Panel><Panel title="Master subscriptions" badge={String(users.length)}>{users.map((user) => <View key={user.userId} style={styles.recordRow}><View style={styles.recordMain}><Text style={styles.primaryLine}>{user.name}</Text><Text style={styles.muted}>{user.email} - {user.workspace} - {user.currency || "USD"}</Text><Text style={styles.muted}>{user.active ? (user.expired ? "Expired" : "Active") : "Inactive"} - {formatDate(user.expiresAt)}</Text></View><View style={styles.rowButtons}><Button label={user.active ? "Deactivate" : "Activate"} variant={user.active ? "danger" : "secondary"} disabled={offline} loading={busy === `active-${user.userId}`} onPress={() => change(`active-${user.userId}`, () => setOwnerMasterActive(user.userId, !user.active))} style={styles.flexButton} /><Button label="Add time" disabled={offline} loading={busy === `extend-${user.userId}`} onPress={() => change(`extend-${user.userId}`, () => extendOwnerSubscription(user.userId, user.plan || plan, "extend"))} style={styles.flexButton} /><Button label="Restart" variant="secondary" disabled={offline} loading={busy === `reset-${user.userId}`} onPress={() => change(`reset-${user.userId}`, () => extendOwnerSubscription(user.userId, user.plan || plan, "reset"))} style={styles.flexButton} /></View></View>)}</Panel></View>;
+  const changeMasterEmail = (user: OwnerMasterRecord) => {
+    if (offline) return Alert.alert("Offline", "Reconnect before changing a Master Gmail.");
+    const nextEmail = String(masterEmailDrafts[user.userId] || "").trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(nextEmail)) {
+      return Alert.alert("Change Master Gmail", "Enter a valid Gmail or email address.");
+    }
+    if (nextEmail === user.email.toLowerCase()) {
+      return Alert.alert("Gmail unchanged", `${user.name} already uses ${nextEmail}.`);
+    }
+    Alert.alert(
+      "Change Master Gmail?",
+      `Change ${user.name}'s login from ${user.email} to ${nextEmail}? Their workspace, subscription, Actors, transactions, and current sessions will not change.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Change",
+          onPress: async () => {
+            const busyId = `email-${user.userId}`;
+            setBusy(busyId);
+            try {
+              await updateOwnerMasterEmail(user.userId, nextEmail);
+              await refresh();
+              Alert.alert("Master Gmail updated", `${user.name} can now log in with ${nextEmail}.`);
+            } catch (error) {
+              Alert.alert("Change Master Gmail", errorMessage(error));
+            } finally {
+              setBusy("");
+            }
+          }
+        }
+      ]
+    );
+  };
+  return (
+    <View style={styles.screen}>
+      <ScreenTitle title="Owner" subtitle="Create Masters and manage access" />
+      <OfflineGuard offline={offline} />
+      <Button
+        label="Refresh subscriptions"
+        icon={<RefreshCw size={17} color={colors.ink} />}
+        variant="secondary"
+        loading={busy === "refresh"}
+        onPress={refresh}
+      />
+      <Panel title="Create Master">
+        <Field label="Master name" value={name} onChangeText={setName} />
+        <Field label="Email" value={email} onChangeText={setEmail} autoCapitalize="none" keyboardType="email-address" />
+        <Field label="Password" value={password} onChangeText={setPassword} secureTextEntry />
+        <SelectRow label="Base currency" options={supportedCurrencies} value={currency} onChange={setCurrency} />
+        <Text style={styles.fieldLabel}>Subscription</Text>
+        <View style={styles.choiceWrap}>
+          {(plans.length ? plans : [{ id: "one_month", label: "One month" }]).map((item) => (
+            <Pressable
+              key={item.id}
+              onPress={() => setPlan(item.id)}
+              style={[styles.choice, plan === item.id && styles.choiceActive]}
+            >
+              <Text style={[styles.choiceText, plan === item.id && styles.choiceTextActive]}>{item.label}</Text>
+            </Pressable>
+          ))}
+        </View>
+        <Button label="Create Master" loading={busy === "create"} disabled={offline} onPress={create} />
+      </Panel>
+      <Panel title="Master subscriptions" badge={String(users.length)}>
+        {users.map((user) => (
+          <View key={user.userId} style={styles.recordRow}>
+            <View style={styles.recordMain}>
+              <Text style={styles.primaryLine}>{user.name}</Text>
+              <Text style={styles.muted}>{user.workspace} - {user.currency || "USD"}</Text>
+              <Text style={styles.muted}>{user.active ? (user.expired ? "Expired" : "Active") : "Inactive"} - {formatDate(user.expiresAt)}</Text>
+            </View>
+            <Field
+              label="Master Gmail"
+              value={masterEmailDrafts[user.userId] ?? user.email}
+              onChangeText={(value) => setMasterEmailDrafts((current) => ({ ...current, [user.userId]: value }))}
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="email-address"
+            />
+            <View style={styles.rowButtons}>
+              <Button
+                label="Change Gmail"
+                variant="secondary"
+                disabled={offline}
+                loading={busy === `email-${user.userId}`}
+                onPress={() => changeMasterEmail(user)}
+                style={styles.flexButton}
+              />
+              <Button
+                label={user.active ? "Deactivate" : "Activate"}
+                variant={user.active ? "danger" : "secondary"}
+                disabled={offline}
+                loading={busy === `active-${user.userId}`}
+                onPress={() => change(`active-${user.userId}`, () => setOwnerMasterActive(user.userId, !user.active))}
+                style={styles.flexButton}
+              />
+              <Button
+                label="Add time"
+                disabled={offline}
+                loading={busy === `extend-${user.userId}`}
+                onPress={() => change(`extend-${user.userId}`, () => extendOwnerSubscription(user.userId, user.plan || plan, "extend"))}
+                style={styles.flexButton}
+              />
+              <Button
+                label="Restart"
+                variant="secondary"
+                disabled={offline}
+                loading={busy === `reset-${user.userId}`}
+                onPress={() => change(`reset-${user.userId}`, () => extendOwnerSubscription(user.userId, user.plan || plan, "reset"))}
+                style={styles.flexButton}
+              />
+            </View>
+          </View>
+        ))}
+      </Panel>
+    </View>
+  );
 }
 
 export function NotificationsPanel({ session, state, onNavigate }: { session: UserSession; state: WorkspaceState; onNavigate: (screen: AppScreen) => void }) {
