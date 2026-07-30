@@ -1,4 +1,8 @@
 import { StatusBar } from "expo-status-bar";
+import { Asset } from "expo-asset";
+import * as FileSystem from "expo-file-system";
+import * as Print from "expo-print";
+import * as Sharing from "expo-sharing";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -22,6 +26,7 @@ import {
   ChevronLeft,
   ChevronDown,
   ChevronUp,
+  FileDown,
   LayoutDashboard,
   Menu,
   LockKeyhole,
@@ -53,6 +58,7 @@ import type { PillTone } from "./src/components/ui";
 import { colors, radius, shadow, spacing } from "./src/theme";
 import { actingSessionFor, activeActors, calculableLedgerLines, isMasterView, orderRecordIsVoided, orderSortForSession, transferTargetsFor } from "./src/domain/workspace";
 import { ledgerLineBelongsToActor } from "./src/domain/ledgerNumbering";
+import { buildArchiveReportPdfHtml } from "./src/domain/reportPdf";
 import { useProgressiveLimit } from "./src/hooks/useProgressiveLimit";
 import { notifyNewRequiredActions, subscribeToActionNotificationResponses } from "./src/notifications/actionNotifications";
 import {
@@ -197,6 +203,23 @@ function archiveMonthLabel(monthKey: string): string {
 
 function archiveClosedLabel(value: string | undefined): string {
   return formatDateTime(value, "Unknown close time");
+}
+
+let reportPdfFontPromise: Promise<string> | null = null;
+
+function reportPdfFontBase64(): Promise<string> {
+  if (reportPdfFontPromise) return reportPdfFontPromise;
+  reportPdfFontPromise = (async () => {
+    const asset = Asset.fromModule(require("./assets/fonts/NotoSansEthiopic-Regular.ttf"));
+    await asset.downloadAsync();
+    const uri = asset.localUri || asset.uri;
+    if (!uri) throw new Error("The report font could not be loaded.");
+    return FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
+  })().catch((error) => {
+    reportPdfFontPromise = null;
+    throw error;
+  });
+  return reportPdfFontPromise;
 }
 
 function visibleArchivesFor(session: UserSession, workspaceState: WorkspaceState | null): ArchiveRecord[] {
@@ -1009,6 +1032,7 @@ function ArchiveScreen({
   const [transactionSort, setTransactionSort] = useState<"Date" | "Order / Transfer No.">("Date");
   const [statementDetailLimits, setStatementDetailLimits] = useState<Record<string, number>>({});
   const [receivableDetailLimits, setReceivableDetailLimits] = useState<Record<string, number>>({});
+  const [pdfExporting, setPdfExporting] = useState(false);
   const archives = visibleArchivesFor(session, workspaceState);
   const months = Array.from(new Set(archives.map((archive) => archiveMonthKey(archive.closedAt)).filter(Boolean))).sort().reverse();
   const activeMonth = months.includes(selectedMonth) ? selectedMonth : "";
@@ -1035,6 +1059,30 @@ function ArchiveScreen({
       : [...current, statementId]);
   };
 
+  const exportReportPdf = async () => {
+    if (!workspaceState || !filteredArchives.length || pdfExporting) return;
+    const periodLabel = activeMonth ? archiveMonthLabel(activeMonth) : "All closed months";
+    const title = `${session.actorName} Report - ${periodLabel}`;
+    setPdfExporting(true);
+    try {
+      const fontBase64 = await reportPdfFontBase64();
+      const html = buildArchiveReportPdfHtml(title, filteredArchives, workspaceState.actors, session, fontBase64);
+      const result = await Print.printToFileAsync({ html, base64: false });
+      if (!(await Sharing.isAvailableAsync())) {
+        throw new Error("PDF sharing is unavailable on this device.");
+      }
+      await Sharing.shareAsync(result.uri, {
+        mimeType: "application/pdf",
+        UTI: "com.adobe.pdf",
+        dialogTitle: `Share ${title}`,
+      });
+    } catch (error) {
+      Alert.alert("Export PDF", error instanceof Error ? error.message : "The report could not be exported.");
+    } finally {
+      setPdfExporting(false);
+    }
+  };
+
   return (
     <View style={styles.screen}>
       <HeaderTitle title="Report" subtitle="Monthly closed statements" />
@@ -1044,6 +1092,14 @@ function ArchiveScreen({
         onPress={onRefresh}
         loading={stateLoading}
         icon={<RefreshCw size={17} color={colors.ink} />}
+      />
+      <Button
+        label="Export report PDF"
+        variant="secondary"
+        onPress={exportReportPdf}
+        loading={pdfExporting}
+        disabled={!filteredArchives.length}
+        icon={<FileDown size={17} color={colors.ink} />}
       />
       <Panel title="Closed month" badge={`${filteredArchives.length} close${filteredArchives.length === 1 ? "" : "s"}`}>
         <Pressable

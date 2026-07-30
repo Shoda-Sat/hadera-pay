@@ -9836,7 +9836,12 @@
       const includeEur = !pdfMode || options.includeEur !== false;
       const includeActor = !pdfMode || options.includeActor !== false;
       const includeTime = pdfMode && options.includeTime !== false;
-      const presentCurrencies = Array.from(new Set(orderedRecords.map((record) => record.currency).filter(Boolean)));
+      const presentCurrencies = Array.from(new Set(orderedRecords.flatMap((record) => [
+        record.currency,
+        pdfMode && record.convertedBaseAmountMinor !== null && record.convertedBaseAmountMinor !== undefined
+          ? record.baseCurrency
+          : ""
+      ]).filter(Boolean)));
       const recordActors = Array.from(new Set(orderedRecords.map((record) => record.actor).filter(Boolean)));
       const primaryBaseCurrency = recordActors.length === 1
         ? orderedRecords.find((record) => record.actor === recordActors[0])?.baseCurrency || ""
@@ -9872,7 +9877,16 @@
         if (showCurrencyColumns) {
           currencies.forEach((currency) => {
             if (pdfMode && currency === "EUR" && !includeEur) return;
-            row[currency] = record.currency === currency ? formatMinor(exportedAmountMinor, currency) : "";
+            const convertedBaseAmountMinor = Number(record.convertedBaseAmountMinor);
+            const hasConvertedBaseAmount = pdfMode &&
+              record.convertedBaseAmountMinor !== null &&
+              record.convertedBaseAmountMinor !== undefined &&
+              Number.isFinite(convertedBaseAmountMinor);
+            row[currency] = record.currency === currency
+              ? formatMinor(exportedAmountMinor, currency)
+              : hasConvertedBaseAmount && record.baseCurrency === currency
+                ? formatMinor(convertedBaseAmountMinor, currency)
+                : "";
           });
         }
         row.Status = record.status;
@@ -11507,6 +11521,20 @@
       return archive?.actorCurrency || archivedActor?.currency || "USD";
     }
 
+    function specialAgentTransferBaseAmountMinor(archive, transfer) {
+      const archivedActor = state.actors.find((item) => item.id === archive?.actorId || item.name === archive?.actor);
+      const actorRole = archive?.actorRole || archivedActor?.role || "";
+      if (actorRole !== "Special Agent") return null;
+      const baseCurrency = archiveStatementBaseCurrency(archive);
+      const sourceCurrency = transfer?.sourceCurrency || transfer?.currency || "USD";
+      const payoutCurrency = transfer?.currency || sourceCurrency;
+      const sourceAmountMinor = Number(transfer?.sourceAmountMinor || transfer?.amountMinor || 0);
+      const payoutAmountMinor = Number(transfer?.amountMinor || 0);
+      if (sourceCurrency === baseCurrency && Number.isFinite(sourceAmountMinor)) return sourceAmountMinor;
+      if (payoutCurrency === baseCurrency && Number.isFinite(payoutAmountMinor)) return payoutAmountMinor;
+      return null;
+    }
+
     function archiveBalanceStatementVisible(archive, filters) {
       const balances = archiveStatementBalances(archive);
       const amounts = Object.values(balances).map((amount) => Math.abs(Number(amount || 0)));
@@ -11774,7 +11802,8 @@
           direction,
           details,
           currency: transfer.currency || transfer.sourceCurrency || "USD",
-          amountMinor: Number(transfer.amountMinor || 0)
+          amountMinor: Number(transfer.amountMinor || 0),
+          convertedBaseAmountMinor: specialAgentTransferBaseAmountMinor(archive, transfer)
         }, [
           transfer.id,
           transfer.from,
