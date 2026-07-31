@@ -44,6 +44,11 @@ export interface UserSession {
   workspace: string;
   idleTimeoutSeconds: number;
   managedByMaster?: boolean;
+  subscriptionExpiresAt?: string;
+  subscriptionReadOnly?: boolean;
+  subscriptionGraceEndsAt?: string;
+  subscriptionReadOnlyDaysRemaining?: number;
+  subscriptionAccessDenied?: boolean;
 }
 
 export interface ApiSession {
@@ -57,6 +62,14 @@ export interface ApiSession {
   workspace?: {
     id?: string;
     name?: string;
+  };
+  subscription?: {
+    expiresAt?: string;
+    expired?: boolean;
+    readOnly?: boolean;
+    graceEndsAt?: string;
+    readOnlyDaysRemaining?: number;
+    accessDenied?: boolean;
   };
   membership?: {
     role?: MembershipRole;

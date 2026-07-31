@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -67,7 +67,7 @@ async function requestError(baseUrl, pathname, { cookie = "", method = "GET", bo
   return { status: response.status, data };
 }
 
-test("Owner Master Gmail controls are available on web and Android", async () => {
+test("Owner Master name and Gmail controls are available on web and Android", async () => {
   const [index, preview, mobileClient, mobileScreens] = await Promise.all([
     readFile(path.join(repositoryRoot, "index.html"), "utf8"),
     readFile(path.join(repositoryRoot, "preview.html"), "utf8"),
@@ -75,10 +75,33 @@ test("Owner Master Gmail controls are available on web and Android", async () =>
     readFile(path.join(repositoryRoot, "mobile/src/screens/WorkspaceScreens.tsx"), "utf8"),
   ]);
   assert.equal(index, preview);
+  assert.match(index, /class="btn secondary change-master-name"/);
   assert.match(index, /class="btn secondary change-master-email"/);
+  assert.match(index, /api\("\/api\/owner\/masters\/name"/);
   assert.match(index, /api\("\/api\/owner\/masters\/email"/);
+  assert.match(mobileClient, /export async function updateOwnerMasterName/);
   assert.match(mobileClient, /export async function updateOwnerMasterEmail/);
+  assert.match(mobileScreens, /label="Change Name"/);
   assert.match(mobileScreens, /label="Change Gmail"/);
+});
+
+test("expired subscription viewing controls are available on web and Android", async () => {
+  const [index, preview, mobileApp, mobileClient, mobileTypes] = await Promise.all([
+    readFile(path.join(repositoryRoot, "index.html"), "utf8"),
+    readFile(path.join(repositoryRoot, "preview.html"), "utf8"),
+    readFile(path.join(repositoryRoot, "mobile/App.tsx"), "utf8"),
+    readFile(path.join(repositoryRoot, "mobile/src/api/client.ts"), "utf8"),
+    readFile(path.join(repositoryRoot, "mobile/src/types.ts"), "utf8"),
+  ]);
+  assert.equal(index, preview);
+  assert.match(index, /subscriptionIsReadOnly/);
+  assert.match(index, /Workspace is read-only/);
+  assert.match(index, /report exports are disabled/);
+  assert.match(mobileApp, /subscriptionReadOnlyWarning/);
+  assert.match(mobileApp, /Report export is disabled/);
+  assert.match(mobileClient, /subscriptionReadOnlyGraceMs/);
+  assert.match(mobileClient, /session\.subscriptionReadOnly !== true/);
+  assert.match(mobileTypes, /subscriptionGraceEndsAt\?: string/);
 });
 
 test("workspace revision checks stay read-only and detect saved changes", async () => {
@@ -185,6 +208,47 @@ test("workspace revision checks stay read-only and detect saved changes", async 
       masterBeforeEmailChange
     );
 
+    const unauthorizedNameChange = await requestError(baseUrl, "/api/owner/masters/name", {
+      cookie: masterLogin.cookie,
+      method: "POST",
+      body: { userId: createdMaster.data.user.id, name: "Not Owner Rename" },
+    });
+    assert.equal(unauthorizedNameChange.status, 403);
+
+    const invalidNameChange = await requestError(baseUrl, "/api/owner/masters/name", {
+      cookie: ownerLogin.cookie,
+      method: "POST",
+      body: { userId: createdMaster.data.user.id, name: "   " },
+    });
+    assert.equal(invalidNameChange.status, 400);
+
+    const changedMasterName = await requestJson(baseUrl, "/api/owner/masters/name", {
+      cookie: ownerLogin.cookie,
+      method: "POST",
+      body: { userId: createdMaster.data.user.id, name: "Updated Master Name" },
+    });
+    assert.equal(changedMasterName.data.updated, true);
+    assert.equal(changedMasterName.data.user.name, "Updated Master Name");
+    assert.equal(changedMasterName.data.user.email, "changed-master@example.com");
+
+    const renamedMasterSession = await requestJson(baseUrl, "/api/session", {
+      cookie: masterLogin.cookie,
+    });
+    assert.equal(renamedMasterSession.data.session.user.name, "Updated Master Name");
+    assert.equal(renamedMasterSession.data.session.user.email, "changed-master@example.com");
+    assert.equal(renamedMasterSession.data.session.workspace.name, masterBeforeEmailChange.workspace);
+
+    const masterRowsAfterNameChange = await requestJson(baseUrl, "/api/owner/masters", {
+      cookie: ownerLogin.cookie,
+    });
+    const masterAfterNameChange = masterRowsAfterNameChange.data.users.find(
+      (user) => user.userId === createdMaster.data.user.id
+    );
+    assert.deepEqual(
+      { ...masterAfterNameChange, name: masterAfterEmailChange.name },
+      masterAfterEmailChange
+    );
+
     const oldEmailLogin = await requestError(baseUrl, "/api/auth/login", {
       method: "POST",
       body: { email: "sync-test@example.com", password: masterPassword },
@@ -195,6 +259,7 @@ test("workspace revision checks stay read-only and detect saved changes", async 
       body: { email: "changed-master@example.com", password: masterPassword },
     });
     assert.equal(newEmailLogin.data.session.user.id, createdMaster.data.user.id);
+    assert.equal(newEmailLogin.data.session.user.name, "Updated Master Name");
     assert.equal(newEmailLogin.data.session.membership.currency, "LYD");
 
     const invitesAfterEmailChange = await requestJson(baseUrl, "/api/invites", {
@@ -227,6 +292,77 @@ test("workspace revision checks stay read-only and detect saved changes", async 
 
     assert.equal(changedVersion.data.revision, saved.data.revision);
     assert.equal(afterVersionRead.mtimeNs, beforeVersionRead.mtimeNs);
+
+    const setSubscriptionExpiry = async (expiresAt) => {
+      const database = JSON.parse(await readFile(databasePath, "utf8"));
+      const masterUser = database.users.find((user) => user.id === createdMaster.data.user.id);
+      assert.ok(masterUser);
+      masterUser.subscriptionExpiresAt = expiresAt;
+      await writeFile(databasePath, JSON.stringify(database, null, 2));
+    };
+
+    const dayMs = 24 * 60 * 60 * 1000;
+    const expiredTenDaysAgo = new Date(Date.now() - 10 * dayMs).toISOString();
+    await setSubscriptionExpiry(expiredTenDaysAgo);
+
+    const readOnlyLogin = await requestJson(baseUrl, "/api/auth/login", {
+      method: "POST",
+      body: { email: "changed-master@example.com", password: masterPassword },
+    });
+    assert.equal(readOnlyLogin.data.session.subscription.expired, true);
+    assert.equal(readOnlyLogin.data.session.subscription.readOnly, true);
+    assert.equal(readOnlyLogin.data.session.subscription.accessDenied, false);
+    assert.equal(
+      new Date(readOnlyLogin.data.session.subscription.graceEndsAt).getTime(),
+      new Date(expiredTenDaysAgo).getTime() + 30 * dayMs
+    );
+
+    const readOnlyState = await requestJson(baseUrl, "/api/app-state", { cookie: readOnlyLogin.cookie });
+    assert.equal(readOnlyState.data.state.syncTestMarker, "changed");
+
+    const blockedStateWrite = await requestError(baseUrl, "/api/app-state", {
+      cookie: readOnlyLogin.cookie,
+      method: "PUT",
+      body: { state: { ...readOnlyState.data.state, syncTestMarker: "must-not-save" } },
+    });
+    assert.equal(blockedStateWrite.status, 403);
+    assert.equal(blockedStateWrite.data.code, "SUBSCRIPTION_READ_ONLY");
+
+    const blockedInvite = await requestError(baseUrl, "/api/invites", {
+      cookie: readOnlyLogin.cookie,
+      method: "POST",
+      body: { actorRole: "Broker", currency: "USD", workingCurrencies: [] },
+    });
+    assert.equal(blockedInvite.status, 403);
+
+    const blockedInviteSignup = await requestError(baseUrl, "/api/auth/signup", {
+      method: "POST",
+      body: {
+        name: "Read Only Actor",
+        email: "read-only-actor@example.com",
+        password: crypto.randomBytes(12).toString("base64url"),
+        inviteCode: invite.data.invite.code,
+        role: "Actor",
+      },
+    });
+    assert.equal(blockedInviteSignup.status, 403);
+    assert.equal(blockedInviteSignup.data.code, "SUBSCRIPTION_READ_ONLY");
+
+    const stateAfterBlockedWrite = await requestJson(baseUrl, "/api/app-state", { cookie: readOnlyLogin.cookie });
+    assert.equal(stateAfterBlockedWrite.data.state.syncTestMarker, "changed");
+
+    await setSubscriptionExpiry(new Date(Date.now() - 31 * dayMs).toISOString());
+    const deniedLogin = await requestError(baseUrl, "/api/auth/login", {
+      method: "POST",
+      body: { email: "changed-master@example.com", password: masterPassword },
+    });
+    assert.equal(deniedLogin.status, 402);
+
+    const deniedExistingSession = await requestError(baseUrl, "/api/app-state", { cookie: readOnlyLogin.cookie });
+    assert.equal(deniedExistingSession.status, 402);
+
+    const deniedSessionCheck = await requestJson(baseUrl, "/api/session", { cookie: readOnlyLogin.cookie });
+    assert.equal(deniedSessionCheck.data.session, null);
   } finally {
     if (serverProcess.exitCode === null) {
       serverProcess.kill();

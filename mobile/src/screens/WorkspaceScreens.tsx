@@ -55,6 +55,7 @@ import {
   setOwnerMasterActive,
   uploadR2Attachment,
   updateOwnerMasterEmail,
+  updateOwnerMasterName,
   updateIdleTimeout
 } from "../api/client";
 import { Button, Field, Panel, Pill, SelectRow, SummaryRow, type PillTone } from "../components/ui";
@@ -2211,6 +2212,7 @@ export function OwnerScreen({ offline }: { offline: boolean }) {
   const [plans, setPlans] = useState<OwnerPlan[]>([]);
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
+  const [masterNameDrafts, setMasterNameDrafts] = useState<Record<string, string>>({});
   const [masterEmailDrafts, setMasterEmailDrafts] = useState<Record<string, string>>({});
   const [password, setPassword] = useState("");
   const [currency, setCurrency] = useState<Currency>("USD");
@@ -2223,6 +2225,7 @@ export function OwnerScreen({ offline }: { offline: boolean }) {
       const result = await loadOwnerMasters();
       setUsers(result.users);
       setPlans(result.plans);
+      setMasterNameDrafts(Object.fromEntries(result.users.map((user) => [user.userId, user.name])));
       setMasterEmailDrafts(Object.fromEntries(result.users.map((user) => [user.userId, user.email])));
       if (!result.plans.some((item) => item.id === plan)) setPlan(result.plans[0]?.id || "one_month");
     } catch (error) {
@@ -2241,6 +2244,39 @@ export function OwnerScreen({ offline }: { offline: boolean }) {
     if (offline) return Alert.alert("Offline", "Reconnect before changing subscriptions.");
     setBusy(id);
     try { await task(); await refresh(); } catch (error) { Alert.alert("Subscription", errorMessage(error)); } finally { setBusy(""); }
+  };
+  const changeMasterName = (user: OwnerMasterRecord) => {
+    if (offline) return Alert.alert("Offline", "Reconnect before changing a Master name.");
+    const nextName = String(masterNameDrafts[user.userId] || "").trim();
+    if (!nextName || nextName.length > 100) {
+      return Alert.alert("Change Master name", "Enter a Master name between 1 and 100 characters.");
+    }
+    if (nextName === user.name) {
+      return Alert.alert("Name unchanged", `This Master already uses ${nextName}.`);
+    }
+    Alert.alert(
+      "Change Master name?",
+      `Change the Master account name from ${user.name} to ${nextName}? Their login Gmail, workspace, subscription, Actors, transactions, and current sessions will not change.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Change",
+          onPress: async () => {
+            const busyId = `name-${user.userId}`;
+            setBusy(busyId);
+            try {
+              await updateOwnerMasterName(user.userId, nextName);
+              await refresh();
+              Alert.alert("Master name updated", `The Master account is now named ${nextName}.`);
+            } catch (error) {
+              Alert.alert("Change Master name", errorMessage(error));
+            } finally {
+              setBusy("");
+            }
+          }
+        }
+      ]
+    );
   };
   const changeMasterEmail = (user: OwnerMasterRecord) => {
     if (offline) return Alert.alert("Offline", "Reconnect before changing a Master Gmail.");
@@ -2314,6 +2350,12 @@ export function OwnerScreen({ offline }: { offline: boolean }) {
               <Text style={styles.muted}>{user.active ? (user.expired ? "Expired" : "Active") : "Inactive"} - {formatDate(user.expiresAt)}</Text>
             </View>
             <Field
+              label="Master name"
+              value={masterNameDrafts[user.userId] ?? user.name}
+              onChangeText={(value) => setMasterNameDrafts((current) => ({ ...current, [user.userId]: value }))}
+              maxLength={100}
+            />
+            <Field
               label="Master Gmail"
               value={masterEmailDrafts[user.userId] ?? user.email}
               onChangeText={(value) => setMasterEmailDrafts((current) => ({ ...current, [user.userId]: value }))}
@@ -2322,6 +2364,14 @@ export function OwnerScreen({ offline }: { offline: boolean }) {
               keyboardType="email-address"
             />
             <View style={styles.rowButtons}>
+              <Button
+                label="Change Name"
+                variant="secondary"
+                disabled={offline}
+                loading={busy === `name-${user.userId}`}
+                onPress={() => changeMasterName(user)}
+                style={styles.flexButton}
+              />
               <Button
                 label="Change Gmail"
                 variant="secondary"

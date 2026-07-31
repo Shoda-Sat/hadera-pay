@@ -2053,6 +2053,7 @@
       color: #c2410c;
     }
 
+    .subscription-name-editor,
     .subscription-email-editor {
       display: flex;
       align-items: center;
@@ -2061,12 +2062,14 @@
       min-width: 240px;
     }
 
+    .subscription-name-editor input,
     .subscription-email-editor input {
       min-width: 170px;
       padding: 8px 10px;
       font-size: 12px;
     }
 
+    .subscription-name-editor .btn,
     .subscription-email-editor .btn {
       flex: 0 0 auto;
       padding: 8px 10px;
@@ -4268,7 +4271,23 @@
 
     assignCurrentMasterTransactionCycle();
 
+    function subscriptionIsReadOnly(session = currentAuth) {
+      return session?.subscription?.readOnly === true;
+    }
+
+    function subscriptionReadOnlyMessage(subscription = currentAuth?.subscription) {
+      const graceDate = subscription?.graceEndsAt ? displayDate(subscription.graceEndsAt) : "the end of the viewing period";
+      return `This workspace is read-only until ${graceDate}. Renew the subscription to make changes or export reports.`;
+    }
+
+    function warnSubscriptionReadOnly() {
+      if (!subscriptionIsReadOnly()) return false;
+      notifyEvent("Read-only access", subscriptionReadOnlyMessage());
+      return true;
+    }
+
     function saveState() {
+      if (subscriptionIsReadOnly()) return;
       try {
         localStorage.setItem(storageKey, JSON.stringify(state));
       } catch {
@@ -4297,10 +4316,15 @@
     }
 
     async function api(path, options = {}) {
+      const method = String(options.method || "GET").toUpperCase();
+      const readOnlyWriteAllowed = path === "/api/auth/activity" || path === "/api/auth/logout";
+      if (subscriptionIsReadOnly() && method !== "GET" && !readOnlyWriteAllowed) {
+        throw new Error(subscriptionReadOnlyMessage());
+      }
       let response;
       try {
         response = await fetch(path, {
-          method: options.method || "GET",
+          method,
           headers: { "content-type": "application/json", "x-haderapay-device-id": clientDeviceId() },
           body: options.body ? JSON.stringify(options.body) : undefined
         });
@@ -4316,6 +4340,9 @@
       }
       if (!response.ok) {
         const message = data.error || raw.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() || `${response.status} ${response.statusText}`;
+        if (response.status === 402 && currentAuth) {
+          setTimeout(() => endAuthSession({ notify: false }), 0);
+        }
         throw new Error(message || "Request failed.");
       }
       return data;
@@ -4798,8 +4825,10 @@
       if (result) {
         showAccountDeviceWarning(result.warning);
         if (currentAuth && result.subscription) {
+          const wasReadOnly = subscriptionIsReadOnly();
           currentAuth = { ...currentAuth, subscription: result.subscription };
           renderSubscriptionExpiryWarning();
+          if (wasReadOnly !== subscriptionIsReadOnly()) renderAll();
         }
       }
     }
@@ -4964,6 +4993,7 @@
     }
 
     async function saveStateNow() {
+      if (subscriptionIsReadOnly()) return;
       saveState();
       if (!currentAuth || !remoteStateReady || suppressRemoteSave) return;
       clearTimeout(saveTimer);
@@ -5370,6 +5400,21 @@
 
     function renderSubscriptionExpiryWarning() {
       const subscription = currentAuth?.subscription;
+      const warningLabel = els.subscriptionExpiryWarning?.querySelector("strong");
+      const messageElement = els.subscriptionExpiryWarning?.querySelector("span");
+      if (subscription?.readOnly) {
+        const daysRemaining = Math.max(1, Number(subscription.readOnlyDaysRemaining || 1));
+        const detail = `Viewing only: ${daysRemaining} day${daysRemaining === 1 ? "" : "s"} remain before access ends on ${displayDate(subscription.graceEndsAt)}. Orders, transfers, forwarding, changes, and report exports are disabled.`;
+        if (warningLabel) warningLabel.textContent = "READ ONLY";
+        if (messageElement) messageElement.textContent = detail;
+        els.subscriptionExpiryWarning?.classList.remove("hidden");
+        const warningKey = `read-only:${subscription.graceEndsAt || subscription.expiresAt || ""}`;
+        if (shownSubscriptionExpiryKey !== warningKey) {
+          shownSubscriptionExpiryKey = warningKey;
+          notifyEvent("Workspace is read-only", detail);
+        }
+        return;
+      }
       const expiryTime = new Date(subscription?.expiresAt || 0).getTime();
       const remaining = expiryTime - Date.now();
       const visible = currentAuth?.membership?.role === "Master" &&
@@ -5383,7 +5428,7 @@
       }
       const daysRemaining = Math.max(1, Math.ceil(remaining / (24 * 60 * 60 * 1000)));
       const detail = `Your subscription expires in ${daysRemaining} day${daysRemaining === 1 ? "" : "s"} on ${displayDate(subscription.expiresAt)}. Renew soon to keep uninterrupted access.`;
-      const messageElement = els.subscriptionExpiryWarning?.querySelector("span");
+      if (warningLabel) warningLabel.textContent = "EXPIRY NOTICE";
       if (messageElement) messageElement.textContent = detail;
       els.subscriptionExpiryWarning?.classList.remove("hidden");
       const warningKey = String(subscription.expiresAt || "");
@@ -8253,6 +8298,10 @@
             <tr>
               <td>
                 <strong class="${user.expiresSoon ? "subscription-master-expiring" : ""}">${escapeHtml(user.name)}</strong>
+                <div class="subscription-name-editor">
+                  <input class="master-name-input" maxlength="100" autocomplete="name" value="${escapeHtml(user.name)}" aria-label="Master name for ${escapeHtml(user.name)}">
+                  <button class="btn secondary change-master-name" data-user-id="${escapeHtml(user.userId)}" data-current-name="${escapeHtml(user.name)}" type="button">Change Name</button>
+                </div>
                 <div class="subscription-email-editor">
                   <input class="master-email-input" type="email" autocomplete="email" value="${escapeHtml(user.email)}" aria-label="Gmail or email for ${escapeHtml(user.name)}">
                   <button class="btn secondary change-master-email" data-user-id="${escapeHtml(user.userId)}" data-user-name="${escapeHtml(user.name)}" data-current-email="${escapeHtml(user.email)}" type="button">Change Gmail</button>
@@ -9607,6 +9656,7 @@
     }
 
     function exportLedgerExcel() {
+      if (warnSubscriptionReadOnly()) return;
       const context = currentLedgerContext();
       const rows = ledgerExportRows(context.lines, context.ledgerActor);
       if (rows.length === 0) return;
@@ -9802,6 +9852,7 @@
     }
 
     async function exportLedgerPdf() {
+      if (warnSubscriptionReadOnly()) return;
       const context = currentLedgerContext();
       const rows = ledgerExportRows(context.lines, context.ledgerActor, { dateOnly: true });
       if (rows.length === 0) return;
@@ -9963,6 +10014,7 @@
     }
 
     function exportArchiveExcel() {
+      if (warnSubscriptionReadOnly()) return;
       const records = archiveRecordsForExport();
       if (!records.length) return;
       const title = archiveExportTitle();
@@ -9972,6 +10024,7 @@
     }
 
     async function exportArchivePdf() {
+      if (warnSubscriptionReadOnly()) return;
       const records = archiveRecordsForExport();
       if (!records.length) return;
       const title = archiveExportTitle();
@@ -11347,6 +11400,7 @@
     }
 
     function exportMasterBankStatement() {
+      if (warnSubscriptionReadOnly()) return;
       const rows = selectedMasterBankStatementRows();
       if (!rows.length) return;
       const month = els.masterBankMonth.value || "all";
@@ -13202,6 +13256,43 @@
     });
 
     els.subscriptionRows.addEventListener("click", async (event) => {
+      const nameButton = event.target.closest(".change-master-name");
+      if (nameButton && signedInAsOwner()) {
+        const row = nameButton.closest("tr");
+        const input = row?.querySelector(".master-name-input");
+        const userId = nameButton.dataset.userId;
+        const currentName = String(nameButton.dataset.currentName || "").trim();
+        const name = String(input?.value || "").trim();
+        if (!name || name.length > 100) {
+          input?.focus();
+          els.subscriptionError.textContent = "Enter a Master name between 1 and 100 characters.";
+          els.subscriptionError.classList.add("visible");
+          return;
+        }
+        if (name === currentName) {
+          notifyEvent("Name unchanged", `This Master already uses ${name}.`);
+          return;
+        }
+        confirmAction(
+          `Change the Master account name from ${currentName} to ${name}? The login Gmail, workspace, subscription, Actors, transactions, and current sessions will not be changed.`,
+          async () => {
+            try {
+              nameButton.disabled = true;
+              await api("/api/owner/masters/name", {
+                method: "POST",
+                body: { userId, name }
+              });
+              notifyEvent("Master name updated", `The Master account is now named ${name}.`);
+              await renderSubscriptions();
+            } catch (error) {
+              nameButton.disabled = false;
+              els.subscriptionError.textContent = error.message;
+              els.subscriptionError.classList.add("visible");
+            }
+          }
+        );
+        return;
+      }
       const emailButton = event.target.closest(".change-master-email");
       if (emailButton && signedInAsOwner()) {
         const row = emailButton.closest("tr");
@@ -15427,6 +15518,39 @@
       renderAll();
     });
 
+    const subscriptionMutationSelector = [
+      "#assignButton", "#voidButton", "#settleButton", "#closeMasterTransactionsButton", "#closeBalanceButton",
+      "#exportLedgerExcelButton", "#exportLedgerPdfButton", "#exportMasterBankStatementButton",
+      "#exportArchiveExcelButton", "#exportArchivePdfButton",
+      "#saveSenderCustomer", "#saveReceiverCustomer", "#chatPhotoButton", "#chatRecordButton", "#r2MigrateButton",
+      ".forward-order", ".master-return-order", ".cancel-order", ".attach-proof", ".pay-order",
+      ".collect-receivable", ".request-void-order", ".approve-void-order", ".reject-void-order",
+      ".return-order", ".edit-returned-order", ".edit-transfer", ".reverse-transfer",
+      ".forward-transfer-submit", ".accept-forwarded-transfer", ".reject-forwarded-transfer",
+      ".reject-transfer", ".return-transfer", ".approve-transfer", ".chat-delete-group",
+      ".react-message", ".forward-message", ".save-actor-name", ".save-actor-currency",
+      ".remove-actor", ".toggle-order-currency-permission", ".toggle-transfer-receive-currency-permission",
+      ".save-fixed-order-rate", ".toggle-fixed-order-rate", ".save-special-divider",
+      ".toggle-special-divider", ".save-usd-agent-income-rate", ".save-master-rate-divisor",
+      ".save-buying-rates", ".toggle-master-rate-divisor", ".remind-order-actor",
+      ".order-visibility-toggle", ".transfer-target-toggle", ".invite-actor-active"
+    ].join(",");
+
+    document.addEventListener("submit", (event) => {
+      if (!subscriptionIsReadOnly()) return;
+      if (event.target === els.loginForm || event.target === els.signupForm) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      warnSubscriptionReadOnly();
+    }, true);
+
+    document.addEventListener("click", (event) => {
+      if (!subscriptionIsReadOnly() || !event.target.closest(subscriptionMutationSelector)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      warnSubscriptionReadOnly();
+    }, true);
+
     function renderAll() {
       applyPrivileges();
       displayView(state.activeView);
@@ -15458,6 +15582,17 @@
       renderMasterBankAccount();
       renderSettlements();
       renderArchive();
+      const readOnly = subscriptionIsReadOnly();
+      [
+        els.exportLedgerExcelButton,
+        els.exportLedgerPdfButton,
+        els.exportMasterBankStatementButton,
+        els.exportArchiveExcelButton,
+        els.exportArchivePdfButton
+      ].filter(Boolean).forEach((button) => {
+        button.disabled = button.disabled || readOnly;
+        button.title = readOnly ? subscriptionReadOnlyMessage() : "";
+      });
       renderGlobalSearch();
       renderMetrics();
       renderPendingActionNotifications();

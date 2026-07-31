@@ -78,6 +78,7 @@ const loginLockMs = 1000 * 60 * 60;
 const loginAttemptWindowMs = 1000 * 60 * 60;
 const deviceLoginWarningMs = 1000 * 60;
 const subscriptionExpiryWarningMs = 5 * 24 * 60 * 60 * 1000;
+const subscriptionReadOnlyGraceMs = 30 * 24 * 60 * 60 * 1000;
 const loginOperationLocks = new Map();
 const subscriptionPlans = new Map([
   ["one_day", { label: "1 day", days: 1 }],
@@ -466,12 +467,21 @@ function subscriptionPlan(planId) {
 }
 
 function subscriptionExpiryStatus(expiresAt, now = Date.now()) {
-  const expiresAtMs = new Date(expiresAt || 0).getTime();
+  const hasExpiry = typeof expiresAt === "string" && Boolean(expiresAt.trim());
+  const expiresAtMs = hasExpiry ? new Date(expiresAt).getTime() : Number.NaN;
+  const validExpiry = Number.isFinite(expiresAtMs);
   const remainingMs = expiresAtMs - now;
-  const expired = !Number.isFinite(expiresAtMs) || remainingMs <= 0;
+  const expired = !validExpiry || remainingMs <= 0;
+  const graceEndsAtMs = validExpiry ? expiresAtMs + subscriptionReadOnlyGraceMs : Number.NaN;
+  const readOnly = validExpiry && expired && now < graceEndsAtMs;
+  const accessDenied = !validExpiry || now >= graceEndsAtMs;
   return {
     expired,
-    expiresSoon: !expired && remainingMs <= subscriptionExpiryWarningMs,
+    readOnly,
+    accessDenied,
+    graceEndsAt: validExpiry ? new Date(graceEndsAtMs).toISOString() : "",
+    readOnlyDaysRemaining: readOnly ? Math.max(1, Math.ceil((graceEndsAtMs - now) / (24 * 60 * 60 * 1000))) : 0,
+    expiresSoon: validExpiry && !expired && remainingMs <= subscriptionExpiryWarningMs,
     daysRemaining: expired ? 0 : Math.max(1, Math.ceil(remainingMs / (24 * 60 * 60 * 1000))),
   };
 }
@@ -553,6 +563,11 @@ function masterSubscriptionRows(db) {
 function validEmailAddress(value) {
   const email = String(value || "").trim();
   return email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function validMasterDisplayName(value) {
+  const name = String(value || "").trim();
+  return name.length > 0 && name.length <= 100 && !/[\u0000-\u001f\u007f]/.test(name);
 }
 
 function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
@@ -732,7 +747,18 @@ function publicSessionForRecord(db, session) {
       loginStartedAt: session.createdAt || session.lastActivityAt || "",
       user: { id: "__owner", name: ownerUser, email: ownerUser, idleTimeoutSeconds: accountIdleTimeoutSeconds(db, "__owner") },
       workspace: { id: "__owner", name: "Owner Console" },
-      subscription: { ownerUserId: "__owner", ownerName: ownerUser, active: true, inactive: false, expiresAt: "", expired: false },
+      subscription: {
+        ownerUserId: "__owner",
+        ownerName: ownerUser,
+        active: true,
+        inactive: false,
+        expiresAt: "",
+        expired: false,
+        readOnly: false,
+        accessDenied: false,
+        graceEndsAt: "",
+        readOnlyDaysRemaining: 0,
+      },
       membership: {
         role: "Owner",
         actorId: "OWNER",
@@ -1441,8 +1467,9 @@ async function requireSession(request, response, db, { touch = true } = {}) {
     sendJson(response, 401, { error: "Please log in." });
     return null;
   }
-  if (session.subscription.expired) {
-    sendJson(response, 402, { error: "This workspace subscription has expired." });
+  if (session.subscription.accessDenied) {
+    clearSessionCookie(response);
+    sendJson(response, 402, { error: "This workspace's 30-day viewing period has ended. Renew the subscription to regain access." });
     return null;
   }
   if (session.subscription.inactive) {
@@ -1501,7 +1528,8 @@ async function handleApi(request, response, url) {
   if (url.pathname === "/api/session" && method === "GET") {
     const sessionId = parseCookies(request).hp_session;
     const sessionRecord = activeSessionRecord(db, sessionId);
-    const session = publicSessionForRecord(db, sessionRecord);
+    let session = publicSessionForRecord(db, sessionRecord);
+    if (session?.subscription?.accessDenied || session?.subscription?.inactive) session = null;
     if (sessionRecord && session) {
       if (!sessionRecord.deviceId) sessionRecord.deviceId = requestDeviceId(request);
       touchSession(sessionRecord);
@@ -1560,6 +1588,19 @@ async function handleApi(request, response, url) {
       if (!invite) return sendJson(response, 400, { error: "Enter a valid unused invite code from Master." });
       workspace = db.workspaces.find((item) => item.id === invite.workspaceId);
       if (!workspace) return sendJson(response, 400, { error: "Invite workspace was not found." });
+      const subscription = workspaceOwnerSubscription(db, workspace);
+      if (subscription.inactive) return sendJson(response, 403, { error: "This workspace is inactive." });
+      if (subscription.readOnly) {
+        return sendJson(response, 403, {
+          error: "This workspace is read-only after subscription expiry. Renew the subscription before adding an account.",
+          code: "SUBSCRIPTION_READ_ONLY",
+          readOnly: true,
+          graceEndsAt: subscription.graceEndsAt,
+        });
+      }
+      if (subscription.accessDenied) {
+        return sendJson(response, 402, { error: "This workspace's 30-day viewing period has ended. Renew the subscription to regain access." });
+      }
       membership = {
         id: id("mem"),
         userId: user.id,
@@ -1652,9 +1693,9 @@ async function handleApi(request, response, url) {
         await saveDb(loginDb);
         return sendJson(response, 403, { error: "This workspace is inactive." });
       }
-      if (subscription.expired) {
+      if (subscription.accessDenied) {
         await saveDb(loginDb);
-        return sendJson(response, 402, { error: "This workspace subscription has expired." });
+        return sendJson(response, 402, { error: "This workspace's 30-day viewing period has ended. Renew the subscription to regain access." });
       }
       const session = createSession(loginDb, user.id, membership.workspaceId, requestDeviceId(request));
       await saveDb(loginDb);
@@ -1678,6 +1719,16 @@ async function handleApi(request, response, url) {
   );
   const session = await requireSession(request, response, db, { touch: !backgroundRead });
   if (!session) return;
+
+  if (session.subscription.readOnly && method !== "GET" && url.pathname !== "/api/auth/activity") {
+    sendJson(response, 403, {
+      error: "This workspace is read-only after subscription expiry. Renew the subscription to make changes.",
+      code: "SUBSCRIPTION_READ_ONLY",
+      readOnly: true,
+      graceEndsAt: session.subscription.graceEndsAt,
+    });
+    return;
+  }
 
   if (url.pathname === "/api/files/status" && method === "GET") {
     const state = db.appStates[session.workspace.id] || {};
@@ -2011,6 +2062,39 @@ async function handleApi(request, response, url) {
     targetUser.email = email;
     clearLoginAttempts(db, previousEmail);
     clearLoginAttempts(db, email);
+    await saveDb(db);
+    sendJson(response, 200, {
+      ok: true,
+      updated: true,
+      user: { id: targetUser.id, name: targetUser.name, email: targetUser.email },
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/owner/masters/name" && method === "POST") {
+    if (!requireOwner(session, response)) return;
+    const body = await readJson(request);
+    const userId = String(body.userId || "");
+    const name = String(body.name || "").trim();
+    const targetUser = db.users.find((user) => user.id === userId);
+    const targetMembership = db.memberships.find((membership) =>
+      membership.userId === userId && membership.role === "Master"
+    );
+    if (!targetUser || !targetMembership) {
+      return sendJson(response, 404, { error: "Master user was not found." });
+    }
+    if (!validMasterDisplayName(name)) {
+      return sendJson(response, 400, { error: "Enter a Master name between 1 and 100 characters." });
+    }
+    if (targetUser.name === name) {
+      sendJson(response, 200, {
+        ok: true,
+        updated: false,
+        user: { id: targetUser.id, name: targetUser.name, email: targetUser.email },
+      });
+      return;
+    }
+    targetUser.name = name;
     await saveDb(db);
     sendJson(response, 200, {
       ok: true,

@@ -90,7 +90,7 @@ import type {
   UserSession,
   WorkspaceState
 } from "./src/types";
-import { formatDateTime, formatMonthYear } from "./src/utils/date";
+import { formatDate, formatDateTime, formatMonthYear } from "./src/utils/date";
 import { calculateQuote, compactAmount, currencies, financialPosition, formatAmount, inputAmount, majorFromMinor, reconcileOrderConversion } from "./src/utils/money";
 import type { OrderConversionField } from "./src/utils/money";
 
@@ -352,8 +352,11 @@ export default function App() {
     let mounted = true;
     const refreshWarning = () => {
       getAccountDeviceWarning()
-        .then((warning) => {
+        .then(({ warning, session: refreshedSession }) => {
           if (!mounted) return;
+          if (refreshedSession) {
+            setSession((current) => current?.userId === refreshedSession.userId ? refreshedSession : current);
+          }
           if (accountDeviceWarningTimerRef.current) clearTimeout(accountDeviceWarningTimerRef.current);
           accountDeviceWarningTimerRef.current = null;
           const remaining = new Date(warning?.expiresAt || 0).getTime() - Date.now();
@@ -472,6 +475,18 @@ export default function App() {
     }
   }, []);
 
+  useEffect(() => {
+    if (!session?.subscriptionReadOnly || !session.subscriptionGraceEndsAt) return;
+    const remainingMs = new Date(session.subscriptionGraceEndsAt).getTime() - Date.now();
+    if (!Number.isFinite(remainingMs)) return;
+    if (remainingMs <= 0) {
+      void handleLogout();
+      return;
+    }
+    const timer = setTimeout(() => void handleLogout(), remainingMs);
+    return () => clearTimeout(timer);
+  }, [handleLogout, session?.subscriptionGraceEndsAt, session?.subscriptionReadOnly]);
+
   const noteActivity = useCallback(() => {
     if (!session) return;
     const now = Date.now();
@@ -576,6 +591,14 @@ export default function App() {
             <View style={styles.accountSecurityWarning} accessibilityRole="alert">
               <Text style={styles.accountSecurityWarningLabel}>WARNING</Text>
               <Text style={styles.accountSecurityWarningText}>{accountDeviceWarning.message || "Another device is logged into your account."}</Text>
+            </View>
+          ) : null}
+          {actingSession.subscriptionReadOnly ? (
+            <View style={styles.subscriptionReadOnlyWarning} accessibilityRole="alert">
+              <Text style={styles.subscriptionReadOnlyWarningLabel}>READ ONLY</Text>
+              <Text style={styles.subscriptionReadOnlyWarningText}>
+                {`Viewing is available until ${formatDate(actingSession.subscriptionGraceEndsAt)}. Orders, transfers, forwarding, changes, and report exports are disabled.`}
+              </Text>
             </View>
           ) : null}
           {stateError ? <Text style={styles.errorText}>{stateError}</Text> : null}
@@ -1060,6 +1083,10 @@ function ArchiveScreen({
   };
 
   const exportReportPdf = async () => {
+    if (session.subscriptionReadOnly) {
+      Alert.alert("Read-only access", "Report export is disabled until the workspace subscription is renewed.");
+      return;
+    }
     if (!workspaceState || !filteredArchives.length || pdfExporting) return;
     const periodLabel = activeMonth ? archiveMonthLabel(activeMonth) : "All closed months";
     const title = `${session.actorName} Report - ${periodLabel}`;
@@ -1098,7 +1125,7 @@ function ArchiveScreen({
         variant="secondary"
         onPress={exportReportPdf}
         loading={pdfExporting}
-        disabled={!filteredArchives.length}
+        disabled={!filteredArchives.length || session.subscriptionReadOnly === true}
         icon={<FileDown size={17} color={colors.ink} />}
       />
       <Panel title="Closed month" badge={`${filteredArchives.length} close${filteredArchives.length === 1 ? "" : "s"}`}>
@@ -1745,6 +1772,34 @@ const styles = StyleSheet.create({
   accountSecurityWarningText: {
     flex: 1,
     color: "#ffffff",
+    fontSize: 13,
+    fontWeight: "800"
+  },
+  subscriptionReadOnlyWarning: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.warn,
+    borderRadius: radius.md,
+    backgroundColor: colors.warnSoft,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    ...shadow
+  },
+  subscriptionReadOnlyWarningLabel: {
+    borderRadius: 999,
+    backgroundColor: colors.warn,
+    color: "#ffffff",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    fontSize: 10,
+    fontWeight: "900",
+    letterSpacing: 1
+  },
+  subscriptionReadOnlyWarningText: {
+    flex: 1,
+    color: colors.warn,
     fontSize: 13,
     fontWeight: "800"
   },

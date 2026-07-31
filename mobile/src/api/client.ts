@@ -31,6 +31,7 @@ const sessionCacheKey = "haderapay.mobile.session.v1";
 const sessionActivityCacheKey = "haderapay.mobile.activity.v1";
 const deviceIdCacheKey = "haderapay.mobile.device.v1";
 const workspaceCachePrefix = "haderapay.mobile.workspace.v1.";
+const subscriptionReadOnlyGraceMs = 30 * 24 * 60 * 60 * 1000;
 let activeSession: UserSession | null = null;
 let activeDeviceId: string | null = null;
 let activeWorkspaceRevision: string | null = null;
@@ -77,6 +78,11 @@ function safeCurrency(value: unknown, fallback: Currency = "USD"): Currency {
 }
 
 async function api<T>(path: string, options: ApiOptions = {}): Promise<ApiEnvelope<T>> {
+  const method = String(options.method || "GET").toUpperCase();
+  const readOnlyWriteAllowed = ["/api/auth/activity", "/api/auth/logout", "/api/auth/login", "/api/auth/signup"].includes(path);
+  if (activeSession?.subscriptionReadOnly === true && method !== "GET" && !readOnlyWriteAllowed) {
+    throw new Error("This workspace is read-only after subscription expiry. Renew the subscription to make changes or export reports.");
+  }
   const currentDeviceId = await deviceId();
   const headers = {
     Accept: "application/json",
@@ -89,6 +95,7 @@ async function api<T>(path: string, options: ApiOptions = {}): Promise<ApiEnvelo
   try {
     response = await fetch(`${apiBaseUrl}${path}`, {
       ...options,
+      method,
       credentials: "include",
       headers,
       body: options.body ? JSON.stringify(options.body) : undefined
@@ -268,7 +275,33 @@ function normalizeSession(session: ApiSession | null | undefined): UserSession |
     workspaceId: session.workspace.id || "",
     workspace: session.workspace.name || "HaderaPay Workspace",
     idleTimeoutSeconds: normalizeIdleTimeoutSeconds(session.user.idleTimeoutSeconds),
-    managedByMaster: false
+    managedByMaster: false,
+    subscriptionExpiresAt: session.subscription?.expiresAt || "",
+    subscriptionReadOnly: session.subscription?.readOnly === true,
+    subscriptionGraceEndsAt: session.subscription?.graceEndsAt || "",
+    subscriptionReadOnlyDaysRemaining: Number(session.subscription?.readOnlyDaysRemaining || 0),
+    subscriptionAccessDenied: session.subscription?.accessDenied === true
+  };
+}
+
+function sessionForCurrentSubscriptionWindow(session: UserSession | null, now = Date.now()): UserSession | null {
+  if (!session || session.role === "Owner") return session;
+  const expiresAtMs = new Date(session.subscriptionExpiresAt || 0).getTime();
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= 0) return session;
+  const graceEndsAtMs = new Date(session.subscriptionGraceEndsAt || 0).getTime();
+  const effectiveGraceEndsAtMs = Number.isFinite(graceEndsAtMs) && graceEndsAtMs > expiresAtMs
+    ? graceEndsAtMs
+    : expiresAtMs + subscriptionReadOnlyGraceMs;
+  if (now >= effectiveGraceEndsAtMs) return null;
+  const readOnly = now >= expiresAtMs;
+  return {
+    ...session,
+    subscriptionReadOnly: readOnly,
+    subscriptionGraceEndsAt: new Date(effectiveGraceEndsAtMs).toISOString(),
+    subscriptionReadOnlyDaysRemaining: readOnly
+      ? Math.max(1, Math.ceil((effectiveGraceEndsAtMs - now) / (24 * 60 * 60 * 1000)))
+      : 0,
+    subscriptionAccessDenied: false
   };
 }
 
@@ -361,6 +394,7 @@ function normalizeState(state: Partial<WorkspaceState> | null | undefined): Work
 export function canCreateOrders(session: UserSession | null | undefined): boolean {
   return Boolean(
     session &&
+    session.subscriptionReadOnly !== true &&
     ["Broker", "Special Broker"].includes(session.actorRole) &&
     (session.role === "Actor" || session.managedByMaster === true)
   );
@@ -383,7 +417,13 @@ export async function getCurrentSession(): Promise<UserSession | null> {
   } catch (error) {
     if (!(error instanceof OfflineError)) throw error;
     const cached = await readCache<UserSession>(sessionCacheKey);
-    const normalizedCached = cached ? { ...cached, idleTimeoutSeconds: normalizeIdleTimeoutSeconds(cached.idleTimeoutSeconds) } : null;
+    const normalizedCached = sessionForCurrentSubscriptionWindow(
+      cached ? { ...cached, idleTimeoutSeconds: normalizeIdleTimeoutSeconds(cached.idleTimeoutSeconds) } : null
+    );
+    if (cached && !normalizedCached) {
+      await AsyncStorage.multiRemove([sessionCacheKey, sessionActivityCacheKey]);
+      resetWorkspaceSnapshot();
+    }
     activeSession = normalizedCached;
     return normalizedCached;
   }
@@ -457,9 +497,27 @@ export async function reportSessionActivity(): Promise<void> {
   await api<{ ok: boolean }>("/api/auth/activity", { method: "POST" });
 }
 
-export async function getAccountDeviceWarning(): Promise<AccountDeviceWarning | null> {
-  const result = await api<{ warning: AccountDeviceWarning | null }>("/api/auth/device-warning");
-  return result.warning || null;
+export async function getAccountDeviceWarning(): Promise<{ warning: AccountDeviceWarning | null; session: UserSession | null }> {
+  const result = await api<{ warning: AccountDeviceWarning | null; subscription?: ApiSession["subscription"] }>("/api/auth/device-warning");
+  if (activeSession && result.subscription) {
+    const nextSession = sessionForCurrentSubscriptionWindow({
+      ...activeSession,
+      subscriptionExpiresAt: result.subscription.expiresAt || "",
+      subscriptionReadOnly: result.subscription.readOnly === true,
+      subscriptionGraceEndsAt: result.subscription.graceEndsAt || "",
+      subscriptionReadOnlyDaysRemaining: Number(result.subscription.readOnlyDaysRemaining || 0),
+      subscriptionAccessDenied: result.subscription.accessDenied === true
+    });
+    if (nextSession) {
+      const changed = nextSession.subscriptionReadOnly !== activeSession.subscriptionReadOnly ||
+        nextSession.subscriptionExpiresAt !== activeSession.subscriptionExpiresAt ||
+        nextSession.subscriptionGraceEndsAt !== activeSession.subscriptionGraceEndsAt ||
+        nextSession.subscriptionReadOnlyDaysRemaining !== activeSession.subscriptionReadOnlyDaysRemaining;
+      activeSession = nextSession;
+      if (changed) await cacheSession(nextSession);
+    }
+  }
+  return { warning: result.warning || null, session: activeSession };
 }
 
 export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
@@ -602,6 +660,10 @@ export async function setOwnerMasterActive(userId: string, active: boolean): Pro
 
 export async function updateOwnerMasterEmail(userId: string, email: string): Promise<void> {
   await api<{ ok: boolean }>("/api/owner/masters/email", { method: "POST", body: { userId, email } });
+}
+
+export async function updateOwnerMasterName(userId: string, name: string): Promise<void> {
+  await api<{ ok: boolean }>("/api/owner/masters/name", { method: "POST", body: { userId, name } });
 }
 
 export async function extendOwnerSubscription(userId: string, plan: string, mode: "extend" | "reset"): Promise<void> {
