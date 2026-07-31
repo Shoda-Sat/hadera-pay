@@ -15,6 +15,7 @@ export type AppScreen =
   | "settlement"
   | "archive"
   | "actors"
+  | "profiles"
   | "settings"
   | "owner"
   | "more";

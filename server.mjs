@@ -72,8 +72,9 @@ const attachmentRules = new Map([
   }],
 ]);
 let saveQueue = Promise.resolve();
-const allowedSessionIdleSeconds = new Set([10, 20, 30, 60, 300, 900, 1800, 3600, 7200]);
+const allowedSessionIdleSeconds = new Set([0, 10, 20, 30, 60, 300, 900, 1800, 3600, 7200]);
 const defaultSessionIdleSeconds = 7200;
+const persistentSessionCookieMaxAgeSeconds = 10 * 365 * 24 * 60 * 60;
 const loginLockMs = 1000 * 60 * 60;
 const loginAttemptWindowMs = 1000 * 60 * 60;
 const deviceLoginWarningMs = 1000 * 60;
@@ -705,10 +706,12 @@ async function readBinary(request, maxBytes) {
 }
 
 function sessionIsExpired(session, now = Date.now()) {
+  const idleTimeoutSeconds = normalizedSessionIdleSeconds(session?.idleTimeoutSeconds);
+  if (idleTimeoutSeconds === 0) return false;
   const expiresAt = new Date(session?.expiresAt || 0).getTime();
   if (!Number.isFinite(expiresAt) || expiresAt <= now) return true;
   const lastActivityAt = new Date(session?.lastActivityAt || 0).getTime();
-  const idleMs = normalizedSessionIdleSeconds(session?.idleTimeoutSeconds) * 1000;
+  const idleMs = idleTimeoutSeconds * 1000;
   return Number.isFinite(lastActivityAt) && lastActivityAt > 0 && now - lastActivityAt >= idleMs;
 }
 
@@ -722,12 +725,13 @@ function touchSession(session, now = Date.now()) {
   const idleTimeoutSeconds = normalizedSessionIdleSeconds(session?.idleTimeoutSeconds);
   session.idleTimeoutSeconds = idleTimeoutSeconds;
   session.lastActivityAt = timestamp;
-  session.expiresAt = new Date(now + idleTimeoutSeconds * 1000).toISOString();
+  session.expiresAt = idleTimeoutSeconds === 0 ? "" : new Date(now + idleTimeoutSeconds * 1000).toISOString();
 }
 
 function setSessionCookie(response, session) {
   const idleTimeoutSeconds = normalizedSessionIdleSeconds(session?.idleTimeoutSeconds);
-  response.setHeader("Set-Cookie", `hp_session=${encodeURIComponent(session.id)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${idleTimeoutSeconds}`);
+  const maxAge = idleTimeoutSeconds === 0 ? persistentSessionCookieMaxAgeSeconds : idleTimeoutSeconds;
+  response.setHeader("Set-Cookie", `hp_session=${encodeURIComponent(session.id)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}`);
 }
 
 function clearSessionCookie(response) {
@@ -1509,7 +1513,7 @@ function createSession(db, userId, workspaceId, deviceId = "") {
     createdAt: timestamp,
     lastActivityAt: timestamp,
     idleTimeoutSeconds,
-    expiresAt: new Date(now + idleTimeoutSeconds * 1000).toISOString(),
+    expiresAt: idleTimeoutSeconds === 0 ? "" : new Date(now + idleTimeoutSeconds * 1000).toISOString(),
   };
   db.sessions.push(session);
   return session;

@@ -3491,6 +3491,7 @@
                       <option value="1800">30 Minutes</option>
                       <option value="3600">1 Hour</option>
                       <option value="7200">2 Hours</option>
+                      <option value="0">Never</option>
                     </select>
                   </div>
                 </div>
@@ -3737,7 +3738,7 @@
     const expandedLedgerDetailKeys = new Set();
     let ledgerScrollUpdateFrame = null;
     let syncingLedgerScroll = false;
-    const allowedAuthIdleSeconds = new Set([10, 20, 30, 60, 300, 900, 1800, 3600, 7200]);
+    const allowedAuthIdleSeconds = new Set([0, 10, 20, 30, 60, 300, 900, 1800, 3600, 7200]);
     const defaultAuthIdleSeconds = 7200;
     const paymentProofImageTargetBytes = 80 * 1024;
     const maxPaymentProofImageSourceBytes = 24 * 1024 * 1024;
@@ -4884,6 +4885,7 @@
 
     function authIdleLabel(seconds = authIdleSeconds()) {
       const labels = {
+        0: "never",
         10: "10 seconds",
         20: "20 seconds",
         30: "30 seconds",
@@ -4898,6 +4900,7 @@
     }
 
     function authSessionIsIdle(session = currentAuth) {
+      if (authIdleSeconds(session) === 0) return false;
       const lastActivity = lastAuthActivity(session);
       return lastActivity > 0 && Date.now() - lastActivity >= authIdleMilliseconds(session);
     }
@@ -4926,7 +4929,8 @@
       rememberAuthActivity(currentAuth);
       startInactivityWatch();
       const now = Date.now();
-      const pingInterval = Math.max(2000, Math.min(30000, Math.floor(authIdleMilliseconds() / 3)));
+      const idleMilliseconds = authIdleMilliseconds();
+      const pingInterval = idleMilliseconds === 0 ? 30000 : Math.max(2000, Math.min(30000, Math.floor(idleMilliseconds / 3)));
       const timeUntilPing = pingInterval - (now - lastSessionActivityPingAt);
       if (timeUntilPing <= 0) {
         pingSessionActivity();
@@ -4943,6 +4947,7 @@
     function startInactivityWatch() {
       stopInactivityWatch();
       if (!currentAuth) return;
+      if (authIdleSeconds(currentAuth) === 0) return;
       const lastActivity = lastAuthActivity(currentAuth) || Date.now();
       const remaining = authIdleMilliseconds(currentAuth) - (Date.now() - lastActivity);
       if (remaining <= 0) {
@@ -12099,12 +12104,26 @@
       els.metricNet.textContent = nonZero.length ? nonZero.join(" / ") : "All zero";
     }
 
+    function orderIsAssignedUnpaid(order) {
+      return order?.state === "Assigned" &&
+        !order.paidAt &&
+        !order.journal &&
+        !order.cancelledAt &&
+        !order.voidedAt;
+    }
+
+    function orderIsAssignedToPayingActor(order, actor) {
+      if (!actor || actor.role === "Master") return true;
+      if (order.agentActorId && actor.id) return order.agentActorId === actor.id;
+      return order.agent === actor.name;
+    }
+
     function renderMetrics() {
       const actor = selectedActor();
-      const visibleOrders = actor?.role === "Master"
-        ? state.orders
-        : state.orders.filter((order) => order.broker === actor?.name || order.agent === actor?.name);
-      els.metricOrders.textContent = String(visibleOrders.filter((order) => order.state !== "Paid" && order.state !== "Voided").length);
+      const openOrders = state.orders.filter((order) =>
+        orderIsAssignedUnpaid(order) && orderIsAssignedToPayingActor(order, actor)
+      );
+      els.metricOrders.textContent = String(openOrders.length);
     }
 
     function postTransferLedger(transfer) {
@@ -13568,7 +13587,12 @@
         sessionActivityPingTimer = null;
         startInactivityWatch();
         renderAccountTimeoutSettings();
-        notifyEvent("Time Out updated", `Automatic logout is set to ${authIdleLabel(idleTimeoutSeconds)}.`);
+        notifyEvent(
+          "Time Out updated",
+          idleTimeoutSeconds === 0
+            ? "Automatic inactivity logout is disabled. You will stay signed in until you log out."
+            : `Automatic logout is set to ${authIdleLabel(idleTimeoutSeconds)}.`
+        );
       } catch (error) {
         els.accountTimeoutError.textContent = error.message;
         els.accountTimeoutError.classList.add("visible");

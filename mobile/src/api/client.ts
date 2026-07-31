@@ -38,7 +38,7 @@ let activeWorkspaceRevision: string | null = null;
 let activeWorkspaceSnapshotJson: string | null = null;
 let activeWorkspaceSnapshotSessionKey = "";
 
-export const allowedIdleTimeoutSeconds = [10, 20, 30, 60, 300, 900, 1800, 3600, 7200] as const;
+export const allowedIdleTimeoutSeconds = [10, 20, 30, 60, 300, 900, 1800, 3600, 7200, 0] as const;
 
 function normalizeIdleTimeoutSeconds(value: unknown): number {
   const seconds = Number(value);

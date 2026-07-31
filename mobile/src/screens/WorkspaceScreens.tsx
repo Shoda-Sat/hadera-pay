@@ -365,6 +365,61 @@ function visibleOrders(session: UserSession, state: WorkspaceState): OrderRecord
     .sort(orderSortForSession(session));
 }
 
+function profileDisplaySession(session: UserSession, actor: ActorRecord): UserSession {
+  if (actor.role === "Master") return session;
+  return {
+    ...session,
+    role: "Actor",
+    actorId: actor.id,
+    actorName: actor.name,
+    actorRole: actor.role,
+    currency: actor.currency,
+    workingCurrencies: actor.workingCurrencies || [actor.currency],
+    managedByMaster: actor.managedByMaster === true
+  };
+}
+
+function ordersForProfile(session: UserSession, state: WorkspaceState, actor: ActorRecord): OrderRecord[] {
+  const relatedOrders = actor.role === "Master"
+    ? state.orders
+    : state.orders.filter((order) =>
+        order.broker === actor.name ||
+        order.agent === actor.name ||
+        Boolean(order.agentActorId && order.agentActorId === actor.id)
+      );
+  const orderbookOrders = actor.role === "Master"
+    ? relatedOrders
+    : relatedOrders.filter((order) => {
+        const isBroker = order.broker === actor.name;
+        if (order.state === "Cancelled") return isBroker;
+        return order.state !== "Voided" && order.locked !== true;
+      });
+  return orderbookOrders.slice().sort(orderSortForSession(profileDisplaySession(session, actor)));
+}
+
+function profileOrderSearchText(order: OrderRecord, session: UserSession): string {
+  return [
+    orderNumber(order, session),
+    order.id,
+    order.brokerOrderNumber,
+    order.agentOrderNumber,
+    ...Object.values(order.agentOrderNumbers || {}),
+    order.state,
+    order.broker,
+    order.agent,
+    order.senderName,
+    order.receiverName,
+    order.receiverCity,
+    order.phoneNumber,
+    order.accountNumber,
+    order.remarks,
+    order.sourceCurrency,
+    order.payoutCurrency,
+    compactAmount(order.sourceCurrency, majorFromMinor(order.sourceAmountMinor, order.sourceCurrency)),
+    compactAmount(order.payoutCurrency, majorFromMinor(order.payoutAmountMinor, order.payoutCurrency))
+  ].filter(Boolean).join(" ").toLocaleLowerCase();
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "The action could not be completed.";
 }
@@ -1980,19 +2035,115 @@ export function ActorsScreen({ state, offline, onState }: CommonProps) {
   return <View style={styles.screen}><ScreenTitle title="Actors" subtitle="Create and manage workspace actors" /><OfflineGuard offline={offline} /><Panel title="Create managed actor" badge="No login"><Field label="Actor name" value={name} onChangeText={setName} /><SelectRow label="Role" options={roles} value={role} onChange={setRole} /><SelectRow label="Base currency" options={supportedCurrencies} value={currency} onChange={setCurrency} />{["Special Broker", "Special Agent"].includes(role) ? <><Text style={styles.fieldLabel}>Working currencies</Text><View style={styles.choiceWrap}>{supportedCurrencies.map((item) => <Pressable key={item} onPress={() => setWorking((current) => current.includes(item) ? current.filter((value) => value !== item) : [...current, item])} style={[styles.choice, working.includes(item) && styles.choiceActive]}><Text style={[styles.choiceText, working.includes(item) && styles.choiceTextActive]}>{item}</Text></Pressable>)}</View></> : null}<Button label="Create actor" icon={<UserPlus size={17} color="#fff" />} loading={busy === "create"} disabled={offline} onPress={() => run("create", async () => { const next = await createManagedActor({ name, role, currency, workingCurrencies: working }); setName(""); return next; })} /></Panel><Panel title="Active actors" badge={String(activeActors(state).length - 1)}>{activeActors(state).filter((actor) => actor.role !== "Master").map((actor) => <View key={actor.id} style={styles.recordRow}><View style={styles.recordMain}><Text style={styles.primaryLine}>{actor.name}</Text><Text style={styles.muted}>{actor.role} - {actor.currency}{actor.managedByMaster ? " - Master managed" : ""}</Text></View><Button label="Remove" variant="danger" disabled={offline} loading={busy === actor.id} onPress={() => Alert.alert("Remove actor?", "The actor will be hidden and its transaction history will remain.", [{ text: "Cancel", style: "cancel" }, { text: "Remove", style: "destructive", onPress: () => run(actor.id, () => removeWorkspaceActor(actor.id, actor.name)) }])} /></View>)}</Panel></View>;
 }
 
+export function ProfilesScreen({ session, state }: CommonProps) {
+  const [profileQuery, setProfileQuery] = useState("");
+  const [selectedProfileId, setSelectedProfileId] = useState("");
+  const [orderQuery, setOrderQuery] = useState("");
+  const profiles = activeActors(state);
+  const profileTerms = profileQuery.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+  const filteredProfiles = profiles.filter((actor) => {
+    const searchText = [actor.name, actor.role, actor.currency, actor.managedByMaster ? "managed" : ""].join(" ").toLocaleLowerCase();
+    return profileTerms.every((term) => searchText.includes(term));
+  });
+  const selectedProfile = profiles.find((actor) => actor.id === selectedProfileId);
+  const displaySession = selectedProfile ? profileDisplaySession(session, selectedProfile) : session;
+  const orderTerms = orderQuery.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+  const profileOrders = selectedProfile
+    ? ordersForProfile(session, state, selectedProfile).filter((order) => {
+        const searchText = profileOrderSearchText(order, displaySession);
+        return orderTerms.every((term) => searchText.includes(term));
+      })
+    : [];
+  const orderPage = useProgressiveLimit(`${selectedProfileId}:${orderQuery}`, 20);
+  const displayedOrders = profileOrders.slice(0, orderPage.limit);
+
+  const chooseProfile = (actorId: string) => {
+    setSelectedProfileId(actorId);
+    setOrderQuery("");
+  };
+
+  return (
+    <View style={styles.screen}>
+      <ScreenTitle title="Profiles" subtitle="Select a profile to view its orders" />
+      <Panel title="Workspace profiles" badge={String(profiles.length)}>
+        <Field
+          label="Search profiles"
+          value={profileQuery}
+          onChangeText={setProfileQuery}
+          placeholder="Name, role, currency, or managed"
+          autoCapitalize="none"
+        />
+        {filteredProfiles.length ? filteredProfiles.map((actor) => (
+          <Pressable
+            key={actor.id}
+            accessibilityRole="button"
+            accessibilityState={{ selected: actor.id === selectedProfileId }}
+            onPress={() => chooseProfile(actor.id)}
+            style={[styles.profileRow, actor.id === selectedProfileId && styles.profileRowActive]}
+          >
+            <View style={styles.recordMain}>
+              <Text style={[styles.primaryLine, actor.id === selectedProfileId && styles.profileTextActive]}>{actor.name}{actor.managedByMaster ? " (Managed)" : ""}</Text>
+              <Text style={styles.muted}>{actor.role} - {actor.currency}</Text>
+            </View>
+            <Text style={[styles.profileSelectText, actor.id === selectedProfileId && styles.profileTextActive]}>{actor.id === selectedProfileId ? "Selected" : "View orders"}</Text>
+          </Pressable>
+        )) : <Text style={styles.muted}>No profiles match this search.</Text>}
+      </Panel>
+
+      {selectedProfile ? (
+        <>
+          <Panel title={`${selectedProfile.name}'s orders`} badge={String(profileOrders.length)}>
+            <SummaryRow label="Profile" value={`${selectedProfile.role} - ${selectedProfile.currency}`} strong />
+            <Field
+              label="Search this profile's orders"
+              value={orderQuery}
+              onChangeText={setOrderQuery}
+              placeholder="Order number, sender, receiver, status, or amount"
+              autoCapitalize="none"
+            />
+          </Panel>
+          {displayedOrders.length ? displayedOrders.map((order) => {
+            const assignedActor = order.agent && !["Unassigned", "Forwarded", "Cancelled"].includes(order.agent) ? order.agent : "Unassigned";
+            const stateLabel = selectedProfile.role === "Master" && order.state === "Assigned"
+              ? `Assigned to ${assignedActor}`
+              : order.state;
+            return (
+              <Panel key={order.id} title={orderNumber(order, displaySession)} badge={stateLabel} badgeTone={orderStatusTone(order.state)}>
+                <SummaryRow label="Ordering broker" value={order.broker || "Unknown"} />
+                <SummaryRow label="Paying Actor" value={assignedActor} />
+                <SummaryRow label="Amount" value={`${compactAmount(order.sourceCurrency, majorFromMinor(order.sourceAmountMinor, order.sourceCurrency))} to ${compactAmount(order.payoutCurrency, majorFromMinor(order.payoutAmountMinor, order.payoutCurrency))}`} strong />
+                {order.senderName ? <SummaryRow label="Sender" value={order.senderName} /> : null}
+                {order.receiverName ? <SummaryRow label="Receiver" value={order.receiverName} /> : null}
+                {order.receiverCity ? <SummaryRow label="Receiver city" value={order.receiverCity} /> : null}
+                <SummaryRow label="Updated" value={formatDateTime(order.updatedAt || order.paidAt || order.sentAt || order.createdAt)} />
+              </Panel>
+            );
+          }) : <Panel><Text style={styles.muted}>{orderTerms.length ? "No orders match this search." : "This profile has no orders."}</Text></Panel>}
+          {displayedOrders.length < profileOrders.length ? (
+            <Button label={`Load 20 more orders (${profileOrders.length - displayedOrders.length} remaining)`} variant="secondary" onPress={orderPage.showMore} />
+          ) : null}
+        </>
+      ) : (
+        <Panel title="Actor orders"><Text style={styles.muted}>Choose a profile above to display its orders.</Text></Panel>
+      )}
+    </View>
+  );
+}
+
 function idleTimeoutLabel(seconds: number): string {
+  if (seconds === 0) return "Never";
   if (seconds < 60) return `${seconds} Seconds`;
   if (seconds === 60) return "1 Minute";
   if (seconds < 3600) return `${seconds / 60} Minutes`;
   return `${seconds / 3600} ${seconds === 3600 ? "Hour" : "Hours"}`;
 }
 
-export function SettingsScreen({ session, state, offline, onState, onSessionTimeout }: CommonProps) {
+export function SettingsScreen({ session, state, offline, onState, onNavigate, onSessionTimeout }: CommonProps) {
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [busy, setBusy] = useState("");
   const timeoutOptions = allowedIdleTimeoutSeconds.map(idleTimeoutLabel);
-  const [timeoutLabel, setTimeoutLabel] = useState(idleTimeoutLabel(session.idleTimeoutSeconds || 7200));
+  const [timeoutLabel, setTimeoutLabel] = useState(idleTimeoutLabel(session.idleTimeoutSeconds ?? 7200));
   const [invites, setInvites] = useState<InviteRecord[]>([]);
   const [inviteRole, setInviteRole] = useState<ActorRole>("Broker");
   const [inviteCurrency, setInviteCurrency] = useState<Currency>("USD");
@@ -2025,12 +2176,17 @@ export function SettingsScreen({ session, state, offline, onState, onSessionTime
   const saveTimeout = async () => {
     if (offline) return Alert.alert("Offline", "Reconnect before changing the automatic logout time.");
     const selectedIndex = timeoutOptions.indexOf(timeoutLabel);
-    const idleTimeoutSeconds = allowedIdleTimeoutSeconds[selectedIndex] || 7200;
+    const idleTimeoutSeconds = allowedIdleTimeoutSeconds[selectedIndex] ?? 7200;
     setBusy("timeout");
     try {
       const nextSession = await updateIdleTimeout(idleTimeoutSeconds);
       onSessionTimeout?.(nextSession);
-      Alert.alert("Time Out updated", `Automatic logout is set to ${idleTimeoutLabel(idleTimeoutSeconds)}.`);
+      Alert.alert(
+        "Time Out updated",
+        idleTimeoutSeconds === 0
+          ? "Automatic inactivity logout is disabled. You will stay signed in until you log out."
+          : `Automatic logout is set to ${idleTimeoutLabel(idleTimeoutSeconds)}.`
+      );
     } catch (error) {
       Alert.alert("Time Out", errorMessage(error));
     } finally {
@@ -2131,6 +2287,10 @@ export function SettingsScreen({ session, state, offline, onState, onSessionTime
       <Panel title="Reset password"><Field label="Current password" value={currentPassword} onChangeText={setCurrentPassword} secureTextEntry /><Field label="New password" value={newPassword} onChangeText={setNewPassword} secureTextEntry /><Button label="Update password" loading={busy === "password"} disabled={offline} onPress={change} /></Panel>
       <Panel title="Time Out" badge="Automatic logout"><SelectRow label="Inactive for" options={timeoutOptions} value={timeoutLabel} onChange={setTimeoutLabel} /><Button label="Save Time Out" loading={busy === "timeout"} disabled={offline} onPress={saveTimeout} /></Panel>
       {master ? <>
+        <Panel title="Profiles" badge={String(activeActors(state).length)}>
+          <Text style={styles.muted}>Search every workspace profile and display the selected Actor's orders.</Text>
+          <Button label="Profiles" variant="secondary" onPress={() => onNavigate("profiles")} />
+        </Panel>
         <Panel title="Private file storage" badge={storageStatus?.configured === false ? "Not configured" : "Cloudflare R2"}>
           <Text style={styles.muted}>{storageStatus ? `${storageStatus.storedFiles} stored files · ${storageStatus.legacyAttachments} existing attachments to move` : "Check R2 and move older embedded attachments out of the JSON database."}</Text>
           <View style={styles.rowButtons}>
@@ -2457,6 +2617,10 @@ const styles = StyleSheet.create({
   twoColumns: { gap: spacing.md },
   recordRow: { gap: spacing.sm, borderBottomWidth: 1, borderBottomColor: colors.line, paddingVertical: spacing.sm },
   recordMain: { gap: 3 },
+  profileRow: { minHeight: 58, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: spacing.md, borderWidth: 1, borderColor: colors.line, borderRadius: radius.md, backgroundColor: colors.panel2, paddingHorizontal: spacing.md, paddingVertical: spacing.sm },
+  profileRowActive: { borderColor: colors.accent, backgroundColor: colors.accentSoft },
+  profileSelectText: { color: colors.muted, fontSize: 12, fontWeight: "900" },
+  profileTextActive: { color: colors.accent },
   chatTabs: { gap: spacing.sm, paddingBottom: 2 },
   messages: { gap: spacing.sm },
   message: { alignSelf: "flex-start", maxWidth: "88%", borderRadius: radius.md, backgroundColor: colors.panel2, padding: spacing.md, gap: 2 },

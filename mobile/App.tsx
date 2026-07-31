@@ -69,6 +69,7 @@ import {
   OwnerScreen,
   OrdersScreen,
   PendingCancelledScreen,
+  ProfilesScreen,
   ReceivablesScreen,
   SearchScreen,
   SettingsScreen,
@@ -161,6 +162,23 @@ function visibleOrdersFor(session: UserSession, workspaceState: WorkspaceState |
     .filter((order) => !["Voided", "Cancelled"].includes(order.state) && order.locked !== true)
     .slice()
     .sort(orderSortForSession(session));
+}
+
+function orderIsAssignedUnpaid(order: OrderRecord): boolean {
+  return order.state === "Assigned" &&
+    !order.paidAt &&
+    !order.journal &&
+    !order.cancelledAt &&
+    !order.voidedAt;
+}
+
+function assignedUnpaidOrdersFor(session: UserSession, workspaceState: WorkspaceState | null): OrderRecord[] {
+  return (workspaceState?.orders || []).filter((order) => {
+    if (!orderIsAssignedUnpaid(order)) return false;
+    if (session.actorRole === "Master") return true;
+    if (order.agentActorId && session.actorId) return order.agentActorId === session.actorId;
+    return order.agent === session.actorName;
+  });
 }
 
 function stateTone(state: OrderRecord["state"]): PillTone {
@@ -494,7 +512,8 @@ export default function App() {
     lastActivityRef.current = now;
     setLastActivityAt(now);
     void rememberSessionActivity(now);
-    const reportEveryMs = Math.max(2000, Math.min(30000, Number(session.idleTimeoutSeconds || 7200) * 1000 / 3));
+    const idleTimeoutSeconds = Number(session.idleTimeoutSeconds ?? 7200);
+    const reportEveryMs = idleTimeoutSeconds === 0 ? 30000 : Math.max(2000, Math.min(30000, idleTimeoutSeconds * 1000 / 3));
     if (now - lastServerActivityRef.current >= reportEveryMs) {
       lastServerActivityRef.current = now;
       void reportSessionActivity().catch(() => undefined);
@@ -508,7 +527,9 @@ export default function App() {
 
   useEffect(() => {
     if (!session) return;
-    const idleMs = Number(session.idleTimeoutSeconds || 7200) * 1000;
+    const idleTimeoutSeconds = Number(session.idleTimeoutSeconds ?? 7200);
+    if (idleTimeoutSeconds === 0) return;
+    const idleMs = idleTimeoutSeconds * 1000;
     const remainingMs = Math.max(0, idleMs - (Date.now() - lastActivityAt));
     const timer = setTimeout(() => {
       if (Date.now() - lastActivityRef.current < idleMs || logoutInFlightRef.current) return;
@@ -520,9 +541,11 @@ export default function App() {
 
   useEffect(() => {
     if (!session) return;
+    const idleTimeoutSeconds = Number(session.idleTimeoutSeconds ?? 7200);
+    if (idleTimeoutSeconds === 0) return;
     const subscription = AppState.addEventListener("change", (nextState) => {
       if (nextState !== "active") return;
-      const idleMs = Number(session.idleTimeoutSeconds || 7200) * 1000;
+      const idleMs = idleTimeoutSeconds * 1000;
       if (Date.now() - lastActivityRef.current >= idleMs && !logoutInFlightRef.current) {
         Alert.alert("Session timed out", "You were logged out because this account was inactive.");
         void handleLogout();
@@ -627,6 +650,7 @@ export default function App() {
           {commonProps && currentScreen === "chat" ? <ChatScreen {...commonProps} /> : null}
           {commonProps && currentScreen === "ledger" ? <LedgerScreen {...commonProps} /> : null}
           {commonProps && currentScreen === "actors" && isMasterView(actingSession) ? <ActorsScreen {...commonProps} /> : null}
+          {commonProps && currentScreen === "profiles" && isMasterView(actingSession) ? <ProfilesScreen {...commonProps} /> : null}
           {commonProps && currentScreen === "settings" ? <SettingsScreen {...commonProps} /> : null}
           {workspaceState && currentScreen === "more" ? (
             <MoreScreen
@@ -930,6 +954,7 @@ function HomeScreen({
   onLedger: () => void;
 }) {
   const orders = visibleOrdersFor(session, workspaceState);
+  const openOrders = assignedUnpaidOrdersFor(session, workspaceState);
   const assignedOrders = orders.filter((order) => order.state === "Assigned");
   const actorCanSendOrders = canCreateOrders(session);
   const pendingTransfers = (workspaceState?.transfers || []).filter((transfer) => transfer.state === "Pending Approval").length;
@@ -941,7 +966,7 @@ function HomeScreen({
     <View style={styles.screen}>
       <Panel title="Dashboard" badge={stateLoading ? "Syncing" : "Live"}>
         <View style={styles.metricsGrid}>
-          <Metric label="Open orders" value={String(orders.length)} onPress={onOrders} />
+          <Metric label="Open orders" value={String(openOrders.length)} onPress={onOrders} />
           <Metric label="Pending approvals" value={String(session.actorRole === "Master" ? pendingTransfers : assignedOrders.length)} onPress={session.actorRole === "Master" ? onTransfers : onOrders} />
           <Metric label="Settlement net" value={session.currency} onPress={onSettlement} />
           <Metric label="Journal lines" value={String(ledgerLines)} onPress={onLedger} />

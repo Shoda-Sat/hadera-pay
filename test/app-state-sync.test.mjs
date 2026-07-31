@@ -49,7 +49,8 @@ async function requestJson(baseUrl, pathname, { cookie = "", method = "GET", bod
   });
   const data = await response.json();
   assert.equal(response.ok, true, data.error || `${method} ${pathname} failed`);
-  return { data, cookie: response.headers.get("set-cookie")?.split(";", 1)[0] || cookie };
+  const setCookie = response.headers.get("set-cookie") || "";
+  return { data, cookie: setCookie.split(";", 1)[0] || cookie, setCookie };
 }
 
 async function requestError(baseUrl, pathname, { cookie = "", method = "GET", body } = {}) {
@@ -130,6 +131,7 @@ test("workspace revision checks stay read-only and detect saved changes", async 
 
   try {
     await waitForServer(baseUrl, serverProcess, stderr);
+    const databasePath = path.join(dataDirectory, "auth-db.json");
 
     const ownerLogin = await requestJson(baseUrl, "/api/auth/login", {
       method: "POST",
@@ -268,7 +270,36 @@ test("workspace revision checks stay read-only and detect saved changes", async 
     assert.equal(invitesAfterEmailChange.data.invites.some((item) => item.id === invite.data.invite.id), true);
 
     const initialVersion = await requestJson(baseUrl, "/api/app-state/version", { cookie: masterLogin.cookie });
-    const databasePath = path.join(dataDirectory, "auth-db.json");
+
+    const neverTimeout = await requestJson(baseUrl, "/api/auth/timeout", {
+      cookie: masterLogin.cookie,
+      method: "PUT",
+      body: { idleTimeoutSeconds: 0 },
+    });
+    assert.equal(neverTimeout.data.idleTimeoutSeconds, 0);
+    assert.equal(neverTimeout.data.session.user.idleTimeoutSeconds, 0);
+    assert.match(neverTimeout.setCookie, /Max-Age=315360000/);
+
+    const neverDatabase = JSON.parse(await readFile(databasePath, "utf8"));
+    const neverSessionId = decodeURIComponent(masterLogin.cookie.split("=", 2)[1]);
+    const neverSessionRecord = neverDatabase.sessions.find((item) => item.id === neverSessionId);
+    assert.ok(neverSessionRecord);
+    neverSessionRecord.lastActivityAt = "2000-01-01T00:00:00.000Z";
+    neverSessionRecord.expiresAt = "2000-01-01T00:00:01.000Z";
+    await writeFile(databasePath, JSON.stringify(neverDatabase, null, 2));
+
+    const neverSessionStillActive = await requestJson(baseUrl, "/api/session", { cookie: masterLogin.cookie });
+    assert.equal(neverSessionStillActive.data.session.user.id, createdMaster.data.user.id);
+    assert.equal(neverSessionStillActive.data.session.user.idleTimeoutSeconds, 0);
+
+    const finiteTimeout = await requestJson(baseUrl, "/api/auth/timeout", {
+      cookie: masterLogin.cookie,
+      method: "PUT",
+      body: { idleTimeoutSeconds: 7200 },
+    });
+    assert.equal(finiteTimeout.data.session.user.idleTimeoutSeconds, 7200);
+    assert.match(finiteTimeout.setCookie, /Max-Age=7200/);
+
     const beforeStateRead = await stat(databasePath, { bigint: true });
     const initialState = await requestJson(baseUrl, "/api/app-state", { cookie: masterLogin.cookie });
     const afterStateRead = await stat(databasePath, { bigint: true });
