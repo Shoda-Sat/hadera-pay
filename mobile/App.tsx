@@ -903,7 +903,10 @@ function MoreScreen({
     { screen: "settlement", label: "Settlement" },
     { screen: "archive", label: "Report" },
     ...(isMasterView(session) || ["Broker", "Special Broker"].includes(session.actorRole) ? [{ screen: "receivables" as AppScreen, label: "Receivables" }] : []),
-    ...(isMasterView(session) ? [{ screen: "actors" as AppScreen, label: "Actors" }] : []),
+    ...(isMasterView(session) ? [
+      { screen: "actors" as AppScreen, label: "Actors" },
+      { screen: "profiles" as AppScreen, label: "Profiles" }
+    ] : []),
     { screen: "settings", label: "Settings" }
   ];
   const managedActors = loginSession.role === "Master" ? activeActors(state).filter((actor) => actor.managedByMaster === true) : [];

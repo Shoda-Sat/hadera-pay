@@ -16,8 +16,10 @@ test("Android Master Profiles provides profile and order search", async () => {
   assert.match(types, /\| "profiles"/);
   assert.match(app, /ProfilesScreen/);
   assert.match(app, /currentScreen === "profiles" && isMasterView/);
+  assert.match(app, /screen: "profiles" as AppScreen, label: "Profiles"/);
+  assert.match(app, /Panel title="Workspace tools"/);
   assert.match(screens, /export function ProfilesScreen/);
-  assert.match(screens, /label="Profiles"/);
+  assert.doesNotMatch(screens, /<Panel title="Profiles"/);
   assert.match(screens, /label="Search profiles"/);
   assert.match(screens, /label="Search this profile's orders"/);
   assert.match(screens, /function ordersForProfile/);

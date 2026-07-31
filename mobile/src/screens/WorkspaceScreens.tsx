@@ -2138,7 +2138,7 @@ function idleTimeoutLabel(seconds: number): string {
   return `${seconds / 3600} ${seconds === 3600 ? "Hour" : "Hours"}`;
 }
 
-export function SettingsScreen({ session, state, offline, onState, onNavigate, onSessionTimeout }: CommonProps) {
+export function SettingsScreen({ session, state, offline, onState, onSessionTimeout }: CommonProps) {
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [busy, setBusy] = useState("");
@@ -2287,10 +2287,6 @@ export function SettingsScreen({ session, state, offline, onState, onNavigate, o
       <Panel title="Reset password"><Field label="Current password" value={currentPassword} onChangeText={setCurrentPassword} secureTextEntry /><Field label="New password" value={newPassword} onChangeText={setNewPassword} secureTextEntry /><Button label="Update password" loading={busy === "password"} disabled={offline} onPress={change} /></Panel>
       <Panel title="Time Out" badge="Automatic logout"><SelectRow label="Inactive for" options={timeoutOptions} value={timeoutLabel} onChange={setTimeoutLabel} /><Button label="Save Time Out" loading={busy === "timeout"} disabled={offline} onPress={saveTimeout} /></Panel>
       {master ? <>
-        <Panel title="Profiles" badge={String(activeActors(state).length)}>
-          <Text style={styles.muted}>Search every workspace profile and display the selected Actor's orders.</Text>
-          <Button label="Profiles" variant="secondary" onPress={() => onNavigate("profiles")} />
-        </Panel>
         <Panel title="Private file storage" badge={storageStatus?.configured === false ? "Not configured" : "Cloudflare R2"}>
           <Text style={styles.muted}>{storageStatus ? `${storageStatus.storedFiles} stored files · ${storageStatus.legacyAttachments} existing attachments to move` : "Check R2 and move older embedded attachments out of the JSON database."}</Text>
           <View style={styles.rowButtons}>
