@@ -154,6 +154,17 @@ test("workspace revision checks stay read-only and detect saved changes", async 
       body: { email: "sync-test@example.com", password: masterPassword },
     });
     assert.equal(masterLogin.data.session.membership.currency, "LYD");
+    const mismatchedPasswordChange = await requestError(baseUrl, "/api/auth/password", {
+      cookie: masterLogin.cookie,
+      method: "POST",
+      body: {
+        currentPassword: masterPassword,
+        newPassword: `${masterPassword}-changed`,
+        confirmNewPassword: `${masterPassword}-different`,
+      },
+    });
+    assert.equal(mismatchedPasswordChange.status, 400);
+    assert.equal(mismatchedPasswordChange.data.error, "New password and confirmation must match.");
     const invite = await requestJson(baseUrl, "/api/invites", {
       cookie: masterLogin.cookie,
       method: "POST",

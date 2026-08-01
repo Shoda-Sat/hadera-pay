@@ -1948,7 +1948,9 @@ async function handleApi(request, response, url) {
     const body = await readJson(request);
     const currentPassword = String(body.currentPassword || "");
     const newPassword = String(body.newPassword || "");
+    const confirmNewPassword = String(body.confirmNewPassword || "");
     if (newPassword.length < 6) return sendJson(response, 400, { error: "Enter a new password of at least 6 characters." });
+    if (newPassword !== confirmNewPassword) return sendJson(response, 400, { error: "New password and confirmation must match." });
     if (session.user.id === "__owner") {
       const ownerMatches = db.ownerPasswordHash
         ? verifyPassword(currentPassword, db.ownerPasswordHash)

@@ -520,11 +520,12 @@ export async function getAccountDeviceWarning(): Promise<{ warning: AccountDevic
   return { warning: result.warning || null, session: activeSession };
 }
 
-export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
+export async function changePassword(currentPassword: string, newPassword: string, confirmNewPassword: string): Promise<void> {
   if (!currentPassword || newPassword.length < 6) throw new Error("Enter the current password and a new password of at least 6 characters.");
+  if (newPassword !== confirmNewPassword) throw new Error("New password and confirmation must match.");
   await api<{ ok: boolean }>("/api/auth/password", {
     method: "POST",
-    body: { currentPassword, newPassword }
+    body: { currentPassword, newPassword, confirmNewPassword }
   });
 }
 

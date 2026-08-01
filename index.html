@@ -2385,7 +2385,7 @@
             <input id="newPassword" type="password" autocomplete="new-password">
           </div>
           <div class="field">
-            <label for="confirmPassword">Confirm password</label>
+            <label for="confirmPassword">Confirm New Password</label>
             <input id="confirmPassword" type="password" autocomplete="new-password">
           </div>
         </div>
@@ -13560,7 +13560,7 @@
       try {
         await api("/api/auth/password", {
           method: "POST",
-          body: { currentPassword, newPassword }
+          body: { currentPassword, newPassword, confirmNewPassword: confirmPassword }
         });
         notifyEvent("Password updated", "Use the new password next time you log in.");
         closePasswordReset();

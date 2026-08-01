@@ -2141,6 +2141,7 @@ function idleTimeoutLabel(seconds: number): string {
 export function SettingsScreen({ session, state, offline, onState, onSessionTimeout }: CommonProps) {
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
+  const [confirmNewPassword, setConfirmNewPassword] = useState("");
   const [busy, setBusy] = useState("");
   const timeoutOptions = allowedIdleTimeoutSeconds.map(idleTimeoutLabel);
   const [timeoutLabel, setTimeoutLabel] = useState(idleTimeoutLabel(session.idleTimeoutSeconds ?? 7200));
@@ -2193,7 +2194,22 @@ export function SettingsScreen({ session, state, offline, onState, onSessionTime
       setBusy("");
     }
   };
-  const change = async () => { if (offline) return Alert.alert("Offline", "Reconnect before changing your password."); setBusy("password"); try { await changePassword(currentPassword, newPassword); setCurrentPassword(""); setNewPassword(""); Alert.alert("Password updated", "Your new password is ready."); } catch (error) { Alert.alert("Password", errorMessage(error)); } finally { setBusy(""); } };
+  const change = async () => {
+    if (offline) return Alert.alert("Offline", "Reconnect before changing your password.");
+    if (newPassword !== confirmNewPassword) return Alert.alert("Password", "New password and confirmation must match.");
+    setBusy("password");
+    try {
+      await changePassword(currentPassword, newPassword, confirmNewPassword);
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmNewPassword("");
+      Alert.alert("Password updated", "Your new password is ready.");
+    } catch (error) {
+      Alert.alert("Password", errorMessage(error));
+    } finally {
+      setBusy("");
+    }
+  };
   const setMode = async (actorId: string, mode: ActorRecord["transferMode"]) => { if (offline) return Alert.alert("Offline", "Reconnect before changing permissions."); setBusy(actorId); try { onState(await updateActorTransferMode(actorId, mode)); } catch (error) { Alert.alert("Permissions", errorMessage(error)); } finally { setBusy(""); } };
   const refreshInvites = async () => { setBusy("invites"); try { setInvites(await loadInvites()); } catch (error) { Alert.alert("Invite codes", errorMessage(error)); } finally { setBusy(""); } };
   const addInvite = async () => { if (offline) return Alert.alert("Offline", "Reconnect before creating an invite."); setBusy("invite-create"); try { await createInvite({ actorRole: inviteRole, currency: inviteCurrency, workingCurrencies: [inviteCurrency] }); await refreshInvites(); } catch (error) { Alert.alert("Invite codes", errorMessage(error)); } finally { setBusy(""); } };
@@ -2284,7 +2300,12 @@ export function SettingsScreen({ session, state, offline, onState, onSessionTime
     <View style={styles.screen}>
       <ScreenTitle title="Settings" subtitle="Account and workspace permissions" />
       <OfflineGuard offline={offline} />
-      <Panel title="Reset password"><Field label="Current password" value={currentPassword} onChangeText={setCurrentPassword} secureTextEntry /><Field label="New password" value={newPassword} onChangeText={setNewPassword} secureTextEntry /><Button label="Update password" loading={busy === "password"} disabled={offline} onPress={change} /></Panel>
+      <Panel title="Reset password">
+        <Field label="Current password" value={currentPassword} onChangeText={setCurrentPassword} secureTextEntry />
+        <Field label="New password" value={newPassword} onChangeText={setNewPassword} secureTextEntry />
+        <Field label="Confirm New Password" value={confirmNewPassword} onChangeText={setConfirmNewPassword} secureTextEntry />
+        <Button label="Update password" loading={busy === "password"} disabled={offline} onPress={change} />
+      </Panel>
       <Panel title="Time Out" badge="Automatic logout"><SelectRow label="Inactive for" options={timeoutOptions} value={timeoutLabel} onChange={setTimeoutLabel} /><Button label="Save Time Out" loading={busy === "timeout"} disabled={offline} onPress={saveTimeout} /></Panel>
       {master ? <>
         <Panel title="Private file storage" badge={storageStatus?.configured === false ? "Not configured" : "Cloudflare R2"}>
