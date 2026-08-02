@@ -596,13 +596,16 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
       {
         text: "Mark Paid",
         onPress: () => run(`paid-${order.id}`, async () => {
-          const next = await markOrderPaid(order.id, session.actorId, proofs[order.id]);
+          const proof = proofs[order.id];
+          const displayNumber = orderNumber(order, session);
+          const next = await markOrderPaid(order.id, session.actorId, proof);
           setProofs((current) => {
             const updated = { ...current };
             delete updated[order.id];
             return updated;
           });
           setProofStatus((current) => ({ ...current, [order.id]: "" }));
+          if (proof) Alert.alert("Photo sent", `A photo was sent regarding order ${displayNumber}.`);
           return next;
         })
       }
@@ -1673,6 +1676,7 @@ export function ChatScreen({ session, state, offline, onState, onRefresh, onScro
       setAttachmentStatus("Preparing image...");
       const linkedOrder = replyingTo ? payingOrderForChatReply(session, state, replyingTo) : undefined;
       const originalOrderNumber = linkedOrder?.brokerOrderNumber || linkedOrder?.id || "";
+      const payerOrderNumber = linkedOrder ? orderNumber(linkedOrder, session) : "";
       const storedFile = await uploadChatPhoto(selected.id, result.assets[0], setAttachmentStatus, linkedOrder);
       setAttachmentStatus("Sending image...");
       const next = await sendChatAttachment(selected.id, session.actorName, {
@@ -1686,7 +1690,8 @@ export function ChatScreen({ session, state, offline, onState, onRefresh, onScro
       }, replyToId);
       onState(next);
       setReplyToId("");
-      setAttachmentStatus(linkedOrder ? `Image sent to the original Broker as Master for ${originalOrderNumber}` : "Image sent");
+      setAttachmentStatus(linkedOrder ? `Photo sent regarding replied order ${payerOrderNumber}` : "Image sent");
+      if (linkedOrder) Alert.alert("Photo sent", `A photo was sent regarding replied order ${payerOrderNumber}.`);
       setTimeout(() => onScrollToEnd?.(), 80);
     } catch (error) {
       setAttachmentStatus("Image failed");

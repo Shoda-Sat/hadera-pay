@@ -1861,6 +1861,11 @@
       right: 24px;
       bottom: 24px;
       z-index: 70;
+      width: 36px;
+      height: 36px;
+      min-height: 36px;
+      padding: 0;
+      border-radius: 999px;
       box-shadow: var(--shadow);
     }
 
@@ -3101,9 +3106,8 @@
                 </button>
                 <button class="btn primary" id="chatSend" type="submit">Send</button>
               </form>
-              <button class="btn primary chat-bottom-button" id="chatBottomButton" type="button" aria-label="Go to the newest chat message">
+              <button class="btn primary chat-bottom-button" id="chatBottomButton" type="button" aria-label="Go to the newest chat message" title="Go to bottom">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m6 9 6 6 6-6"/></svg>
-                Go to bottom
               </button>
             </section>
           </div>
@@ -4804,7 +4808,7 @@
 
     function settingsRateInputIsFocused() {
       return Boolean(document.activeElement?.closest?.(
-        ".forward-transfer-form, .fixed-order-rate, .special-agent-divider, .special-agent-percent, .usd-agent-income-divider, .usd-agent-income-percent, .master-rate-divider, .master-rate-percent, .buying-rate-input, .forward-agent, .forward-payout-divider, .forward-payout-percent, .receivable-payment, .ledger-tool-input, .actor-name-input, .actor-currency-input, .actor-currency-rate, #actorResetActor, #actorResetPermit"
+        ".forward-transfer-form, .fixed-order-rate, .special-agent-divider, .special-agent-percent, .usd-agent-income-divider, .usd-agent-income-percent, .master-rate-divider, .master-rate-percent, .buying-rate-input, .forward-agent, .forward-payout-divider, .forward-payout-percent, .master-return-reason, .receivable-payment, .ledger-tool-input, .actor-name-input, .actor-currency-input, .actor-currency-rate, #actorResetActor, #actorResetPermit"
       ));
     }
 
@@ -7860,7 +7864,8 @@
         readBy: [masterName()],
         createdAt: new Date().toISOString()
       });
-      notifyEvent("Payment photo delivered", `${displayNumber} was sent to the original Broker as Master.`);
+      const payerOrderNumber = orderDisplayNumber(order, selectedActor());
+      notifyEvent("Photo sent", `A photo was sent regarding order ${payerOrderNumber}.`);
     }
 
     function applyPrivileges() {
@@ -10248,7 +10253,7 @@
     }
 
     function renderOrders() {
-      if (document.activeElement?.closest?.(".forward-agent, .forward-payout-divider, .forward-payout-percent")) return;
+      if (document.activeElement?.closest?.(".forward-agent, .forward-payout-divider, .forward-payout-percent, .master-return-reason")) return;
       const actor = selectedActor();
       const visibleOrders = actor?.role === "Master"
         ? state.orders
@@ -14201,10 +14206,10 @@
           mimeType
         });
         if (linkedOrder) {
-          const orderNumber = brokerOrderNumberForOrder(linkedOrder);
+          const payerOrderNumber = orderDisplayNumber(linkedOrder, selectedActor());
           sendChatOrderPhotoToBroker(linkedOrder, storedFile);
           state.chatReplyTo = "";
-          notifyEvent("Photo delivered", `${orderNumber} was sent to the original Broker as Master.`);
+          notifyEvent("Photo sent", `A photo was sent regarding replied order ${payerOrderNumber}.`);
           renderChat();
           saveState();
         } else {

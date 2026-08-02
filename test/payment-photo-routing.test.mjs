@@ -36,7 +36,9 @@ test("paying-Actor photos are delivered to the original Broker as Master", async
   assert.match(webProofRoute, /directChatWithMaster\(order\.broker\)/);
   assert.match(webProofRoute, /from: masterName\(\)/);
   assert.match(webProofRoute, /orderNumber: displayNumber/);
+  assert.match(webProofRoute, /notifyEvent\("Photo sent", `A photo was sent regarding order \$\{payerOrderNumber\}\.\`\)/);
   assert.doesNotMatch(webProofRoute, /from: actor\.name|forwardedFrom/);
+  assert.match(index, /notifyEvent\("Photo sent", `A photo was sent regarding replied order \$\{payerOrderNumber\}\.\`\)/);
 
   assert.match(server, /\["order-photo", \{/);
   assert.match(server, /\["payment-proof", "order-photo"\]\.includes\(file\.purpose\)/);
@@ -59,4 +61,6 @@ test("paying-Actor photos are delivered to the original Broker as Master", async
   assert.match(mobileScreens, /orderNumber: order\.brokerOrderNumber \|\| order\.id/);
   assert.match(mobileScreens, /return `\$\{displayNumber\}-payment-photo\$\{extension\}`/);
   assert.match(mobileScreens, /return `\$\{prefix\}-payment-photo\$\{extension\}`/);
+  assert.match(mobileScreens, /Alert\.alert\("Photo sent", `A photo was sent regarding order \$\{displayNumber\}\.\`\)/);
+  assert.match(mobileScreens, /Alert\.alert\("Photo sent", `A photo was sent regarding replied order \$\{payerOrderNumber\}\.\`\)/);
 });

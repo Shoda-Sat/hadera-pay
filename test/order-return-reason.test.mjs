@@ -19,6 +19,8 @@ test("Master return reasons are latest-only and hidden from paying Actors", asyn
   assert.match(index, /class="master-return-reason"[^>]+maxlength="500"/);
   assert.match(index, /if \(!reason\)[\s\S]*Enter the reason for returning this order/);
   assert.match(index, /currentOrder\.returnedReason = reason/);
+  assert.match(index, /settingsRateInputIsFocused\(\)[\s\S]*\.master-return-reason/);
+  assert.match(index, /document\.activeElement\?\.closest\?\.\("\.forward-agent,[^\n]+\.master-return-reason"\)/);
   assert.match(index, /function viewerCanSeeOrderReturnReason[\s\S]*order\?\.state !== "Returned"[\s\S]*order\?\.broker === viewer\?\.name/);
   assert.match(index, /order\.state = "Assigned";[\s\S]*order\.returnedReason = "";/);
 

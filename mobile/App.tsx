@@ -728,8 +728,7 @@ export default function App() {
             onPress={() => contentScrollRef.current?.scrollToEnd({ animated: true })}
             style={styles.chatBottomButton}
           >
-            <ChevronDown size={18} color="#ffffff" strokeWidth={2.6} />
-            <Text style={styles.chatBottomButtonText}>Bottom</Text>
+            <ChevronDown size={17} color="#ffffff" strokeWidth={2.6} />
           </Pressable>
         ) : null}
         <BottomTabs session={actingSession} state={workspaceState} current={currentScreen} onChange={navigate} />
@@ -2129,19 +2128,13 @@ const styles = StyleSheet.create({
     right: spacing.lg,
     bottom: 96,
     zIndex: 10,
-    minHeight: 44,
-    flexDirection: "row",
+    width: 36,
+    height: 36,
     alignItems: "center",
-    gap: spacing.xs,
+    justifyContent: "center",
     borderRadius: 999,
-    paddingHorizontal: spacing.md,
     backgroundColor: colors.accent,
     ...shadow
-  },
-  chatBottomButtonText: {
-    color: "#ffffff",
-    fontSize: 12,
-    fontWeight: "900"
   },
   tabs: {
     position: "absolute",
