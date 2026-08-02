@@ -87,7 +87,7 @@ export function actionRequiredNoticesFor(session: UserSession, state: WorkspaceS
       .forEach((order) => notices.push({
         key: `order:${order.id}:returned:${order.updatedAt || order.returnedAt || ""}`,
         title: "Returned order needs modification",
-        body: `${actionOrderReference(order)} was returned for you to review and modify.`,
+        body: `${actionOrderReference(order)} was returned for you to review and modify.${order.returnedReason ? ` Reason: ${order.returnedReason}` : ""}`,
         screen: "orders",
         actionable: true
       }));
@@ -473,23 +473,28 @@ export async function assignOrder(orderId: string, agentId: string, dividerText 
     order.state = "Assigned";
     order.assignedAt = new Date().toISOString();
     order.updatedAt = order.assignedAt;
+    order.returnedBy = "";
+    order.returnedReason = "";
+    order.returnedAt = "";
     appendOrderAssignmentMessage(state, order, agent);
     const receivable = state.receivables.find((item) => item.orderId === order.id);
     if (receivable) receivable.updatedAt = order.updatedAt;
   });
 }
 
-export async function returnOrder(orderId: string, actorName = "Master"): Promise<WorkspaceState> {
+export async function returnOrder(orderId: string, actorName = "Master", reason = ""): Promise<WorkspaceState> {
   return updateWorkspaceState((state) => {
     const order = state.orders.find((item) => item.id === orderId);
     if (!order) throw new Error("This order is no longer available.");
     const masterReturn = order.state === "Pending Forward";
     const payerReturn = order.state === "Assigned" && order.agent === actorName;
     if (!masterReturn && !payerReturn) throw new Error("This order can no longer be returned.");
+    const latestReason = reason.trim().slice(0, 500);
+    if (masterReturn && !latestReason) throw new Error("Enter the reason for returning this order.");
     order.state = "Returned";
     order.returnedBy = actorName;
     order.returnedAt = new Date().toISOString();
-    order.returnedReason = "";
+    order.returnedReason = masterReturn ? latestReason : "";
     order.agent = "Unassigned";
     order.agentActorId = "";
     order.updatedAt = order.returnedAt;
@@ -513,31 +518,31 @@ export async function cancelOrder(orderId: string, actorName = "Master"): Promis
   });
 }
 
-function appendPaymentProofToMaster(state: WorkspaceState, order: OrderRecord, actor: ActorRecord, proof: PreparedPaymentProof, postedAt: string): void {
+function appendPaymentProofToBroker(state: WorkspaceState, order: OrderRecord, proof: PreparedPaymentProof, postedAt: string): void {
   ensureDirectChats(state);
   const master = activeActors(state).find((item) => item.role === "Master");
+  const broker = activeActors(state).find((item) => item.id === order.brokerActorId)
+    || activeActors(state).find((item) => item.name === order.broker);
   const chat = master && state.chatConversations.find((item) =>
-    item.type === "direct" && item.members.includes(master.name) && item.members.includes(actor.name)
+    item.type === "direct" && item.members.includes(master.name) && item.members.includes(order.broker)
   );
-  if (!master || !chat) throw new Error("The payment file could not be forwarded because the Master chat is unavailable.");
-  const displayNumber = proof.orderNumber || order.agentOrderNumbers?.[actor.name] || order.agentOrderNumber || brokerOrderNumber(order);
-  const payoutCurrency = order.payoutCurrency || order.sourceCurrency;
-  const payoutAmount = majorFromMinor(Number(order.payoutAmountMinor || order.sourceAmountMinor || 0), payoutCurrency);
+  if (!master || !broker || !chat) throw new Error("The payment photo could not be delivered because the original Broker chat is unavailable.");
+  const displayNumber = brokerOrderNumber(order);
   chat.messages.push({
     id: nextMessageId(state),
-    from: actor.name,
-    text: `Payment proof for order ${displayNumber}. Paid ${compactAmount(payoutCurrency, payoutAmount)}.`,
+    from: master.name,
+    text: `Payment photo for order ${displayNumber}.`,
     kind: proof.mediaType === "image" ? "photo" : "file",
     media: proof.dataUri || "",
     attachmentId: proof.attachmentId,
-    fileName: proof.fileName,
+    fileName: proof.fileName || `${displayNumber}-payment-photo`,
     mimeType: proof.mimeType,
     fileSize: proof.size,
     orderId: order.id,
     orderNumber: displayNumber,
     replyTo: "",
     reactions: {},
-    readBy: [actor.name],
+    readBy: [master.name],
     createdAt: postedAt
   });
 }
@@ -570,7 +575,7 @@ export async function markOrderPaid(orderId: string, actorId: string, proof?: Pr
     order.returnedBy = "";
     order.returnedReason = "";
     if (proof) {
-      appendPaymentProofToMaster(state, order, actor, proof, postedAt);
+      appendPaymentProofToBroker(state, order, proof, postedAt);
       order.paymentProof = { ...proof, dataUri: "", attachedAt: postedAt };
     }
     freezeIncome(state, order, lines);
@@ -1385,6 +1390,8 @@ function appendOrderAssignmentMessage(state: WorkspaceState, order: OrderRecord,
     from: master.name,
     text: `Order ${displayNumber} assigned to you. Pay ${compactAmount(payoutCurrency, payoutAmount)} to ${receiver}.`,
     kind: "text",
+    orderId: order.id,
+    orderNumber: displayNumber,
     replyTo: "",
     reactions: {},
     readBy: [master.name],
@@ -1413,6 +1420,39 @@ export async function sendChatMessage(chatId: string, from: string, text: string
   });
 }
 
+function orderForPayerChatReply(
+  state: WorkspaceState,
+  message: ChatMessageRecord | undefined,
+  actorName: string,
+  actorId = "",
+  explicitOrderId = ""
+): OrderRecord | undefined {
+  if (!message) return undefined;
+  const payerOrders = state.orders.filter((order) =>
+    (actorId && order.agentActorId === actorId) || order.agent === actorName
+  );
+  const linkedId = explicitOrderId || message.orderId || "";
+  if (linkedId) return payerOrders.find((order) => order.id === linkedId || order.internalOrderId === linkedId);
+  const assignmentReference = message.orderNumber || message.text.match(/^Order\s+(.+?)\s+assigned to you\b/i)?.[1] || "";
+  const normalizedReference = assignmentReference.trim().toLocaleLowerCase();
+  if (!normalizedReference) return undefined;
+  return payerOrders.find((order) => [
+    order.id,
+    order.internalOrderId,
+    order.brokerOrderNumber,
+    order.agentOrderNumber,
+    ...Object.values(order.agentOrderNumbers || {})
+  ].some((value) => String(value || "").trim().toLocaleLowerCase() === normalizedReference));
+}
+
+export function payingOrderForChatReply(
+  session: UserSession,
+  state: WorkspaceState,
+  message: ChatMessageRecord | undefined
+): OrderRecord | undefined {
+  return orderForPayerChatReply(state, message, session.actorName, session.actorId);
+}
+
 export async function sendChatAttachment(
   chatId: string,
   from: string,
@@ -1423,6 +1463,8 @@ export async function sendChatAttachment(
     mimeType: string;
     fileSize: number;
     text?: string;
+    orderId?: string;
+    orderNumber?: string;
   },
   replyTo = ""
 ): Promise<WorkspaceState> {
@@ -1435,6 +1477,37 @@ export async function sendChatAttachment(
     }
     const reply = replyTo ? chat.messages.find((item) => item.id === replyTo) : undefined;
     if (replyTo && !reply) throw new Error("The message being replied to is no longer available.");
+    const sender = activeActors(state).find((actor) => actor.name === from);
+    const linkedOrder = attachment.kind === "photo" && reply
+      ? orderForPayerChatReply(state, reply, from, sender?.id || "", attachment.orderId || "")
+      : undefined;
+    if (linkedOrder) {
+      const master = activeActors(state).find((actor) => actor.role === "Master");
+      const broker = activeActors(state).find((actor) => actor.id === linkedOrder.brokerActorId)
+        || activeActors(state).find((actor) => actor.name === linkedOrder.broker);
+      const brokerChat = master && broker && state.chatConversations.find((item) =>
+        item.type === "direct" && item.members.includes(master.name) && item.members.includes(broker.name)
+      );
+      if (!master || !broker || !brokerChat) throw new Error("The photo could not be delivered because the original Broker chat is unavailable.");
+      const originalOrderNumber = brokerOrderNumber(linkedOrder);
+      brokerChat.messages.push({
+        id: nextMessageId(state),
+        from: master.name,
+        text: `Payment photo for order ${originalOrderNumber}.`,
+        kind: "photo",
+        attachmentId: attachment.attachmentId,
+        fileName: attachment.fileName || `${originalOrderNumber}-payment-photo`,
+        mimeType: attachment.mimeType,
+        fileSize: attachment.fileSize,
+        orderId: linkedOrder.id,
+        orderNumber: originalOrderNumber,
+        replyTo: "",
+        reactions: {},
+        readBy: [master.name],
+        createdAt: new Date().toISOString()
+      });
+      return;
+    }
     const message: ChatMessageRecord = {
       id: nextMessageId(state),
       from,
@@ -1444,6 +1517,8 @@ export async function sendChatAttachment(
       fileName: attachment.fileName,
       mimeType: attachment.mimeType,
       fileSize: attachment.fileSize,
+      orderId: attachment.orderId || "",
+      orderNumber: attachment.orderNumber || "",
       replyTo: reply?.id || "",
       reactions: {},
       readBy: [from],

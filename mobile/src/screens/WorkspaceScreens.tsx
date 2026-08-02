@@ -87,6 +87,7 @@ import {
   postActorJournal,
   postActorWithdrawal,
   pendingCancelledOrderStates,
+  payingOrderForChatReply,
   orderRecordIsVoided,
   orderSortForSession,
   receivableBalance,
@@ -215,11 +216,11 @@ function paymentProofMimeType(name: string, mimeType = ""): string {
   return "application/octet-stream";
 }
 
-function safePaymentProofName(order: OrderRecord, session: UserSession, originalName: string, compressed: boolean): string {
-  const displayNumber = orderNumber(order, session).replace(/[^a-z0-9_-]+/gi, "-");
-  let name = (originalName || "payment-proof").trim().replace(/[^a-z0-9._-]+/gi, "-").replace(/^-+/, "") || "payment-proof";
-  if (compressed) name = `${name.replace(/\.[^.]+$/, "") || "payment-proof"}.jpg`;
-  return name.toLowerCase().startsWith(`${displayNumber.toLowerCase()}-`) ? name : `${displayNumber}-${name}`;
+function safePaymentProofName(order: OrderRecord, originalName: string, compressed: boolean): string {
+  const displayNumber = String(order.brokerOrderNumber || order.id).replace(/[^a-z0-9_-]+/gi, "-");
+  const originalExtension = originalName.toLowerCase().match(/\.(jpe?g|png)$/)?.[0] || ".jpg";
+  const extension = compressed ? ".jpg" : originalExtension;
+  return `${displayNumber}-payment-photo${extension}`;
 }
 
 function base64ByteLength(base64: string): number {
@@ -272,7 +273,6 @@ async function compressPaymentProofImage(asset: DocumentPicker.DocumentPickerAss
 
 async function preparePaymentProof(
   order: OrderRecord,
-  session: UserSession,
   asset: DocumentPicker.DocumentPickerAsset,
   onStatus: (status: string) => void
 ): Promise<PreparedPaymentProof> {
@@ -288,7 +288,7 @@ async function preparePaymentProof(
   if (!prepared.uri || !prepared.size) throw new Error("The selected file could not be prepared.");
   onStatus("Uploading securely...");
   const mimeType = shouldCompress ? "image/jpeg" : paymentProofMimeType(asset.name, asset.mimeType || "");
-  const fileName = safePaymentProofName(order, session, asset.name, shouldCompress);
+  const fileName = safePaymentProofName(order, asset.name, shouldCompress);
   const storedFile = await uploadR2Attachment({
     uri: prepared.uri,
     purpose: "payment-proof",
@@ -305,7 +305,7 @@ async function preparePaymentProof(
     fileName: storedFile.fileName,
     mediaType: kind,
     mimeType: storedFile.mimeType,
-    orderNumber: orderNumber(order, session),
+    orderNumber: order.brokerOrderNumber || order.id,
     compressed: shouldCompress
   };
 }
@@ -324,16 +324,22 @@ function chatPhotoMimeType(name: string, mimeType = ""): string {
   return "";
 }
 
-function safeChatPhotoName(originalName: string, compressed: boolean): string {
+function safeChatPhotoName(originalName: string, compressed: boolean, orderNumber = ""): string {
   const fallback = `chat-photo-${Date.now()}`;
   const cleaned = (originalName || fallback).trim().replace(/[^a-z0-9._-]+/gi, "-").replace(/^-+/, "") || fallback;
-  return compressed ? `${cleaned.replace(/\.[^.]+$/, "") || fallback}.jpg` : cleaned;
+  const name = compressed ? `${cleaned.replace(/\.[^.]+$/, "") || fallback}.jpg` : cleaned;
+  const prefix = orderNumber.replace(/[^a-z0-9_-]+/gi, "-");
+  if (!prefix) return name;
+  const originalExtension = originalName.toLowerCase().match(/\.(jpe?g|png|webp)$/)?.[0] || ".jpg";
+  const extension = compressed ? ".jpg" : originalExtension;
+  return `${prefix}-payment-photo${extension}`;
 }
 
 async function uploadChatPhoto(
   chatId: string,
   asset: DocumentPicker.DocumentPickerAsset,
-  onStatus: (status: string) => void
+  onStatus: (status: string) => void,
+  linkedOrder?: OrderRecord
 ) {
   const originalMimeType = chatPhotoMimeType(asset.name, asset.mimeType || "");
   if (!originalMimeType) throw new Error("Choose a JPG, PNG, or WebP image.");
@@ -346,23 +352,103 @@ async function uploadChatPhoto(
     ? await compressPaymentProofImage(asset, onStatus)
     : { uri: asset.uri, size };
   const mimeType = shouldCompress ? "image/jpeg" : originalMimeType;
+  const originalOrderNumber = linkedOrder?.brokerOrderNumber || linkedOrder?.id || "";
   return uploadR2Attachment({
     uri: prepared.uri,
-    purpose: "chat-photo",
-    contextId: chatId,
-    fileName: safeChatPhotoName(asset.name, shouldCompress),
+    purpose: linkedOrder ? "order-photo" : "chat-photo",
+    contextId: linkedOrder?.id || chatId,
+    fileName: safeChatPhotoName(asset.name, shouldCompress, originalOrderNumber),
     mimeType,
     size: prepared.size,
     onProgress: (percent) => onStatus(`Uploading image ${percent}%`)
   });
 }
 
+type ActorOrderStatusFilter = "Default" | "All" | "Paid" | "Pending" | "Cancelled" | "Voided";
+type ActorOrderSort = "Default" | "No. Ascending" | "No. Descending" | "Date Newest" | "Date Oldest";
+
+const actorOrderStatusOptions: ActorOrderStatusFilter[] = ["Default", "All", "Paid", "Pending", "Cancelled", "Voided"];
+const actorOrderSortOptions: ActorOrderSort[] = ["Default", "No. Ascending", "No. Descending", "Date Newest", "Date Oldest"];
+const pendingActorOrderStates = new Set<OrderRecord["state"]>(["Pending Forward", "Assigned", "Returned", "Void Requested"]);
+
+function relatedOrders(session: UserSession, state: WorkspaceState): OrderRecord[] {
+  return state.orders.filter((order) =>
+    isMasterView(session) ||
+    order.broker === session.actorName ||
+    order.agent === session.actorName ||
+    order.agentActorId === session.actorId
+  );
+}
+
 function visibleOrders(session: UserSession, state: WorkspaceState): OrderRecord[] {
-  return state.orders
-    .filter((order) => isMasterView(session) || order.broker === session.actorName || order.agent === session.actorName || order.agentActorId === session.actorId)
+  return relatedOrders(session, state)
     .filter((order) => isMasterView(session) || (order.state !== "Voided" && order.locked !== true && (order.state !== "Cancelled" || order.broker === session.actorName)))
     .slice()
     .sort(orderSortForSession(session));
+}
+
+function actorOrderMatchesStatus(order: OrderRecord, statusFilter: ActorOrderStatusFilter): boolean {
+  if (statusFilter === "Default" || statusFilter === "All") return true;
+  if (statusFilter === "Voided") return orderRecordIsVoided(order);
+  if (statusFilter === "Cancelled") return order.state === "Cancelled";
+  if (statusFilter === "Paid") return order.state === "Paid" && !orderRecordIsVoided(order);
+  return pendingActorOrderStates.has(order.state);
+}
+
+function actorOrderRelevantTime(order: OrderRecord): number {
+  const values = [
+    order.voidedAt,
+    order.cancelledAt,
+    order.paidAt,
+    order.returnedAt,
+    order.assignedAt,
+    order.updatedAt,
+    order.sentAt,
+    order.createdAt
+  ];
+  for (const value of values) {
+    const time = new Date(value || 0).getTime();
+    if (Number.isFinite(time) && time > 0) return time;
+  }
+  return 0;
+}
+
+function manualActorOrderDate(value: string, endOfDay = false): number | null {
+  const match = value.trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (!match) return value.trim() ? null : 0;
+  const day = Number(match[1]);
+  const month = Number(match[2]);
+  const year = Number(match[3]);
+  const date = new Date(year, month - 1, day, endOfDay ? 23 : 0, endOfDay ? 59 : 0, endOfDay ? 59 : 0, endOfDay ? 999 : 0);
+  if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) return null;
+  return date.getTime();
+}
+
+function actorOrderbookOrders(
+  session: UserSession,
+  state: WorkspaceState,
+  statusFilter: ActorOrderStatusFilter,
+  sortMode: ActorOrderSort,
+  dateFrom: string,
+  dateTo: string
+): OrderRecord[] {
+  const defaultOrders = visibleOrders(session, state);
+  if (isMasterView(session) || session.managedByMaster === true) return defaultOrders;
+  let orders = statusFilter === "Default"
+    ? defaultOrders
+    : relatedOrders(session, state).filter((order) => actorOrderMatchesStatus(order, statusFilter)).slice().sort(orderSortForSession(session));
+  const fromTime = manualActorOrderDate(dateFrom);
+  const toTime = manualActorOrderDate(dateTo, true);
+  if (fromTime) orders = orders.filter((order) => actorOrderRelevantTime(order) >= fromTime);
+  if (toTime) orders = orders.filter((order) => actorOrderRelevantTime(order) <= toTime);
+  if (sortMode === "Default") return orders;
+  return orders.slice().sort((left, right) => {
+    const reference = orderNumber(left, session).localeCompare(orderNumber(right, session), undefined, { numeric: true, sensitivity: "base" });
+    if (sortMode === "No. Ascending") return reference;
+    if (sortMode === "No. Descending") return -reference;
+    const dateDifference = actorOrderRelevantTime(left) - actorOrderRelevantTime(right);
+    return sortMode === "Date Oldest" ? dateDifference || reference : -dateDifference || reference;
+  });
 }
 
 function profileDisplaySession(session: UserSession, actor: ActorRecord): UserSession {
@@ -430,13 +516,31 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
   const [selectedAgent, setSelectedAgent] = useState<Record<string, string>>({});
   const [divider, setDivider] = useState<Record<string, string>>({});
   const [percent, setPercent] = useState<Record<string, string>>({});
+  const [returnReasons, setReturnReasons] = useState<Record<string, string>>({});
   const [proofs, setProofs] = useState<Record<string, PreparedPaymentProof>>({});
   const [proofStatus, setProofStatus] = useState<Record<string, string>>({});
   const [preparingProof, setPreparingProof] = useState("");
   const [busy, setBusy] = useState("");
-  const orders = useMemo(() => visibleOrders(session, state), [session, state.orders]);
-  const orderPage = useProgressiveLimit(`${session.actorId}:${session.actorName}`, 20);
+  const [statusFilter, setStatusFilter] = useState<ActorOrderStatusFilter>("Default");
+  const [sortMode, setSortMode] = useState<ActorOrderSort>("Default");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const orders = useMemo(
+    () => actorOrderbookOrders(session, state, statusFilter, sortMode, dateFrom, dateTo),
+    [dateFrom, dateTo, session, sortMode, state.orders, statusFilter]
+  );
+  const orderPage = useProgressiveLimit(`${session.actorId}:${session.actorName}:${statusFilter}:${sortMode}:${dateFrom}:${dateTo}`, 20);
   const displayedOrders = orders.slice(0, orderPage.limit);
+  const invalidDate = [dateFrom, dateTo].some((value) => value.trim() && manualActorOrderDate(value) === null);
+  const actorSortingAvailable = !isMasterView(session) && session.managedByMaster !== true;
+  const actorSortingActive = actorSortingAvailable && (statusFilter !== "Default" || sortMode !== "Default" || Boolean(dateFrom.trim() || dateTo.trim()));
+
+  const clearOrderSorting = () => {
+    setStatusFilter("Default");
+    setSortMode("Default");
+    setDateFrom("");
+    setDateTo("");
+  };
 
   const run = async (id: string, task: () => Promise<WorkspaceState>) => {
     if (offline) return Alert.alert("Offline", "Reconnect before making this change.");
@@ -464,7 +568,7 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
         setProofStatus((current) => ({ ...current, [order.id]: current[order.id] === "Choose a payment image" ? "" : current[order.id] }));
         return;
       }
-      const proof = await preparePaymentProof(order, session, result.assets[0], (status) => {
+      const proof = await preparePaymentProof(order, result.assets[0], (status) => {
         setProofStatus((current) => ({ ...current, [order.id]: status }));
       });
       setProofs((current) => ({ ...current, [order.id]: proof }));
@@ -506,10 +610,27 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
   };
 
   const confirmReturn = (order: OrderRecord) => {
-    const destination = isMasterView(session) ? order.broker : "Master";
+    const masterReturn = isMasterView(session) && order.state === "Pending Forward";
+    const reason = (returnReasons[order.id] || "").trim();
+    if (masterReturn && !reason) {
+      Alert.alert("Reason required", "Enter the reason for returning this order before continuing.");
+      return;
+    }
+    const destination = masterReturn ? order.broker : "Master";
     Alert.alert("Return order?", `Return ${orderNumber(order, session)} to ${destination}?`, [
       { text: "Keep order", style: "cancel" },
-      { text: "Return", onPress: () => run(`return-${order.id}`, () => returnOrder(order.id, session.actorName)) }
+      {
+        text: "Return",
+        onPress: () => run(`return-${order.id}`, async () => {
+          const next = await returnOrder(order.id, session.actorName, masterReturn ? reason : "");
+          setReturnReasons((current) => {
+            const updated = { ...current };
+            delete updated[order.id];
+            return updated;
+          });
+          return next;
+        })
+      }
     ]);
   };
 
@@ -563,9 +684,23 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
         ) : null}
         <Button label="Refresh" icon={<RefreshCw size={17} color={colors.ink} />} variant="secondary" onPress={onRefresh} style={styles.flexButton} />
       </View>
+      {actorSortingAvailable ? (
+        <Panel title="Sort and filter orders" badge={statusFilter}>
+          <SelectRow label="Order status" options={actorOrderStatusOptions} value={statusFilter} onChange={setStatusFilter} />
+          <SelectRow label="Order number / date" options={actorOrderSortOptions} value={sortMode} onChange={setSortMode} />
+          <View style={styles.twoColumns}>
+            <Field label="From date" value={dateFrom} onChangeText={setDateFrom} placeholder="DD/MM/YYYY" />
+            <Field label="To date" value={dateTo} onChangeText={setDateTo} placeholder="DD/MM/YYYY" />
+          </View>
+          {invalidDate ? <Text style={styles.warningText}>Enter dates as Date/Month/Year, for example 02/08/2026.</Text> : null}
+          <Button label="Clear sorting" variant="secondary" onPress={clearOrderSorting} />
+        </Panel>
+      ) : null}
       {orders.length ? displayedOrders.map((order) => {
         const isExpanded = expanded.includes(order.id);
         const isPayer = order.agent === session.actorName || order.agentActorId === session.actorId;
+        const actorCanSeeReturnReason = !isMasterView(session) && order.state === "Returned" && Boolean(order.returnedReason) &&
+          (order.brokerActorId === session.actorId || order.broker === session.actorName);
         const payerOptions = activeActors(state).filter((actor) => actor.name !== order.broker && actorCanPayoutCurrency(actor, order.payoutCurrency));
         const stateLabel = isMasterView(session) && order.state === "Assigned" ? `Assigned to ${order.agent}` : order.state;
         return (
@@ -574,6 +709,12 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
               {compactAmount(order.sourceCurrency, majorFromMinor(order.sourceAmountMinor, order.sourceCurrency))} to {compactAmount(order.payoutCurrency, majorFromMinor(order.payoutAmountMinor, order.payoutCurrency))}
             </Text>
             <Text style={styles.primaryLine}>{order.receiverName || order.accountNumber || order.phoneNumber || "Receiver not entered"}</Text>
+            {actorCanSeeReturnReason ? (
+              <View style={styles.returnReasonBox}>
+                <Text style={styles.returnReasonLabel}>Reason from Master</Text>
+                <Text style={styles.returnReasonText}>{order.returnedReason}</Text>
+              </View>
+            ) : null}
             <Pressable style={styles.showMore} onPress={() => setExpanded((current) => isExpanded ? current.filter((id) => id !== order.id) : [...current, order.id])}>
               <Text style={styles.linkText}>{isExpanded ? "Show less" : "Show more"}</Text>
               {isExpanded ? <ChevronUp size={17} color={colors.accent} /> : <ChevronDown size={17} color={colors.accent} />}
@@ -610,6 +751,14 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
                     <Field label="Percent" value={percent[order.id] || ""} onChangeText={(value) => setPercent((current) => ({ ...current, [order.id]: value }))} keyboardType="decimal-pad" />
                   </View>
                 ) : null}
+                <Field
+                  label="Reason for returning"
+                  value={returnReasons[order.id] || ""}
+                  onChangeText={(value) => setReturnReasons((current) => ({ ...current, [order.id]: value }))}
+                  placeholder="Required only when returning this order"
+                  multiline
+                  maxLength={500}
+                />
                 <Button label="Forward order" disabled={!selectedAgent[order.id] || offline} loading={busy === `assign-${order.id}`} onPress={() => run(`assign-${order.id}`, () => assignOrder(order.id, selectedAgent[order.id], divider[order.id], percent[order.id]))} />
                 <View style={styles.rowButtons}>
                   <Button label="Return" variant="secondary" disabled={offline} onPress={() => confirmReturn(order)} style={styles.flexButton} />
@@ -649,7 +798,7 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
             ) : null}
           </Panel>
         );
-      }) : <Panel><Text style={styles.muted}>No active orders.</Text></Panel>}
+      }) : <Panel><Text style={styles.muted}>{actorSortingActive ? "No orders match the selected sorting and date parameters." : "No active orders."}</Text></Panel>}
       {displayedOrders.length < orders.length ? (
         <Button label={`Load 20 more orders (${orders.length - displayedOrders.length} remaining)`} variant="secondary" onPress={orderPage.showMore} />
       ) : null}
@@ -1522,18 +1671,22 @@ export function ChatScreen({ session, state, offline, onState, onRefresh, onScro
       busyRef.current = true;
       setBusy(true);
       setAttachmentStatus("Preparing image...");
-      const storedFile = await uploadChatPhoto(selected.id, result.assets[0], setAttachmentStatus);
+      const linkedOrder = replyingTo ? payingOrderForChatReply(session, state, replyingTo) : undefined;
+      const originalOrderNumber = linkedOrder?.brokerOrderNumber || linkedOrder?.id || "";
+      const storedFile = await uploadChatPhoto(selected.id, result.assets[0], setAttachmentStatus, linkedOrder);
       setAttachmentStatus("Sending image...");
       const next = await sendChatAttachment(selected.id, session.actorName, {
         kind: "photo",
         attachmentId: storedFile.id,
         fileName: storedFile.fileName,
         mimeType: storedFile.mimeType,
-        fileSize: storedFile.size
+        fileSize: storedFile.size,
+        orderId: linkedOrder?.id || "",
+        orderNumber: originalOrderNumber
       }, replyToId);
       onState(next);
       setReplyToId("");
-      setAttachmentStatus("Image sent");
+      setAttachmentStatus(linkedOrder ? `Image sent to the original Broker as Master for ${originalOrderNumber}` : "Image sent");
       setTimeout(() => onScrollToEnd?.(), 80);
     } catch (error) {
       setAttachmentStatus("Image failed");
@@ -1806,6 +1959,19 @@ export function ChatScreen({ session, state, offline, onState, onRefresh, onScro
   );
 }
 
+function ledgerDetailsForDisplay(state: WorkspaceState, line: WorkspaceState["ledger"][number]): string {
+  if (String(line.source || "").toUpperCase() !== "ORDER_PAYMENT") return line.details || line.source || "";
+  const order = state.orders.find((item) =>
+    (line.orderId && item.id === line.orderId) ||
+    (line.journal && item.journal === line.journal)
+  );
+  const names = [
+    order?.senderName ? `Sender: ${order.senderName}` : "",
+    order?.receiverName ? `Receiver: ${order.receiverName}` : ""
+  ].filter(Boolean);
+  return names.length ? ["Order_Payment", ...names].join(" - ") : line.details || "Order_Payment";
+}
+
 export function LedgerScreen({ session, state, onState }: CommonProps) {
   const actorChoices = useMemo(() => activeActors(state).filter((actor) => actor.role !== "Master"), [state]);
   const [actorId, setActorId] = useState(isMasterView(session) ? actorChoices[0]?.id || "" : session.actorId);
@@ -1929,7 +2095,7 @@ export function LedgerScreen({ session, state, onState }: CommonProps) {
               : position.tone === "danger"
                 ? styles.ledgerDanger
                 : undefined;
-            const details = [voided ? "VOIDED - Excluded from all calculations" : "", line.details || line.source || ""].filter(Boolean).join(" - ");
+            const details = [voided ? "VOIDED - Excluded from all calculations" : "", ledgerDetailsForDisplay(state, line)].filter(Boolean).join(" - ");
             return (
               <View key={`${line.journal}-${index}`} style={[styles.ledgerRow, voided && styles.ledgerVoidRow]}>
                 <Text style={[styles.colDate, voided && styles.ledgerVoidText]}>{formatDate(line.postedAt)}</Text>
@@ -2617,6 +2783,9 @@ const styles = StyleSheet.create({
   versionText: { color: colors.muted, fontSize: 10, textAlign: "center", marginTop: spacing.sm, marginBottom: spacing.sm },
   primaryLine: { color: colors.ink, fontWeight: "900", flexShrink: 1 },
   amountLine: { color: colors.accent, fontSize: 17, fontWeight: "900" },
+  returnReasonBox: { gap: spacing.xs, borderWidth: 1, borderColor: colors.returned, borderRadius: radius.md, backgroundColor: colors.returnedSoft, padding: spacing.md },
+  returnReasonLabel: { color: colors.returned, fontSize: 12, fontWeight: "900" },
+  returnReasonText: { color: colors.ink, lineHeight: 20 },
   sectionLabel: { color: colors.ink, fontSize: 14, fontWeight: "900" },
   showMore: { minHeight: 38, borderTopWidth: 1, borderTopColor: colors.line, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   linkText: { color: colors.accent, fontWeight: "900" },

@@ -117,7 +117,7 @@ export interface StoredAttachment {
   fileName: string;
   mimeType: string;
   size: number;
-  purpose: "payment-proof" | "chat-photo" | "chat-voice" | "chat-file";
+  purpose: "payment-proof" | "order-photo" | "chat-photo" | "chat-voice" | "chat-file";
   createdAt: string;
 }
 

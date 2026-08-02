@@ -55,6 +55,10 @@ const attachmentRules = new Map([
     maxBytes: 5 * 1024 * 1024,
     mimeTypes: new Set(["image/jpeg", "image/png", "image/webp"]),
   }],
+  ["order-photo", {
+    maxBytes: 5 * 1024 * 1024,
+    mimeTypes: new Set(["image/jpeg", "image/png", "image/webp"]),
+  }],
   ["chat-voice", {
     maxBytes: 5 * 1024 * 1024,
     mimeTypes: new Set(["audio/aac", "audio/mp4", "audio/mpeg", "audio/ogg", "audio/wav", "audio/webm"]),
@@ -302,6 +306,12 @@ function validateAttachmentContext(db, session, purpose, contextId) {
     }
     return;
   }
+  if (purpose === "order-photo") {
+    if (!contextId || !sessionCanUseOrder(state, session, contextId)) {
+      throw httpError(403, "Only an Actor connected to this order can attach an order photo.");
+    }
+    return;
+  }
   if (!contextId || !sessionCanUseChat(state, session, contextId)) {
     throw httpError(403, "You do not have access to this chat.");
   }
@@ -311,7 +321,7 @@ function sessionCanAccessFile(db, session, file) {
   if (!file || file.workspaceId !== session?.workspace?.id || file.status !== "active") return false;
   const state = db.appStates[session.workspace.id] || {};
   if ((file.contextIds || []).some((contextId) => sessionCanUseChat(state, session, contextId))) return true;
-  if (file.purpose === "payment-proof") return sessionCanUseOrder(state, session, file.contextId);
+  if (["payment-proof", "order-photo"].includes(file.purpose)) return sessionCanUseOrder(state, session, file.contextId);
   return sessionCanUseChat(state, session, file.contextId);
 }
 
@@ -1378,11 +1388,21 @@ function sanitizeIncomingWorkspaceState(state, session, db) {
         if (!message?.attachmentId) return message;
         const file = storedFiles.get(message.attachmentId);
         const chatFileMatches = file && ["chat-photo", "chat-voice", "chat-file"].includes(file.purpose) && (file.contextIds || [file.contextId]).includes(chat.id);
-        const proofFileMatches = file?.purpose === "payment-proof" && file.contextId === message.orderId;
+        const proofFileMatches = ["payment-proof", "order-photo"].includes(file?.purpose) && file.contextId === message.orderId;
         if (chatFileMatches) return message;
         if (proofFileMatches) {
-          if (session?.membership?.role === "Master") file.contextIds = Array.from(new Set([...(file.contextIds || [file.contextId]), chat.id]));
-          return message;
+          const persistedState = db.appStates[session.workspace.id] || {};
+          const linkedOrder = (persistedState.orders || []).find((order) => order?.id === message.orderId)
+            || (state.orders || []).find((order) => order?.id === message.orderId);
+          const persistedChat = (persistedState.chatConversations || []).find((item) => item?.id === chat.id);
+          const masterActorName = (persistedState.actors || state.actors || []).find((actor) => actor?.role === "Master")?.name || "Master";
+          const brokerChatMatches = Boolean(linkedOrder && persistedChat?.type === "direct" &&
+            (persistedChat.members || []).includes(masterActorName) && (persistedChat.members || []).includes(linkedOrder.broker));
+          const senderChatMatches = sessionCanUseChat(persistedState, session, chat.id);
+          if (brokerChatMatches || senderChatMatches || session?.membership?.role === "Master") {
+            file.contextIds = Array.from(new Set([...(file.contextIds || [file.contextId]), chat.id]));
+            return message;
+          }
         }
         if (file && session?.membership?.role === "Master" && sessionCanUseChat(state, session, chat.id)) {
           file.contextIds = Array.from(new Set([...(file.contextIds || [file.contextId]), chat.id]));

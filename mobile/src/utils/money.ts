@@ -111,6 +111,8 @@ export function inputRate(value: number): string {
 }
 
 export function reconcileOrderConversion<T extends ConversionDraft>(draft: T, touchedFields: readonly OrderConversionField[]): T {
+  const activeField = touchedFields[touchedFields.length - 1];
+  if (activeField && !String(draft[activeField] || "").trim()) return draft;
   const sourceAmount = parseAmount(draft.sourceAmount);
   const payoutAmount = parseAmount(draft.payoutAmount);
   const rate = parseAmount(draft.rate);
