@@ -277,12 +277,16 @@ function nextAgentSequence(state: WorkspaceState, agentName: string): number {
 }
 
 function assignAgentNumber(state: WorkspaceState, order: OrderRecord, agentName: string): void {
+  const agent = state.actors.find((actor) => actor.name === agentName);
+  const numberingCycle = Math.max(0, Math.floor(Number(agent?.numberingCycle || 0)));
   order.agentOrderNumbers = { ...(order.agentOrderNumbers || {}) };
+  order.agentOrderNumberCycles = { ...(order.agentOrderNumberCycles || {}) };
   if (order.agentOrderNumber && order.agentOrderActor && !order.agentOrderNumbers[order.agentOrderActor]) {
     order.agentOrderNumbers[order.agentOrderActor] = order.agentOrderNumber;
   }
-  if (!order.agentOrderNumbers[agentName]) {
+  if (!order.agentOrderNumbers[agentName] || Number(order.agentOrderNumberCycles[agentName] || 0) !== numberingCycle) {
     order.agentOrderNumbers[agentName] = `${String(nextAgentSequence(state, agentName)).padStart(actorLedgerSequenceWidth(state, agentName), "0")}_${brokerOrderNumber(order)}`;
+    order.agentOrderNumberCycles[agentName] = numberingCycle;
   }
   order.agentOrderNumber = order.agentOrderNumbers[agentName];
   order.agentOrderActor = agentName;
@@ -490,11 +494,11 @@ export async function returnOrder(orderId: string, actorName = "Master", reason 
     const payerReturn = order.state === "Assigned" && order.agent === actorName;
     if (!masterReturn && !payerReturn) throw new Error("This order can no longer be returned.");
     const latestReason = reason.trim().slice(0, 500);
-    if (masterReturn && !latestReason) throw new Error("Enter the reason for returning this order.");
+    if (!latestReason) throw new Error("Enter the reason for returning this order.");
     order.state = "Returned";
     order.returnedBy = actorName;
     order.returnedAt = new Date().toISOString();
-    order.returnedReason = masterReturn ? latestReason : "";
+    order.returnedReason = latestReason;
     order.agent = "Unassigned";
     order.agentActorId = "";
     order.updatedAt = order.returnedAt;

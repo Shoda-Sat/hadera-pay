@@ -6,32 +6,39 @@ import { fileURLToPath } from "node:url";
 
 const repositoryRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
-test("Master return reasons are latest-only and hidden from paying Actors", async () => {
-  const [index, preview, mobileDomain, mobileScreens] = await Promise.all([
+test("Master and paying Actor return reasons are required, latest-only, and refresh-safe", async () => {
+  const [index, preview, mobileDomain, mobileScreens, workspaceSecurity] = await Promise.all([
     readFile(path.join(repositoryRoot, "index.html"), "utf8"),
     readFile(path.join(repositoryRoot, "preview.html"), "utf8"),
     readFile(path.join(repositoryRoot, "mobile/src/domain/workspace.ts"), "utf8"),
     readFile(path.join(repositoryRoot, "mobile/src/screens/WorkspaceScreens.tsx"), "utf8"),
+    readFile(path.join(repositoryRoot, "src/workspace-security.mjs"), "utf8"),
   ]);
 
   assert.equal(index, preview);
 
-  assert.match(index, /class="master-return-reason"[^>]+maxlength="500"/);
+  assert.match(index, /class="[^"]*order-return-reason[^"]*"[^>]+maxlength="500"/);
+  assert.match(index, /if \(canPay\)[\s\S]*Reason for returning[\s\S]*class="order-return-reason"[\s\S]*class="btn secondary return-order"/);
   assert.match(index, /if \(!reason\)[\s\S]*Enter the reason for returning this order/);
-  assert.match(index, /currentOrder\.returnedReason = reason/);
-  assert.match(index, /settingsRateInputIsFocused\(\)[\s\S]*\.master-return-reason/);
-  assert.match(index, /document\.activeElement\?\.closest\?\.\("\.forward-agent,[^\n]+\.master-return-reason"\)/);
+  assert.match(index, /const orderReturnReasonDrafts = new Map\(\)/);
+  assert.match(index, /orderReturnReasonDrafts\.set\(input\.dataset\.id, input\.value \|\| ""\)/);
+  assert.match(index, /currentOrder\.returnedBy = actor\.name;[\s\S]*currentOrder\.returnedReason = reason/);
+  assert.match(index, /settingsRateInputIsFocused\(\)[\s\S]*\.order-return-reason/);
+  assert.match(index, /document\.activeElement\?\.closest\?\.\("\.forward-agent,[^\n]+\.order-return-reason"\)/);
   assert.match(index, /function viewerCanSeeOrderReturnReason[\s\S]*order\?\.state !== "Returned"[\s\S]*order\?\.broker === viewer\?\.name/);
   assert.match(index, /order\.state = "Assigned";[\s\S]*order\.returnedReason = "";/);
 
   assert.match(mobileDomain, /returnOrder\(orderId: string, actorName = "Master", reason = ""\)/);
-  assert.match(mobileDomain, /if \(masterReturn && !latestReason\) throw new Error\("Enter the reason for returning this order\."\)/);
-  assert.match(mobileDomain, /order\.returnedReason = masterReturn \? latestReason : ""/);
+  assert.match(mobileDomain, /if \(!latestReason\) throw new Error\("Enter the reason for returning this order\."\)/);
+  assert.match(mobileDomain, /order\.returnedReason = latestReason/);
   assert.match(mobileDomain, /order\.state = "Assigned";[\s\S]*order\.returnedReason = "";/);
 
-  assert.match(mobileScreens, /label="Reason for returning"[\s\S]*maxLength=\{500\}/);
-  assert.match(mobileScreens, /actorCanSeeReturnReason = !isMasterView\(session\) && order\.state === "Returned"/);
-  assert.match(mobileScreens, /Reason from Master/);
+  assert.match(mobileScreens, /const orderReturnReasonDrafts = new Map<string, string>\(\)/);
+  assert.match(mobileScreens, /orderReturnReasonDrafts\.set\(returnReasonKey\(orderId\), value\)/);
+  assert.match(mobileScreens, /isPayer && order\.state === "Assigned"[\s\S]*label="Reason for returning"[\s\S]*maxLength=\{500\}/);
+  assert.match(mobileScreens, /actorCanSeeReturnReason = order\.state === "Returned"[\s\S]*isMasterView\(session\)/);
+  assert.match(mobileScreens, /Reason for return/);
+  assert.match(workspaceSecurity, /const returnedReason = cleanText\(candidate\.returnedReason, 500\)[\s\S]*if \(!returnedReason\) deny\("Enter the reason for returning this order\."\)/);
   assert.doesNotMatch(index, /returnedReasonHistory|returnReasonsHistory/);
   assert.doesNotMatch(mobileDomain, /returnedReasonHistory|returnReasonsHistory/);
 });
