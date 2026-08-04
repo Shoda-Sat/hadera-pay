@@ -587,10 +587,29 @@ function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
 }
 
 function verifyPassword(password, stored) {
-  const [salt, hash] = String(stored || "").split(":");
-  if (!salt || !hash) return false;
-  const next = hashPassword(password, salt).split(":")[1];
-  return crypto.timingSafeEqual(Buffer.from(hash, "hex"), Buffer.from(next, "hex"));
+  const value = String(stored || "");
+  let salt;
+  let hash;
+  let iterations;
+  if (value.startsWith("pbkdf2-sha256$")) {
+    const [algorithm, storedIterations, storedSalt, storedHash] = value.split("$");
+    if (algorithm !== "pbkdf2-sha256") return false;
+    salt = storedSalt;
+    hash = storedHash;
+    iterations = Number(storedIterations);
+  } else {
+    [salt, hash] = value.split(":");
+    iterations = 120000;
+  }
+  if (!salt || !/^[a-f0-9]{64}$/i.test(hash || "") || !Number.isInteger(iterations) || iterations < 100000 || iterations > 2000000) {
+    return false;
+  }
+  const expected = Buffer.from(hash, "hex");
+  const actual = Buffer.from(
+    crypto.pbkdf2Sync(String(password), salt, iterations, 32, "sha256").toString("hex"),
+    "hex"
+  );
+  return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
 }
 
 function normalizedSessionIdleSeconds(value) {
