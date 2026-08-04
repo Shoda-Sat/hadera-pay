@@ -194,6 +194,29 @@ function orderNumber(order: OrderRecord, session: UserSession): string {
   return order.brokerOrderNumber || order.id;
 }
 
+type OrderPercentDisplay = {
+  label: "Order commission" | "Payer %";
+  percent: number;
+};
+
+function orderPercentValue(value: unknown): number | null {
+  if (value === null || value === undefined || String(value).trim() === "") return null;
+  const percent = Number(value);
+  return Number.isFinite(percent) && percent >= 0 ? percent : null;
+}
+
+function orderPercentDisplayForViewer(order: OrderRecord, session: UserSession): OrderPercentDisplay | null {
+  const isBroker = Boolean(session.actorId && order.brokerActorId === session.actorId) || order.broker === session.actorName;
+  if (isMasterView(session) || isBroker) {
+    const percent = orderPercentValue(order.commissionPercent);
+    return percent === null ? null : { label: "Order commission", percent };
+  }
+  const isPayer = Boolean(session.actorId && order.agentActorId === session.actorId) || order.agent === session.actorName;
+  if (!isPayer || !actorCanReceivePayouts(session.actorRole) || !Object.prototype.hasOwnProperty.call(order, "forwardedPayoutPercent")) return null;
+  const percent = orderPercentValue(order.forwardedPayoutPercent);
+  return percent === null ? null : { label: "Payer %", percent };
+}
+
 const paymentProofImageTargetBytes = 80 * 1024;
 const maxPaymentProofImageSourceBytes = 24 * 1024 * 1024;
 const paymentProofMimeTypes = [
@@ -715,6 +738,7 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
       {orders.length ? displayedOrders.map((order) => {
         const isExpanded = expanded.includes(order.id);
         const isPayer = order.agent === session.actorName || order.agentActorId === session.actorId;
+        const percentDisplay = orderPercentDisplayForViewer(order, session);
         const actorCanSeeReturnReason = order.state === "Returned" && Boolean(order.returnedReason) &&
           (isMasterView(session) || order.brokerActorId === session.actorId || order.broker === session.actorName);
         const payerOptions = activeActors(state).filter((actor) => actor.name !== order.broker && actorCanPayoutCurrency(actor, order.payoutCurrency));
@@ -745,7 +769,7 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
                 {order.accountNumber ? <SummaryRow label="Account" value={order.accountNumber} /> : null}
                 {order.remarks ? <SummaryRow label="Remarks" value={order.remarks} /> : null}
                 <SummaryRow label="Rate" value={String(order.rate)} />
-                <SummaryRow label="Commission" value={`${order.commissionPercent || 0}%`} />
+                {percentDisplay ? <SummaryRow label={percentDisplay.label} value={`${percentDisplay.percent}%`} /> : null}
                 <SummaryRow label="Funding" value={order.fundingType === "credit" ? "Credit" : "Cash"} />
                 {order.cancelledBy ? <SummaryRow label="Cancelled by" value={order.cancelledBy} /> : null}
                 {order.cancelledAt ? <SummaryRow label="Cancelled" value={formatDateTime(order.cancelledAt)} /> : null}
@@ -1281,6 +1305,7 @@ export function SearchScreen({ session, state, onNavigate }: CommonProps) {
     const canSeeSource = isMasterView(session) || isBroker || !isPayer || (visibility.sourceCurrency !== false && visibility.baseAmount !== false);
     const canSeeRate = isMasterView(session) || isBroker || !isPayer || visibility.rate !== false;
     const canSeeCommission = isMasterView(session) || isBroker || !isPayer || visibility.commission !== false;
+    const percentDisplay = canSeeCommission ? orderPercentDisplayForViewer(order, session) : null;
     const sourceAmount = compactAmount(order.sourceCurrency, majorFromMinor(order.sourceAmountMinor, order.sourceCurrency));
     const payoutAmount = compactAmount(order.payoutCurrency, majorFromMinor(order.payoutAmountMinor, order.payoutCurrency));
     const voided = orderRecordIsVoided(order);
@@ -1298,7 +1323,7 @@ export function SearchScreen({ session, state, onNavigate }: CommonProps) {
       canSeeSource ? `Source Amount: ${sourceAmount}` : "",
       `Payout Amount: ${payoutAmount}`,
       canSeeRate && order.rate ? `Rate: ${order.rate}` : "",
-      canSeeCommission ? `Commission: ${order.commissionPercent || 0}%` : "",
+      percentDisplay ? `${percentDisplay.label}: ${percentDisplay.percent}%` : "",
       order.fundingType ? `Payment Type: ${order.fundingType}` : "",
       order.journal ? `Journal: ${order.journal}` : "",
       order.voidJournal ? `Void Journal: ${order.voidJournal}` : ""

@@ -4522,6 +4522,15 @@
       );
     }
 
+    const clearableOrderForwardingFields = [
+      "forwardedPayoutDivider",
+      "forwardedPayoutPercent",
+      "manualSpecialPayoutDivider",
+      "manualSpecialPayoutPercent",
+      "manualMasterRateDivider",
+      "manualMasterRatePercent"
+    ];
+
     function mergeOrders(existingItems = [], incomingItems = []) {
       const merged = new Map();
       [...existingItems, ...incomingItems].forEach((item) => {
@@ -4533,6 +4542,11 @@
         }
         const itemIsNewer = recordTimestamp(item) >= recordTimestamp(previous);
         const next = itemIsNewer ? { ...previous, ...item } : { ...item, ...previous };
+        if (itemIsNewer) {
+          clearableOrderForwardingFields.forEach((field) => {
+            if (!Object.prototype.hasOwnProperty.call(item, field)) delete next[field];
+          });
+        }
         if (previous.journal && !next.journal) next.journal = previous.journal;
         if (item.journal && !next.journal) next.journal = item.journal;
         if (previous.paidAt && !next.paidAt) next.paidAt = previous.paidAt;
@@ -8642,22 +8656,34 @@
       return actorCanInitiateOrders(viewer?.role) && order?.broker === viewer?.name;
     }
 
+    function forwardedPayoutPercentValue(order) {
+      if (!Object.prototype.hasOwnProperty.call(order || {}, "forwardedPayoutPercent")) return null;
+      const rawPercent = order.forwardedPayoutPercent;
+      if (rawPercent === null || rawPercent === undefined || String(rawPercent).trim() === "") return null;
+      const percent = Number(rawPercent);
+      return Number.isFinite(percent) && percent >= 0 ? percent : null;
+    }
+
+    function orderViewerIsAssignedPayer(order, viewer) {
+      if (!order || !viewer || !actorCanReceivePayouts(viewer.role)) return false;
+      const viewerId = text(viewer.id);
+      const viewerName = text(viewer.name);
+      return Boolean(
+        (viewerId && text(order.agentActorId) === viewerId) ||
+        (viewerName && text(order.agent) === viewerName)
+      );
+    }
+
     function orderDetailsHtml(order, viewer) {
-      const commissionPercent = Number.isFinite(Number(order.forwardedPayoutPercent))
-        ? Number(order.forwardedPayoutPercent)
-        : Number(order.commissionPercent || 0);
-      const commissionCurrency = Number.isFinite(Number(order.forwardedPayoutPercent))
-        ? order.payoutCurrency || order.sourceCurrency || "USD"
-        : order.sourceCurrency || "USD";
-      const commissionMinor = Number.isFinite(Number(order.forwardedPayoutPercent))
-        ? minorFromMajor(majorAmount(Number(order.payoutAmountMinor || order.sourceAmountMinor || 0), commissionCurrency) * commissionPercent / 100, commissionCurrency)
-        : Number(order.commissionMinor || 0);
+      const commission = orderCommissionSummary(order, viewer);
+      const canSeeCommission = viewerCanSeeOrderField(viewer, "commission") && commission;
+      const forwardedPercent = forwardedPayoutPercentValue(order);
       const masterCanSeePayoutRates = viewer?.role === "Master";
       const sourceAmount = sourceAmountForViewer(order, viewer);
       const payoutAmount = money(order.payoutCurrency || order.sourceCurrency || "USD", order.payoutAmountMinor || order.sourceAmountMinor || 0);
       const summaryLine = [
         viewerCanSeeOrderField(viewer, "rate") ? `Rate ${escapeHtml(order.rate || "1")}` : "",
-        viewerCanSeeOrderField(viewer, "commission") ? `Commission ${money(commissionCurrency, commissionMinor)}` : ""
+        canSeeCommission ? `${escapeHtml(commission.label)} ${money(commission.currency, commission.amountMinor)}` : ""
       ].filter(Boolean).join(" - ");
       const amountLine = `${sourceAmount ? `${escapeHtml(sourceAmount)} source -> ` : ""}${payoutAmount} payout`;
       const compactReceiverItem = orderCompactReceiverItem(order);
@@ -8672,7 +8698,7 @@
         orderDetailItem("remarks", order.remarks ? `Remarks: ${escapeHtml(order.remarks)}` : ""),
         orderDetailItem("baseAmount", sourceAmount ? `Base Amount: ${escapeHtml(sourceAmount)}` : ""),
         orderDetailItem("payoutAmount", `Payout Amount: ${payoutAmount}`),
-        orderDetailItem("commission", viewerCanSeeOrderField(viewer, "commission") ? `Commission: ${money(commissionCurrency, commissionMinor)}${commissionPercent ? ` (${escapeHtml(formatRate(commissionPercent))}%)` : ""}` : ""),
+        orderDetailItem("commission", canSeeCommission ? `${escapeHtml(commission.label)}: ${money(commission.currency, commission.amountMinor)} (${escapeHtml(formatRate(commission.percent))}%)` : ""),
         orderDetailItem("sentAt", order.sentAt || order.createdAt ? `Sent: ${escapeHtml(displayDate(order.sentAt || order.createdAt))}` : ""),
         orderDetailItem("paidAt", order.paidAt ? `Paid: ${escapeHtml(displayDate(order.paidAt))}` : ""),
         orderDetailItem("cancelledBy", order.cancelledBy ? `Cancelled by: ${escapeHtml(order.cancelledBy)}` : ""),
@@ -8680,7 +8706,7 @@
         orderDetailItem("manualSpecialPayoutDivider", masterCanSeePayoutRates && order.manualSpecialPayoutDivider ? `Manual divisor: ${escapeHtml(formatRate(order.manualSpecialPayoutDivider))}` : ""),
         orderDetailItem("manualSpecialPayoutPercent", masterCanSeePayoutRates && order.manualSpecialPayoutPercent ? `Manual %: ${escapeHtml(formatRate(order.manualSpecialPayoutPercent))}` : ""),
         orderDetailItem("forwardedPayoutDivider", masterCanSeePayoutRates && Number.isFinite(Number(order.forwardedPayoutDivider)) ? `Forwarded payout divisor: ${escapeHtml(formatRate(order.forwardedPayoutDivider))}` : ""),
-        orderDetailItem("forwardedPayoutPercent", masterCanSeePayoutRates && Number.isFinite(Number(order.forwardedPayoutPercent)) ? `Forwarded payout %: ${escapeHtml(formatRate(order.forwardedPayoutPercent))}` : ""),
+        orderDetailItem("forwardedPayoutPercent", masterCanSeePayoutRates && forwardedPercent !== null ? `Forwarded payout %: ${escapeHtml(formatRate(forwardedPercent))}` : ""),
         orderDetailItem("manualMasterRateDivider", order.manualMasterRateDivider ? `Master rate divisor: ${escapeHtml(formatRate(order.manualMasterRateDivider))}` : ""),
         orderDetailItem("manualMasterRatePercent", order.manualMasterRatePercent ? `Master rate %: ${escapeHtml(formatRate(order.manualMasterRatePercent))}` : ""),
         orderDetailItem("returnedReason", viewerCanSeeOrderReturnReason(order, viewer) ? `<strong>Return reason:</strong> ${escapeHtml(order.returnedReason)}` : ""),
@@ -8788,9 +8814,8 @@
     }
 
     function forwardedPayoutPercentInputValue(order) {
-      if (!Object.prototype.hasOwnProperty.call(order || {}, "forwardedPayoutPercent")) return "";
-      const percent = Number(order.forwardedPayoutPercent);
-      return Number.isFinite(percent) && percent >= 0 ? formatRate(percent) : "";
+      const percent = forwardedPayoutPercentValue(order);
+      return percent === null ? "" : formatRate(percent);
     }
 
     function orderActionsHtml(order, actor) {
@@ -9368,13 +9393,10 @@
       els.ledgerHeadRow.innerHTML = headers.map(ledgerHeaderCell).join("");
     }
 
-    function ledgerOrderPercent(order) {
-      if (Object.prototype.hasOwnProperty.call(order, "forwardedPayoutPercent")) {
-        const forwardedPercent = Number(order.forwardedPayoutPercent);
-        if (Number.isFinite(forwardedPercent)) return forwardedPercent;
-      }
+    function ledgerOrderPercent(order, ledgerActor) {
+      if (orderViewerIsAssignedPayer(order, ledgerActor)) return forwardedPayoutPercentValue(order);
       const commissionPercent = Number(order.commissionPercent);
-      return Number.isFinite(commissionPercent) ? commissionPercent : null;
+      return Number.isFinite(commissionPercent) && commissionPercent >= 0 ? commissionPercent : null;
     }
 
     function compactCurrencyAmount(currency, amountMinor) {
@@ -9385,7 +9407,7 @@
       return `${code} ${formatted}`;
     }
 
-    function ledgerOrderInfoCells(line) {
+    function ledgerOrderInfoCells(line, ledgerActor) {
       const order = orderForLedgerLine(line);
       if (!order) return `
         <td class="ledger-order-info-cell ledger-ordering-cell"></td>
@@ -9397,7 +9419,7 @@
       const sourceCurrency = order.sourceCurrency || "USD";
       const sourceAmount = `${formatMinor(order.sourceAmountMinor || 0, sourceCurrency)} ${sourceCurrency}`;
       const rate = Number(order.rate || 0);
-      const percent = ledgerOrderPercent(order);
+      const percent = ledgerOrderPercent(order, ledgerActor);
       const payoutCurrency = order.payoutCurrency || sourceCurrency;
       return `
         <td class="ledger-order-info-cell ledger-ordering-cell">${escapeHtml(order.broker || "")}</td>
@@ -9706,13 +9728,13 @@
       };
     }
 
-    function ledgerOrderExportValues(line) {
+    function ledgerOrderExportValues(line, ledgerActor) {
       const order = orderForLedgerLine(line);
       if (!order) return { orderedAmount: "", rate: "", percent: "" };
       const sourceCurrency = order.sourceCurrency || "USD";
       const orderedAmount = `${formatMinor(order.sourceAmountMinor || 0, sourceCurrency)} ${sourceCurrency}`;
       const rate = Number(order.rate || 0);
-      const percent = ledgerOrderPercent(order);
+      const percent = ledgerOrderPercent(order, ledgerActor);
       return {
         orderedAmount,
         rate: Number.isFinite(rate) && rate > 0 ? formatRate(rate) : "",
@@ -9746,7 +9768,7 @@
           Source: line.source,
           Details: ledgerLineDetails(line, viewer, actor)
         };
-        addLedgerExportOptionColumns(row, options, ledgerOrderExportValues(line));
+        addLedgerExportOptionColumns(row, options, ledgerOrderExportValues(line, actor));
         if (showPaidOutInfo) row["Paid Out"] = ledgerPaidOutLabel(line);
         return {
           ...row,
@@ -10479,17 +10501,26 @@
       return terms.every((term) => haystack.includes(term));
     }
 
-    function orderCommissionSummary(order) {
-      const commissionPercent = Number.isFinite(Number(order.forwardedPayoutPercent))
-        ? Number(order.forwardedPayoutPercent)
-        : Number(order.commissionPercent || 0);
-      const commissionCurrency = Number.isFinite(Number(order.forwardedPayoutPercent))
-        ? order.payoutCurrency || order.sourceCurrency || "USD"
-        : order.sourceCurrency || "USD";
-      const commissionMinor = Number.isFinite(Number(order.forwardedPayoutPercent))
-        ? minorFromMajor(majorAmount(Number(order.payoutAmountMinor || order.sourceAmountMinor || 0), commissionCurrency) * commissionPercent / 100, commissionCurrency)
-        : Number(order.commissionMinor || 0);
-      return { commissionPercent, commissionCurrency, commissionMinor };
+    function orderCommissionSummary(order, viewer) {
+      if (orderViewerIsAssignedPayer(order, viewer)) {
+        const percent = forwardedPayoutPercentValue(order);
+        if (percent === null) return null;
+        const currency = order.payoutCurrency || order.sourceCurrency || "USD";
+        const payoutAmountMinor = Number(order.payoutAmountMinor || order.sourceAmountMinor || 0);
+        return {
+          label: "Payer %",
+          percent,
+          currency,
+          amountMinor: minorFromMajor(majorAmount(payoutAmountMinor, currency) * percent / 100, currency)
+        };
+      }
+      const percentValue = Number(order.commissionPercent || 0);
+      return {
+        label: "Order commission",
+        percent: Number.isFinite(percentValue) && percentValue >= 0 ? percentValue : 0,
+        currency: order.sourceCurrency || "USD",
+        amountMinor: Number(order.commissionMinor || 0)
+      };
     }
 
     function orderActorsForSearch(order, viewer) {
@@ -10502,7 +10533,8 @@
       const sourceCurrency = order.sourceCurrency || "USD";
       const payoutCurrency = order.payoutCurrency || sourceCurrency;
       const payoutAmountMinor = Number(order.payoutAmountMinor || order.sourceAmountMinor || 0);
-      const { commissionPercent, commissionCurrency, commissionMinor } = orderCommissionSummary(order);
+      const commission = orderCommissionSummary(order, viewer);
+      const forwardedPercent = forwardedPayoutPercentValue(order);
       const masterCanSeeRates = viewer?.role === "Master";
       const sourceAmount = sourceAmountForViewer(order, viewer);
       const details = [
@@ -10518,7 +10550,7 @@
         order.agent ? `Payer: ${order.agent}` : "",
         sourceAmount ? `Base Amount: ${sourceAmount}` : "",
         `Payout Amount: ${money(payoutCurrency, payoutAmountMinor)}`,
-        viewerCanSeeOrderField(viewer, "commission") ? `Commission: ${money(commissionCurrency, commissionMinor)}${commissionPercent ? ` (${formatRate(commissionPercent)}%)` : ""}` : "",
+        viewerCanSeeOrderField(viewer, "commission") && commission ? `${commission.label}: ${money(commission.currency, commission.amountMinor)} (${formatRate(commission.percent)}%)` : "",
         viewerCanSeeOrderField(viewer, "rate") && order.rate ? `Rate: ${formatRate(order.rate)}` : "",
         order.fundingType ? `Payment Type: ${order.fundingType}` : "",
         order.journal ? `Journal: ${order.journal}` : "",
@@ -10529,7 +10561,7 @@
         masterCanSeeRates && order.manualSpecialPayoutDivider ? `Manual divisor: ${formatRate(order.manualSpecialPayoutDivider)}` : "",
         masterCanSeeRates && order.manualSpecialPayoutPercent ? `Manual %: ${formatRate(order.manualSpecialPayoutPercent)}` : "",
         masterCanSeeRates && Number.isFinite(Number(order.forwardedPayoutDivider)) ? `Forwarded payout divisor: ${formatRate(order.forwardedPayoutDivider)}` : "",
-        masterCanSeeRates && Number.isFinite(Number(order.forwardedPayoutPercent)) ? `Forwarded payout %: ${formatRate(order.forwardedPayoutPercent)}` : "",
+        masterCanSeeRates && forwardedPercent !== null ? `Forwarded payout %: ${formatRate(forwardedPercent)}` : "",
         masterCanSeeRates && order.manualMasterRateDivider ? `Master rate divisor: ${formatRate(order.manualMasterRateDivider)}` : "",
         masterCanSeeRates && order.manualMasterRatePercent ? `Master rate %: ${formatRate(order.manualMasterRatePercent)}` : "",
         order.returnedBy ? `Returned by: ${order.returnedBy}` : "",
@@ -11461,7 +11493,7 @@
           <td class="ledger-reference-cell">${escapeHtml(ledgerReferenceNumber(line, actor, ledgerActor))}</td>
           <td class="ledger-source-cell">${escapeHtml(line.source)}</td>
           ${ledgerDetailsCell(line, actor, ledgerActor)}
-          ${showOrderInfo ? ledgerOrderInfoCells(line) : ""}
+          ${showOrderInfo ? ledgerOrderInfoCells(line, ledgerActor) : ""}
           ${showPaidOutInfo ? ledgerPaidOutCell(line) : ""}
           <td class="ledger-account-cell">${escapeHtml(line.account)}</td>
           <td class="ledger-direction-cell ${toneClass(line.direction.toLowerCase())}"><strong>${escapeHtml(line.direction)}</strong></td>
@@ -12639,9 +12671,9 @@
       const payoutCurrency = order.payoutCurrency || order.sourceCurrency || "USD";
       const payoutAmountMinor = Number(order.payoutAmountMinor || order.sourceAmountMinor || 0);
       const forwardedDivider = Number(order.forwardedPayoutDivider);
-      const forwardedPercent = Number(order.forwardedPayoutPercent);
+      const forwardedPercent = forwardedPayoutPercentValue(order);
       const hasForwardedDivider = Number.isFinite(forwardedDivider) && forwardedDivider > 0;
-      const hasForwardedPercent = Number.isFinite(forwardedPercent) && forwardedPercent >= 0;
+      const hasForwardedPercent = forwardedPercent !== null;
       const applyForwardedTerms = (amountMinor, currency) => {
         let major = majorAmount(amountMinor, currency);
         if (hasForwardedDivider) major /= forwardedDivider;
@@ -15422,15 +15454,17 @@
           receivable.agentOrderNumber = agentOrderNumberForOrder(order, targetAgent);
           receivable.updatedAt = new Date().toISOString();
         }
+        delete order.manualSpecialPayoutDivider;
+        delete order.manualSpecialPayoutPercent;
+        delete order.manualMasterRateDivider;
+        delete order.manualMasterRatePercent;
         if (dividerText) {
           order.forwardedPayoutDivider = forwardedDivider;
-          delete order.manualSpecialPayoutDivider;
         } else {
           delete order.forwardedPayoutDivider;
         }
         if (percentText) {
           order.forwardedPayoutPercent = forwardedPercent;
-          delete order.manualSpecialPayoutPercent;
         } else {
           delete order.forwardedPayoutPercent;
         }

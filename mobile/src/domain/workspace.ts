@@ -470,6 +470,10 @@ export async function assignOrder(orderId: string, agentId: string, dividerText 
     order.agent = agent.name;
     order.agentActorId = agent.id;
     assignAgentNumber(state, order, agent.name);
+    delete order.manualSpecialPayoutDivider;
+    delete order.manualSpecialPayoutPercent;
+    delete order.manualMasterRateDivider;
+    delete order.manualMasterRatePercent;
     if (dividerText) order.forwardedPayoutDivider = divider;
     else delete order.forwardedPayoutDivider;
     if (percentText) order.forwardedPayoutPercent = percent;

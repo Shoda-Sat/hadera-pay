@@ -1012,6 +1012,15 @@ function recordTimestamp(item = {}) {
   );
 }
 
+const clearableOrderForwardingFields = [
+  "forwardedPayoutDivider",
+  "forwardedPayoutPercent",
+  "manualSpecialPayoutDivider",
+  "manualSpecialPayoutPercent",
+  "manualMasterRateDivider",
+  "manualMasterRatePercent"
+];
+
 function mergeOrders(existingItems = [], incomingItems = []) {
   const merged = new Map();
   [...existingItems, ...incomingItems].forEach((item) => {
@@ -1023,6 +1032,11 @@ function mergeOrders(existingItems = [], incomingItems = []) {
     }
     const itemIsNewer = recordTimestamp(item) >= recordTimestamp(previous);
     const next = itemIsNewer ? { ...previous, ...item } : { ...item, ...previous };
+    if (itemIsNewer) {
+      clearableOrderForwardingFields.forEach((field) => {
+        if (!Object.prototype.hasOwnProperty.call(item, field)) delete next[field];
+      });
+    }
     if (previous.journal && !next.journal) next.journal = previous.journal;
     if (item.journal && !next.journal) next.journal = item.journal;
     if (previous.paidAt && !next.paidAt) next.paidAt = previous.paidAt;

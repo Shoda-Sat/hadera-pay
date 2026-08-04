@@ -335,6 +335,69 @@ test("workspace revision checks stay read-only and detect saved changes", async 
     assert.equal(changedVersion.data.revision, saved.data.revision);
     assert.equal(afterVersionRead.mtimeNs, beforeVersionRead.mtimeNs);
 
+    const clearableForwardingFields = [
+      "forwardedPayoutDivider",
+      "forwardedPayoutPercent",
+      "manualSpecialPayoutDivider",
+      "manualSpecialPayoutPercent",
+      "manualMasterRateDivider",
+      "manualMasterRatePercent",
+    ];
+    const stateWithForwardingTerms = structuredClone(saved.data.state);
+    const forwardingOrder = {
+      id: "ORD-SYNC-FORWARDING",
+      broker: "Galaxy Broker",
+      agent: "Galaxy Payer",
+      sourceCurrency: "USD",
+      payoutCurrency: "ETB",
+      sourceAmountMinor: 10_000,
+      payoutAmountMinor: 1_000_000,
+      commissionMinor: 1_550,
+      commissionPercent: 15.5,
+      state: "Assigned",
+      createdAt: new Date(Date.now() + 30_000).toISOString(),
+      updatedAt: new Date(Date.now() + 60_000).toISOString(),
+      forwardedPayoutDivider: 2,
+      forwardedPayoutPercent: 15.5,
+      manualSpecialPayoutDivider: 3,
+      manualSpecialPayoutPercent: 4,
+      manualMasterRateDivider: 5,
+      manualMasterRatePercent: 6,
+    };
+    stateWithForwardingTerms.orders = [
+      forwardingOrder,
+      ...(stateWithForwardingTerms.orders || []).filter((order) => order.id !== forwardingOrder.id),
+    ];
+    const savedForwardingTerms = await requestJson(baseUrl, "/api/app-state", {
+      cookie: masterLogin.cookie,
+      method: "PUT",
+      body: { state: stateWithForwardingTerms },
+    });
+    const clearedForwardingState = structuredClone(savedForwardingTerms.data.state);
+    const clearedForwardingOrder = clearedForwardingState.orders.find((order) => order.id === forwardingOrder.id);
+    assert.ok(clearedForwardingOrder);
+    clearableForwardingFields.forEach((field) => delete clearedForwardingOrder[field]);
+    clearedForwardingOrder.updatedAt = new Date(Date.now() + 120_000).toISOString();
+    const savedClearedTerms = await requestJson(baseUrl, "/api/app-state", {
+      cookie: masterLogin.cookie,
+      method: "PUT",
+      body: { state: clearedForwardingState },
+    });
+    const persistedClearedOrder = savedClearedTerms.data.state.orders.find((order) => order.id === forwardingOrder.id);
+    assert.ok(persistedClearedOrder);
+    clearableForwardingFields.forEach((field) => {
+      assert.equal(Object.prototype.hasOwnProperty.call(persistedClearedOrder, field), false, `${field} must stay cleared`);
+    });
+    assert.equal(persistedClearedOrder.commissionPercent, 15.5, "Clearing payer terms must preserve the Broker commission");
+    assert.equal(persistedClearedOrder.commissionMinor, 1_550);
+
+    const reloadedClearedState = await requestJson(baseUrl, "/api/app-state", { cookie: masterLogin.cookie });
+    const reloadedClearedOrder = reloadedClearedState.data.state.orders.find((order) => order.id === forwardingOrder.id);
+    assert.ok(reloadedClearedOrder);
+    clearableForwardingFields.forEach((field) => {
+      assert.equal(Object.prototype.hasOwnProperty.call(reloadedClearedOrder, field), false, `${field} must remain cleared after reload`);
+    });
+
     const setSubscriptionExpiry = async (expiresAt) => {
       const database = JSON.parse(await readFile(databasePath, "utf8"));
       const masterUser = database.users.find((user) => user.id === createdMaster.data.user.id);

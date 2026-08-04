@@ -6,13 +6,15 @@ import { fileURLToPath } from "node:url";
 
 const repositoryRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
-test("create-order fields start empty and cleared conversion fields stay empty", async () => {
-  const [index, preview, mobileMoney, mobileClient, mobileWorkspace] = await Promise.all([
+test("create-order fields and cleared payer terms stay empty", async () => {
+  const [index, preview, mobileMoney, mobileClient, mobileWorkspace, mobileScreens, server] = await Promise.all([
     readFile(path.join(repositoryRoot, "index.html"), "utf8"),
     readFile(path.join(repositoryRoot, "preview.html"), "utf8"),
     readFile(path.join(repositoryRoot, "mobile/src/utils/money.ts"), "utf8"),
     readFile(path.join(repositoryRoot, "mobile/src/api/client.ts"), "utf8"),
-    readFile(path.join(repositoryRoot, "mobile/src/domain/workspace.ts"), "utf8")
+    readFile(path.join(repositoryRoot, "mobile/src/domain/workspace.ts"), "utf8"),
+    readFile(path.join(repositoryRoot, "mobile/src/screens/WorkspaceScreens.tsx"), "utf8"),
+    readFile(path.join(repositoryRoot, "server.mjs"), "utf8")
   ]);
 
   assert.equal(index, preview);
@@ -30,8 +32,39 @@ test("create-order fields start empty and cleared conversion fields stay empty",
   assert.ok(forwardPercentInput, "Missing Master payer-percentage field");
   assert.match(forwardPercentInput, /value="\$\{escapeHtml\(forwardedPayoutPercentInputValue\(order\)\)\}"/);
   assert.doesNotMatch(forwardPercentInput, /commissionPercent/, "The order commission must not prefill the payer percentage");
-  assert.match(index, /function forwardedPayoutPercentInputValue\(order\)[\s\S]*hasOwnProperty\.call\(order \|\| \{\}, "forwardedPayoutPercent"\)[\s\S]*return "";/);
+  assert.match(index, /function forwardedPayoutPercentValue\(order\)[\s\S]*hasOwnProperty\.call\(order \|\| \{\}, "forwardedPayoutPercent"\)[\s\S]*return null;/);
+  assert.match(index, /function forwardedPayoutPercentInputValue\(order\)[\s\S]*forwardedPayoutPercentValue\(order\)[\s\S]*percent === null \? ""/);
   assert.match(index, /if \(percentText\) \{[\s\S]*order\.forwardedPayoutPercent = forwardedPercent;[\s\S]*\} else \{[\s\S]*delete order\.forwardedPayoutPercent;/);
   assert.match(mobileClient, /forwardedPayoutPercent: undefined/);
   assert.match(mobileWorkspace, /if \(percentText\) order\.forwardedPayoutPercent = percent;[\s\S]*else delete order\.forwardedPayoutPercent;/);
+  for (const legacyField of [
+    "manualSpecialPayoutDivider",
+    "manualSpecialPayoutPercent",
+    "manualMasterRateDivider",
+    "manualMasterRatePercent"
+  ]) {
+    assert.match(index, new RegExp(`delete order\\.${legacyField};`), `Web forwarding must clear ${legacyField}`);
+    assert.match(mobileWorkspace, new RegExp(`delete order\\.${legacyField};`), `Android forwarding must clear ${legacyField}`);
+  }
+
+  assert.match(index, /function orderCommissionSummary\(order, viewer\)[\s\S]*orderViewerIsAssignedPayer\(order, viewer\)[\s\S]*if \(percent === null\) return null;[\s\S]*label: "Payer %"/);
+  assert.match(index, /function ledgerOrderPercent\(order, ledgerActor\)[\s\S]*orderViewerIsAssignedPayer\(order, ledgerActor\)[\s\S]*forwardedPayoutPercentValue\(order\)/);
+  assert.match(mobileScreens, /function orderPercentDisplayForViewer\(order: OrderRecord, session: UserSession\)[\s\S]*hasOwnProperty\.call\(order, "forwardedPayoutPercent"\)/);
+  assert.match(mobileScreens, /percentDisplay \? <SummaryRow label=\{percentDisplay\.label\} value=\{`\$\{percentDisplay\.percent\}%`\} \/> : null/);
+  assert.match(mobileScreens, /percentDisplay \? `\$\{percentDisplay\.label\}: \$\{percentDisplay\.percent\}%` : ""/);
+  assert.doesNotMatch(mobileScreens, /<SummaryRow label="Commission" value=\{`\$\{order\.commissionPercent/);
+
+  for (const field of [
+    "forwardedPayoutDivider",
+    "forwardedPayoutPercent",
+    "manualSpecialPayoutDivider",
+    "manualSpecialPayoutPercent",
+    "manualMasterRateDivider",
+    "manualMasterRatePercent"
+  ]) {
+    assert.match(index, new RegExp(`clearableOrderForwardingFields[\\s\\S]*"${field}"`));
+    assert.match(server, new RegExp(`clearableOrderForwardingFields[\\s\\S]*"${field}"`));
+  }
+  assert.match(index, /if \(!Object\.prototype\.hasOwnProperty\.call\(item, field\)\) delete next\[field\];/);
+  assert.match(server, /if \(!Object\.prototype\.hasOwnProperty\.call\(item, field\)\) delete next\[field\];/);
 });
