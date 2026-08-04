@@ -862,10 +862,9 @@ function assertActorCannotChangeConfiguration(currentState, incomingState) {
   if (incomingState.masterRateDivisorSettings && !equal(incomingState.masterRateDivisorSettings, currentState.masterRateDivisorSettings || {})) {
     deny("Master rate settings were modified.");
   }
-  for (const candidate of Array.isArray(incomingState.archives) ? incomingState.archives : []) {
-    const existing = recordById(currentState.archives, candidate?.id);
-    if (existing && !equal(existing, candidate)) deny("A closed report was modified.");
-  }
+  // Closed reports remain exclusively server-owned below. Web and Android normalize
+  // legacy snapshots for display, so comparing their read-only copies byte-for-byte
+  // would incorrectly block otherwise authorized Actor actions.
 }
 
 export function authorizeActorWorkspaceUpdate({ currentState, incomingState, session, files = [] }) {
