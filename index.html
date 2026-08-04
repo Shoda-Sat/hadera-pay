@@ -8787,6 +8787,12 @@
       return `<span class="order-number-line"><strong>${escapeHtml(primaryNumber)}</strong>${secondaryNumber}${copyButton}</span>`;
     }
 
+    function forwardedPayoutPercentInputValue(order) {
+      if (!Object.prototype.hasOwnProperty.call(order || {}, "forwardedPayoutPercent")) return "";
+      const percent = Number(order.forwardedPayoutPercent);
+      return Number.isFinite(percent) && percent >= 0 ? formatRate(percent) : "";
+    }
+
     function orderActionsHtml(order, actor) {
       const canForward = actor?.role === "Master" && order.state === "Pending Forward";
       const canPay = actorCanPayOrder(order, actor);
@@ -8819,7 +8825,7 @@
             </div>
             <div class="manual-divider-field">
               <label for="forwardPercent-${order.id}">Payer %</label>
-              <input id="forwardPercent-${order.id}" class="forward-payout-percent" data-id="${order.id}" type="number" min="0" step="0.000001" value="${escapeHtml(formatRate(Number.isFinite(Number(order.forwardedPayoutPercent)) ? Number(order.forwardedPayoutPercent) : Number(order.commissionPercent || 0)))}" placeholder="Optional">
+              <input id="forwardPercent-${order.id}" class="forward-payout-percent" data-id="${order.id}" type="number" min="0" step="0.000001" value="${escapeHtml(forwardedPayoutPercentInputValue(order))}" placeholder="Optional">
             </div>
             <div class="manual-divider-field master-return-reason-field">
               <label for="returnReason-${order.id}">Reason for returning</label>
