@@ -102,6 +102,7 @@ export interface ActorRecord {
   incomeUsdPayoutSetting?: RateSetting;
   orderFixedRates?: Partial<Record<Currency, { enabled?: boolean; rate?: number | string }>>;
   orderVisibilityPermissions?: Partial<Record<"sourceCurrency" | "rate" | "commission" | "baseAmount", boolean>>;
+  numberingCycle?: number;
 }
 
 export interface RateSetting {
@@ -124,10 +125,12 @@ export interface OrderRecord {
   id: string;
   internalOrderId?: string;
   brokerOrderNumber?: string;
+  brokerOrderNumberCycle?: number;
   brokerActorId?: string;
   agentOrderNumber?: string;
   agentOrderActor?: string;
   agentOrderNumbers?: Record<string, string>;
+  agentOrderNumberCycles?: Record<string, number>;
   broker: string;
   agent: string;
   agentActorId?: string;

@@ -5,6 +5,11 @@ function actorOrderPrefix(name: string): string {
   return `${clean}XXX`.slice(0, 3);
 }
 
+function actorNumberingCycle(state: WorkspaceState, actorName: string): number {
+  const actor = state.actors.find((candidate) => candidate.name === actorName);
+  return Math.max(0, Math.floor(Number(actor?.numberingCycle || 0)));
+}
+
 function latestCloseForActor(state: WorkspaceState, actorName: string): number {
   return state.archives
     .filter((archive) => archive.actor === actorName)
@@ -38,6 +43,7 @@ function actorOrderReferences(
   actorName: string
 ): Array<{ reference: string; postedAt: string }> {
   const actor = state.actors.find((candidate) => candidate.name === actorName);
+  const numberingCycle = actorNumberingCycle(state, actorName);
   const latestClose = latestCloseForActor(state, actorName);
   const references: Array<{ reference: string; postedAt: string }> = [];
   allNumberedOrders(state).forEach((record) => {
@@ -47,7 +53,7 @@ function actorOrderReferences(
     const isBroker = actor?.id && order.brokerActorId
       ? order.brokerActorId === actor.id
       : order.broker === actorName;
-    if (isBroker && (order.brokerOrderNumber || order.id)) {
+    if (isBroker && Number(order.brokerOrderNumberCycle || 0) === numberingCycle && (order.brokerOrderNumber || order.id)) {
       references.push({ reference: order.brokerOrderNumber || order.id, postedAt });
     }
     const agentNumbers = new Set<string>();
@@ -56,7 +62,9 @@ function actorOrderReferences(
     if ((order.agentOrderActor === actorName || order.agent === actorName) && order.agentOrderNumber) {
       agentNumbers.add(order.agentOrderNumber);
     }
-    agentNumbers.forEach((reference) => references.push({ reference, postedAt }));
+    if (Number(order.agentOrderNumberCycles?.[actorName] || 0) === numberingCycle) {
+      agentNumbers.forEach((reference) => references.push({ reference, postedAt }));
+    }
   });
   return references;
 }

@@ -92,7 +92,7 @@ import type {
   WorkspaceState
 } from "./src/types";
 import { formatDate, formatDateTime, formatMonthYear } from "./src/utils/date";
-import { calculateQuote, compactAmount, currencies, financialPosition, formatAmount, inputAmount, majorFromMinor, reconcileOrderConversion } from "./src/utils/money";
+import { calculateQuote, compactAmount, currencies, financialPosition, fixedOrderRateForActor, formatAmount, inputAmount, inputRate, majorFromMinor, reconcileFixedOrderConversion, reconcileOrderConversion } from "./src/utils/money";
 import type { OrderConversionField } from "./src/utils/money";
 
 type IconComponent = React.ComponentType<LucideProps>;
@@ -1414,8 +1414,29 @@ function TransferScreen({
     ? currencies
     : [actor?.currency || session.currency].filter((currency): currency is Currency => currencies.includes(currency));
   const sourceCurrency = sourceOptions.includes(draft.sourceCurrency) ? draft.sourceCurrency : sourceOptions[0] || session.currency;
+  const fixedRate = fixedOrderRateForActor(actor, draft.payoutCurrency);
+  const fixedRateText = fixedRate ? inputRate(fixedRate) : "";
+
+  useEffect(() => {
+    if (!fixedRate) return;
+    orderConversionTouches.current = orderConversionTouches.current.filter((field) => field !== "rate");
+    setDraft((current) => {
+      const next = reconcileFixedOrderConversion(current, fixedRate);
+      return next.rate === current.rate && next.sourceAmount === current.sourceAmount && next.payoutAmount === current.payoutAmount
+        ? current
+        : next;
+    });
+  }, [fixedRate, setDraft]);
+
   const setField = <K extends keyof TransferDraft>(key: K, value: TransferDraft[K]) => {
     setDraft((current) => ({ ...current, broker: session.actorName, [key]: value }));
+  };
+  const setPayoutCurrency = (value: Currency) => {
+    setDraft((current) => {
+      const next = { ...current, broker: session.actorName, payoutCurrency: value };
+      const nextFixedRate = fixedOrderRateForActor(actor, value);
+      return nextFixedRate ? reconcileFixedOrderConversion(next, nextFixedRate) : next;
+    });
   };
   const setCustomerName = (kind: SavedCustomerRecord["kind"], value: string) => {
     setField(kind === "sender" ? "senderName" : "receiverName", value);
@@ -1427,6 +1448,12 @@ function TransferScreen({
     orderConversionTouches.current = orderConversionTouches.current.slice(-2);
     setDraft((current) => {
       const next = { ...current, broker: session.actorName, [key]: value };
+      if (fixedRate) {
+        orderConversionTouches.current = orderConversionTouches.current.filter((field) => field !== "rate");
+        return key === "rate"
+          ? { ...next, rate: fixedRateText }
+          : reconcileFixedOrderConversion(next, fixedRate, key);
+      }
       return reconcileOrderConversion(next, orderConversionTouches.current);
     });
   };
@@ -1452,10 +1479,18 @@ function TransferScreen({
         <SummaryRow label="Broker" value={session.actorName} strong />
         <View style={styles.twoColumn}>
           <SelectRow<Currency> label="Source currency" options={sourceOptions} value={sourceCurrency} onChange={(value) => setField("sourceCurrency", value)} />
-          <SelectRow<Currency> label="Payout currency" options={currencies} value={draft.payoutCurrency} onChange={(value) => setField("payoutCurrency", value)} />
+          <SelectRow<Currency> label="Payout currency" options={currencies} value={draft.payoutCurrency} onChange={setPayoutCurrency} />
         </View>
         <Field label="Source amount" value={draft.sourceAmount} onChangeText={(value) => setConversionField("sourceAmount", value)} keyboardType="decimal-pad" />
-        <Field label="Exchange rate" value={draft.rate} onChangeText={(value) => setConversionField("rate", value)} keyboardType="decimal-pad" />
+        <Field
+          label={fixedRate ? "Exchange rate (fixed by Master)" : "Exchange rate"}
+          value={fixedRate ? fixedRateText : draft.rate}
+          onChangeText={(value) => setConversionField("rate", value)}
+          keyboardType="decimal-pad"
+          editable={!fixedRate}
+          style={fixedRate ? styles.fixedRateInput : undefined}
+        />
+        {fixedRate ? <Text style={styles.fixedRateNote}>This rate is fixed for your account and cannot be changed.</Text> : null}
         <Field label="Total payout" value={draft.payoutAmount} onChangeText={(value) => setConversionField("payoutAmount", value)} keyboardType="decimal-pad" placeholder="Calculated from any other two fields" />
         <Field label="Commission %" value={draft.commissionPercent} onChangeText={(value) => setField("commissionPercent", value)} keyboardType="decimal-pad" />
         <SelectRow<FundingType> label="Payment type" options={["cash", "credit"]} value={draft.fundingType} onChange={(value) => setDraft((current) => ({ ...current, broker: session.actorName, fundingType: value, creditReminder: value === "credit" ? current.creditReminder : "" }))} />
@@ -1908,6 +1943,17 @@ const styles = StyleSheet.create({
   },
   twoColumn: {
     gap: spacing.md
+  },
+  fixedRateInput: {
+    color: colors.accent,
+    backgroundColor: colors.accentSoft,
+    fontWeight: "900"
+  },
+  fixedRateNote: {
+    color: colors.accent,
+    fontSize: 12,
+    fontWeight: "700",
+    marginTop: -spacing.sm
   },
   savedCustomerList: {
     borderWidth: 1,

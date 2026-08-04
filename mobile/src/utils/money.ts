@@ -1,4 +1,4 @@
-import type { Currency, TransferDraft, TransferQuote } from "../types";
+import type { ActorRecord, Currency, TransferDraft, TransferQuote } from "../types";
 
 export const currencies: Currency[] = ["USD", "ETB", "EUR", "ERN", "SSP", "SDG", "LYD"];
 const currencyDecimalPlaces: Record<Currency, number> = {
@@ -108,6 +108,41 @@ export function inputRate(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return "";
   const rounded = Math.round(value * 1_000_000) / 1_000_000;
   return String(rounded);
+}
+
+export function fixedOrderRateForActor(actor: Pick<ActorRecord, "orderFixedRates"> | undefined, payoutCurrency: Currency): number | null {
+  const setting = actor?.orderFixedRates?.[payoutCurrency];
+  const rate = Number(setting?.rate || 0);
+  return setting?.enabled === true && Number.isFinite(rate) && rate > 0 ? rate : null;
+}
+
+export function reconcileFixedOrderConversion<T extends ConversionDraft>(
+  draft: T,
+  fixedRate: number,
+  changedField?: Extract<OrderConversionField, "sourceAmount" | "payoutAmount">
+): T {
+  if (!Number.isFinite(fixedRate) || fixedRate <= 0) return draft;
+  const next = { ...draft, rate: inputRate(fixedRate) };
+  const sourceAmount = parseAmount(next.sourceAmount);
+  const payoutAmount = parseAmount(next.payoutAmount);
+
+  if (changedField === "sourceAmount") {
+    return sourceAmount > 0
+      ? { ...next, payoutAmount: inputAmount(next.payoutCurrency, sourceAmount * fixedRate) }
+      : next;
+  }
+  if (changedField === "payoutAmount") {
+    return payoutAmount > 0
+      ? { ...next, sourceAmount: inputAmount(next.sourceCurrency, payoutAmount / fixedRate) }
+      : next;
+  }
+  if (sourceAmount > 0) {
+    return { ...next, payoutAmount: inputAmount(next.payoutCurrency, sourceAmount * fixedRate) };
+  }
+  if (payoutAmount > 0) {
+    return { ...next, sourceAmount: inputAmount(next.sourceCurrency, payoutAmount / fixedRate) };
+  }
+  return next;
 }
 
 export function reconcileOrderConversion<T extends ConversionDraft>(draft: T, touchedFields: readonly OrderConversionField[]): T {
