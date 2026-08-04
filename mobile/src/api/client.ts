@@ -19,7 +19,7 @@ import type {
   WorkspaceState
 } from "../types";
 import { ensureActorLedgerNumbers, nextActorLedgerSequence } from "../domain/ledgerNumbering";
-import { calculateQuote, compactAmount, fixedOrderRateForActor, minorFromMajor } from "../utils/money";
+import { calculateQuote, compactAmount, minorFromMajor } from "../utils/money";
 
 declare const process: { env?: Record<string, string | undefined> } | undefined;
 
@@ -808,13 +808,7 @@ export async function submitTransferOrder(session: UserSession, draft: TransferD
     throw new Error("This returned order is no longer available for modification.");
   }
   const sourceCurrency = actor?.orderMultiCurrencyEnabled === true ? draft.sourceCurrency : safeCurrency(actor?.currency, session.currency);
-  const fixedRate = fixedOrderRateForActor(actor, draft.payoutCurrency);
-  const quote = calculateQuote({
-    ...draft,
-    broker: session.actorName,
-    sourceCurrency,
-    ...(fixedRate ? { rate: String(fixedRate), payoutAmount: "" } : {})
-  });
+  const quote = calculateQuote({ ...draft, broker: session.actorName, sourceCurrency });
   if (quote.sourceAmount <= 0 || quote.payoutAmount <= 0 || quote.rate <= 0) {
     throw new Error("Enter source amount, payout amount, and rate greater than zero.");
   }
@@ -824,7 +818,6 @@ export async function submitTransferOrder(session: UserSession, draft: TransferD
     ...(existingOrder || {}),
     id: existingOrder?.id || nextOrderId(state),
     brokerOrderNumber: existingOrder?.brokerOrderNumber || nextBrokerOrderNumber(session, state),
-    brokerOrderNumberCycle: existingOrder?.brokerOrderNumberCycle ?? Math.max(0, Math.floor(Number(actor?.numberingCycle || 0))),
     brokerActorId: actor?.id || session.actorId,
     broker: session.actorName,
     agent: "Unassigned",

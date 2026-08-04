@@ -11,7 +11,6 @@ import {
   S3Client,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import { authorizeActorWorkspaceUpdate, projectWorkspaceStateForSession } from "./src/workspace-security.mjs";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const port = Number(process.env.PORT ?? 4173);
@@ -80,15 +79,6 @@ let saveQueue = Promise.resolve();
 const allowedSessionIdleSeconds = new Set([0, 10, 20, 30, 60, 300, 900, 1800, 3600, 7200]);
 const defaultSessionIdleSeconds = 7200;
 const persistentSessionCookieMaxAgeSeconds = 10 * 365 * 24 * 60 * 60;
-const secureSessionCookies = process.env.RENDER === "true" || process.env.NODE_ENV === "production" || process.env.COOKIE_SECURE === "true";
-const configuredPublicOrigins = new Set(String(process.env.PUBLIC_ORIGIN || "")
-  .split(",")
-  .map((value) => value.trim().replace(/\/$/, ""))
-  .filter(Boolean));
-const mutationRateWindowMs = 5 * 60 * 1000;
-const mutationRateLimit = 600;
-const mutationRateBuckets = new Map();
-const passwordHashIterations = 600000;
 const loginLockMs = 1000 * 60 * 60;
 const loginAttemptWindowMs = 1000 * 60 * 60;
 const deviceLoginWarningMs = 1000 * 60;
@@ -118,39 +108,6 @@ const contentTypes = new Map([
   [".ttf", "font/ttf"],
 ]);
 
-const publicStaticFiles = new Set([
-  "index.html",
-  "preview.html",
-  "vendor/jspdf.umd.min.js",
-  "assets/fonts/NotoSansEthiopic-Regular.ttf",
-  "assets/fonts/OFL.txt",
-]);
-
-function securityHeaders(contentSecurityPolicy = false) {
-  return {
-    "x-content-type-options": "nosniff",
-    "x-frame-options": "DENY",
-    "referrer-policy": "no-referrer",
-    "permissions-policy": "camera=(self), microphone=(self), geolocation=()",
-    "strict-transport-security": "max-age=31536000; includeSubDomains",
-    ...(contentSecurityPolicy ? {
-      "content-security-policy": [
-        "default-src 'self'",
-        "base-uri 'self'",
-        "object-src 'none'",
-        "frame-ancestors 'none'",
-        "form-action 'self'",
-        "script-src 'self' 'unsafe-inline'",
-        "style-src 'self' 'unsafe-inline'",
-        "img-src 'self' data: blob:",
-        "font-src 'self' data:",
-        "media-src 'self' data: blob: https://*.r2.cloudflarestorage.com",
-        "connect-src 'self' https://*.r2.cloudflarestorage.com",
-      ].join("; "),
-    } : {}),
-  };
-}
-
 const blankDb = () => ({
   users: [],
   workspaces: [],
@@ -159,7 +116,6 @@ const blankDb = () => ({
   sessions: [],
   appStates: {},
   files: [],
-  securityEvents: [],
   ownerPasswordHash: "",
   ownerIdleTimeoutSeconds: defaultSessionIdleSeconds,
   loginAttempts: {},
@@ -230,9 +186,6 @@ function mergeDatabase(existingDb, incomingDb) {
     sessions: mergeSessionsById(existingDb.sessions, incomingDb.sessions),
     appStates: mergeAppStates(existingDb.appStates, incomingDb.appStates),
     files: mergeRecordsById(existingDb.files, incomingDb.files),
-    securityEvents: mergeRecordsById(existingDb.securityEvents, incomingDb.securityEvents)
-      .sort((left, right) => new Date(left.createdAt || 0).getTime() - new Date(right.createdAt || 0).getTime())
-      .slice(-2000),
     loginAttempts: { ...(incomingDb.loginAttempts || {}) },
   };
 }
@@ -500,7 +453,7 @@ async function migrateLegacyAttachments(db, session, limit) {
 }
 
 function inviteCode() {
-  return crypto.randomBytes(12).toString("hex").toUpperCase();
+  return crypto.randomBytes(4).toString("hex").toUpperCase();
 }
 
 function inviteIsExpired(invite, now = Date.now()) {
@@ -628,37 +581,16 @@ function validMasterDisplayName(value) {
   return name.length > 0 && name.length <= 100 && !/[\u0000-\u001f\u007f]/.test(name);
 }
 
-function derivedPasswordHash(password, salt, iterations) {
-  return crypto.pbkdf2Sync(String(password), salt, iterations, 32, "sha256").toString("hex");
-}
-
-function hashPassword(password, salt = crypto.randomBytes(16).toString("hex"), iterations = passwordHashIterations) {
-  return `pbkdf2-sha256$${iterations}$${salt}$${derivedPasswordHash(password, salt, iterations)}`;
+function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
+  const hash = crypto.pbkdf2Sync(String(password), salt, 120000, 32, "sha256").toString("hex");
+  return `${salt}:${hash}`;
 }
 
 function verifyPassword(password, stored) {
-  const value = String(stored || "");
-  let salt;
-  let hash;
-  let iterations;
-  if (value.startsWith("pbkdf2-sha256$")) {
-    const [algorithm, storedIterations, storedSalt, storedHash] = value.split("$");
-    if (algorithm !== "pbkdf2-sha256") return false;
-    salt = storedSalt;
-    hash = storedHash;
-    iterations = Number(storedIterations);
-  } else {
-    [salt, hash] = value.split(":");
-    iterations = 120000;
-  }
-  if (!salt || !/^[a-f0-9]{64}$/i.test(hash || "") || !Number.isInteger(iterations) || iterations < 100000 || iterations > 2000000) return false;
-  const next = derivedPasswordHash(password, salt, iterations);
+  const [salt, hash] = String(stored || "").split(":");
+  if (!salt || !hash) return false;
+  const next = hashPassword(password, salt).split(":")[1];
   return crypto.timingSafeEqual(Buffer.from(hash, "hex"), Buffer.from(next, "hex"));
-}
-
-function passwordHashNeedsUpgrade(stored) {
-  const [algorithm, iterations] = String(stored || "").split("$");
-  return algorithm !== "pbkdf2-sha256" || Number(iterations) < passwordHashIterations;
 }
 
 function normalizedSessionIdleSeconds(value) {
@@ -728,56 +660,10 @@ function clearLoginAttempts(db, login) {
 
 function sendJson(response, status, data) {
   response.writeHead(status, {
-    ...securityHeaders(),
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
   });
   response.end(JSON.stringify(data));
-}
-
-function requestOrigin(request) {
-  const origin = String(request.headers.origin || "").trim().replace(/\/$/, "");
-  return origin;
-}
-
-function expectedRequestOrigins(request) {
-  const forwardedProto = String(request.headers["x-forwarded-proto"] || "").split(",", 1)[0].trim();
-  const forwardedHost = String(request.headers["x-forwarded-host"] || "").split(",", 1)[0].trim();
-  const hostHeader = forwardedHost || String(request.headers.host || "").trim();
-  const protocol = forwardedProto || (secureSessionCookies ? "https" : "http");
-  return new Set([
-    ...configuredPublicOrigins,
-    ...(hostHeader ? [`${protocol}://${hostHeader}`] : []),
-  ]);
-}
-
-function requireTrustedMutationOrigin(request) {
-  if (["GET", "HEAD", "OPTIONS"].includes(String(request.method || "GET").toUpperCase())) return;
-  const origin = requestOrigin(request);
-  if (!origin) return; // Native apps and server-to-server clients do not send Origin.
-  if (!expectedRequestOrigins(request).has(origin)) {
-    throw httpError(403, "This request did not originate from HaderaPay.");
-  }
-}
-
-function enforceMutationRateLimit(sessionId, pathname) {
-  if (!sessionId) return;
-  const now = Date.now();
-  const key = `${sessionId}:${pathname}`;
-  const current = mutationRateBuckets.get(key);
-  const bucket = !current || now - current.startedAt >= mutationRateWindowMs
-    ? { startedAt: now, count: 0 }
-    : current;
-  bucket.count += 1;
-  mutationRateBuckets.set(key, bucket);
-  if (bucket.count > mutationRateLimit) {
-    throw httpError(429, "Too many changes were submitted. Wait briefly and try again.");
-  }
-  if (mutationRateBuckets.size > 5000) {
-    for (const [bucketKey, value] of mutationRateBuckets) {
-      if (now - value.startedAt >= mutationRateWindowMs) mutationRateBuckets.delete(bucketKey);
-    }
-  }
 }
 
 function parseCookies(request) {
@@ -796,24 +682,6 @@ function requestDeviceId(request) {
     .trim()
     .replace(/[^a-zA-Z0-9._:-]/g, "")
     .slice(0, 128);
-}
-
-function recordSecurityEvent(db, session, request, outcome, action, reason = "") {
-  db.securityEvents = Array.isArray(db.securityEvents) ? db.securityEvents : [];
-  db.securityEvents.push({
-    id: id("security"),
-    createdAt: new Date().toISOString(),
-    outcome,
-    action: String(action || "workspace update").slice(0, 1000),
-    reason: String(reason || "").slice(0, 1000),
-    userId: session?.user?.id || "",
-    workspaceId: session?.workspace?.id || "",
-    role: session?.membership?.role || "",
-    actorId: session?.membership?.actorId || "",
-    actorName: session?.membership?.actorName || "",
-    deviceId: requestDeviceId(request),
-  });
-  if (db.securityEvents.length > 2000) db.securityEvents = db.securityEvents.slice(-2000);
 }
 
 async function readJson(request) {
@@ -873,13 +741,11 @@ function touchSession(session, now = Date.now()) {
 function setSessionCookie(response, session) {
   const idleTimeoutSeconds = normalizedSessionIdleSeconds(session?.idleTimeoutSeconds);
   const maxAge = idleTimeoutSeconds === 0 ? persistentSessionCookieMaxAgeSeconds : idleTimeoutSeconds;
-  const secure = secureSessionCookies ? "; Secure" : "";
-  response.setHeader("Set-Cookie", `hp_session=${encodeURIComponent(session.id)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}${secure}`);
+  response.setHeader("Set-Cookie", `hp_session=${encodeURIComponent(session.id)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}`);
 }
 
 function clearSessionCookie(response) {
-  const secure = secureSessionCookies ? "; Secure" : "";
-  response.setHeader("Set-Cookie", `hp_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secure}`);
+  response.setHeader("Set-Cookie", "hp_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0");
 }
 
 function purgeExpiredSessions(db) {
@@ -1660,7 +1526,7 @@ function createSession(db, userId, workspaceId, deviceId = "") {
   const timestamp = new Date(now).toISOString();
   const idleTimeoutSeconds = accountIdleTimeoutSeconds(db, userId);
   const session = {
-    id: `sess_${crypto.randomBytes(32).toString("hex")}`,
+    id: id("sess"),
     userId,
     workspaceId,
     deviceId,
@@ -1676,7 +1542,6 @@ function createSession(db, userId, workspaceId, deviceId = "") {
 async function handleApi(request, response, url) {
   const db = await loadDb();
   const method = request.method || "GET";
-  requireTrustedMutationOrigin(request);
   const removedExpiredInvites = purgeExpiredInvites(db);
   const removedExpiredSessions = purgeExpiredSessions(db);
   const addedMissingSubscriptions = ensureMasterSubscriptions(db);
@@ -1830,12 +1695,6 @@ async function handleApi(request, response, url) {
         return sendJson(response, 401, { error: "Email or password is incorrect." });
       }
       clearLoginAttempts(loginDb, rawLogin);
-      if (ownerMatches && loginDb.ownerPasswordHash && passwordHashNeedsUpgrade(loginDb.ownerPasswordHash)) {
-        loginDb.ownerPasswordHash = hashPassword(rawPassword);
-      }
-      if (userMatches && passwordHashNeedsUpgrade(user.passwordHash)) {
-        user.passwordHash = hashPassword(body.password);
-      }
       if (ownerMatches) {
         const session = createSession(loginDb, "__owner", "__owner", requestDeviceId(request));
         await saveDb(loginDb);
@@ -1884,10 +1743,6 @@ async function handleApi(request, response, url) {
   );
   const session = await requireSession(request, response, db, { touch: !backgroundRead });
   if (!session) return;
-
-  if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
-    enforceMutationRateLimit(parseCookies(request).hp_session, url.pathname);
-  }
 
   if (session.subscription.readOnly && method !== "GET" && url.pathname !== "/api/auth/activity") {
     sendJson(response, 403, {
@@ -2141,13 +1996,6 @@ async function handleApi(request, response, url) {
       users: masterSubscriptionRows(db),
       currentUserId: session.user.id,
     });
-    return;
-  }
-
-  if (url.pathname === "/api/owner/security-events" && method === "GET") {
-    if (!requireOwner(session, response)) return;
-    const limit = Math.min(500, Math.max(1, Number(url.searchParams.get("limit") || 200)));
-    sendJson(response, 200, { events: (db.securityEvents || []).slice(-limit).reverse() });
     return;
   }
 
@@ -2416,7 +2264,7 @@ async function handleApi(request, response, url) {
     const currentState = db.appStates[session.workspace.id] || {};
     const state = mergeWorkspaceState(db, session.workspace.id, currentState);
     sendJson(response, 200, {
-      state: stripRestrictedCreditReminders(projectWorkspaceStateForSession(state, session), session),
+      state: stripRestrictedCreditReminders(state, session),
       revision: workspaceStateRevision(db, session.workspace.id),
     });
     return;
@@ -2530,47 +2378,13 @@ async function handleApi(request, response, url) {
 
   if (url.pathname === "/api/app-state" && method === "PUT") {
     const body = await readJson(request);
-    const currentState = mergeWorkspaceState(db, session.workspace.id, db.appStates[session.workspace.id] || {});
-    let nextState;
-    let actorActions = [];
-    if (session.membership.role === "Actor") {
-      const candidateFiles = structuredClone(db.files || []);
-      try {
-        const authorized = authorizeActorWorkspaceUpdate({
-          currentState,
-          incomingState: body.state || {},
-          session,
-          files: candidateFiles,
-        });
-        nextState = mergeWorkspaceState(db, session.workspace.id, authorized.state);
-        actorActions = authorized.actions || [];
-        db.files = candidateFiles;
-      } catch (error) {
-        recordSecurityEvent(db, session, request, "blocked", "Actor workspace update", error?.securityReason || error?.message);
-        await saveDb(db);
-        throw error;
-      }
-    } else {
-      const incomingState = sanitizeIncomingWorkspaceState(body.state || {}, session, db);
-      nextState = mergeWorkspaceState(db, session.workspace.id, incomingState);
-    }
-    const stateChanged = JSON.stringify(nextState) !== JSON.stringify(currentState);
-    if (!stateChanged) {
-      sendJson(response, 200, {
-        ok: true,
-        state: stripRestrictedCreditReminders(projectWorkspaceStateForSession(currentState, session), session),
-        revision: workspaceStateRevision(db, session.workspace.id),
-      });
-      return;
-    }
+    const incomingState = sanitizeIncomingWorkspaceState(body.state || {}, session, db);
+    const nextState = mergeWorkspaceState(db, session.workspace.id, incomingState);
     const revision = markWorkspaceStateChanged(db, session.workspace.id, nextState);
-    if (session.membership.role === "Actor") {
-      recordSecurityEvent(db, session, request, "allowed", actorActions.join(", ") || "Authorized Actor workspace update");
-    }
     await saveDb(db);
     sendJson(response, 200, {
       ok: true,
-      state: stripRestrictedCreditReminders(projectWorkspaceStateForSession(nextState, session), session),
+      state: stripRestrictedCreditReminders(nextState, session),
       revision,
     });
     return;
@@ -2588,25 +2402,18 @@ const server = http.createServer(async (request, response) => {
     }
 
     const pathname = decodeURIComponent(url.pathname);
-    const relativePath = pathname === "/" ? "preview.html" : pathname.slice(1).replace(/\\/g, "/");
-    if (!publicStaticFiles.has(relativePath)) {
-      response.writeHead(404, { ...securityHeaders(), "content-type": "text/plain; charset=utf-8" });
-      response.end("Not found");
-      return;
-    }
+    const relativePath = pathname === "/" ? "preview.html" : pathname.slice(1);
     const filePath = path.resolve(root, relativePath);
 
-    if (path.relative(root, filePath).startsWith("..")) {
-      response.writeHead(403, { ...securityHeaders(), "content-type": "text/plain; charset=utf-8" });
+    if (!filePath.startsWith(root)) {
+      response.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
       response.end("Forbidden");
       return;
     }
 
     const body = await readFile(filePath);
     response.writeHead(200, {
-      ...securityHeaders([".html", ".js"].includes(path.extname(filePath))),
       "content-type": contentTypes.get(path.extname(filePath)) ?? "application/octet-stream",
-      "cache-control": path.extname(filePath) === ".html" ? "no-store" : "public, max-age=86400",
     });
     response.end(body);
   } catch (error) {
@@ -2617,7 +2424,7 @@ const server = http.createServer(async (request, response) => {
       });
       return;
     }
-    response.writeHead(404, { ...securityHeaders(), "content-type": "text/plain; charset=utf-8" });
+    response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
     response.end("Not found");
   }
 });

@@ -277,16 +277,12 @@ function nextAgentSequence(state: WorkspaceState, agentName: string): number {
 }
 
 function assignAgentNumber(state: WorkspaceState, order: OrderRecord, agentName: string): void {
-  const agent = state.actors.find((actor) => actor.name === agentName);
-  const numberingCycle = Math.max(0, Math.floor(Number(agent?.numberingCycle || 0)));
   order.agentOrderNumbers = { ...(order.agentOrderNumbers || {}) };
-  order.agentOrderNumberCycles = { ...(order.agentOrderNumberCycles || {}) };
   if (order.agentOrderNumber && order.agentOrderActor && !order.agentOrderNumbers[order.agentOrderActor]) {
     order.agentOrderNumbers[order.agentOrderActor] = order.agentOrderNumber;
   }
-  if (!order.agentOrderNumbers[agentName] || Number(order.agentOrderNumberCycles[agentName] || 0) !== numberingCycle) {
+  if (!order.agentOrderNumbers[agentName]) {
     order.agentOrderNumbers[agentName] = `${String(nextAgentSequence(state, agentName)).padStart(actorLedgerSequenceWidth(state, agentName), "0")}_${brokerOrderNumber(order)}`;
-    order.agentOrderNumberCycles[agentName] = numberingCycle;
   }
   order.agentOrderNumber = order.agentOrderNumbers[agentName];
   order.agentOrderActor = agentName;
@@ -486,21 +482,19 @@ export async function assignOrder(orderId: string, agentId: string, dividerText 
   });
 }
 
-export async function returnOrder(orderId: string, actorName = "Master", reason = "", actorId = ""): Promise<WorkspaceState> {
+export async function returnOrder(orderId: string, actorName = "Master", reason = ""): Promise<WorkspaceState> {
   return updateWorkspaceState((state) => {
     const order = state.orders.find((item) => item.id === orderId);
     if (!order) throw new Error("This order is no longer available.");
     const masterReturn = order.state === "Pending Forward";
-    const payerReturn = order.state === "Assigned" && (
-      (Boolean(actorId) && order.agentActorId === actorId) || order.agent === actorName
-    );
+    const payerReturn = order.state === "Assigned" && order.agent === actorName;
     if (!masterReturn && !payerReturn) throw new Error("This order can no longer be returned.");
     const latestReason = reason.trim().slice(0, 500);
-    if (!latestReason) throw new Error("Enter the reason for returning this order.");
+    if (masterReturn && !latestReason) throw new Error("Enter the reason for returning this order.");
     order.state = "Returned";
     order.returnedBy = actorName;
     order.returnedAt = new Date().toISOString();
-    order.returnedReason = latestReason;
+    order.returnedReason = masterReturn ? latestReason : "";
     order.agent = "Unassigned";
     order.agentActorId = "";
     order.updatedAt = order.returnedAt;

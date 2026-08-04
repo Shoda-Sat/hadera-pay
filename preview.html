@@ -2804,8 +2804,6 @@
                       <option value="all">All</option>
                       <option value="paid">Paid</option>
                       <option value="pending">Pending</option>
-                      <option value="pending-forward">Pending Forward</option>
-                      <option value="returned">Returned</option>
                       <option value="cancelled">Cancelled</option>
                       <option value="voided">Voided</option>
                     </select>
@@ -3764,7 +3762,6 @@
     const pendingProofFiles = new Map();
     const pendingProofUploads = new Map();
     const forwardTransferDrafts = new Map();
-    const orderReturnReasonDrafts = new Map();
     let renderedGlobalSearchResults = [];
     let activeSearchDestination = null;
     let searchDestinationFocusTimer = null;
@@ -4045,7 +4042,6 @@
         return {
           ...actor,
           currency: baseCurrency,
-          numberingCycle: Math.max(0, Math.floor(Number(actor.numberingCycle || 0))),
           workingCurrencies: actorHasSpecialPayout(actor.role)
             ? payoutCurrencies
             : savedWorkingCurrencies,
@@ -4812,7 +4808,7 @@
 
     function settingsRateInputIsFocused() {
       return Boolean(document.activeElement?.closest?.(
-        ".forward-transfer-form, .fixed-order-rate, .special-agent-divider, .special-agent-percent, .usd-agent-income-divider, .usd-agent-income-percent, .master-rate-divider, .master-rate-percent, .buying-rate-input, .forward-agent, .forward-payout-divider, .forward-payout-percent, .order-return-reason, .receivable-payment, .ledger-tool-input, .actor-name-input, .actor-currency-input, .actor-currency-rate, #actorResetActor, #actorResetPermit"
+        ".forward-transfer-form, .fixed-order-rate, .special-agent-divider, .special-agent-percent, .usd-agent-income-divider, .usd-agent-income-percent, .master-rate-divider, .master-rate-percent, .buying-rate-input, .forward-agent, .forward-payout-divider, .forward-payout-percent, .master-return-reason, .receivable-payment, .ledger-tool-input, .actor-name-input, .actor-currency-input, .actor-currency-rate, #actorResetActor, #actorResetPermit"
       ));
     }
 
@@ -5940,11 +5936,6 @@
       return `${clean}XXX`.slice(0, 3);
     }
 
-    function actorNumberingCycle(actorName) {
-      const actor = state.actors.find((candidate) => candidate.name === actorName);
-      return Math.max(0, Math.floor(Number(actor?.numberingCycle || 0)));
-    }
-
     function allOrderRecordsForNumbering() {
       return [
         ...state.orders.map((order) => ({ order, current: true, closedAt: "" })),
@@ -5998,7 +5989,6 @@
 
     function actorOrderReferencesForNumbering(actorName) {
       const actor = state.actors.find((candidate) => candidate.name === actorName);
-      const numberingCycle = actorNumberingCycle(actorName);
       const references = [];
       allOrderRecordsForNumbering().forEach((record) => {
         if (!orderRecordCountsForActorNumber(record, actorName)) return;
@@ -6007,12 +5997,10 @@
         const isBroker = actor?.id && order.brokerActorId
           ? order.brokerActorId === actor.id
           : order.broker === actorName;
-        if (isBroker && Number(order.brokerOrderNumberCycle || 0) === numberingCycle && brokerOrderNumberForOrder(order)) {
+        if (isBroker && brokerOrderNumberForOrder(order)) {
           references.push({ reference: brokerOrderNumberForOrder(order), postedAt });
         }
-        if (Number(order.agentOrderNumberCycles?.[actorName] || 0) === numberingCycle) {
-          agentOrderNumbersForActor(order, actorName).forEach((reference) => references.push({ reference, postedAt }));
-        }
+        agentOrderNumbersForActor(order, actorName).forEach((reference) => references.push({ reference, postedAt }));
       });
       return references;
     }
@@ -6143,19 +6131,14 @@
     function assignAgentOrderNumber(order, agentName) {
       if (!order || !agentName || agentName === "Unassigned") return;
       const brokerNumber = brokerOrderNumberForOrder(order);
-      const numberingCycle = actorNumberingCycle(agentName);
       order.agentOrderNumbers = order.agentOrderNumbers && typeof order.agentOrderNumbers === "object"
         ? { ...order.agentOrderNumbers }
-        : {};
-      order.agentOrderNumberCycles = order.agentOrderNumberCycles && typeof order.agentOrderNumberCycles === "object"
-        ? { ...order.agentOrderNumberCycles }
         : {};
       if (order.agentOrderNumber && order.agentOrderActor && !order.agentOrderNumbers[order.agentOrderActor]) {
         order.agentOrderNumbers[order.agentOrderActor] = order.agentOrderNumber;
       }
-      if (!order.agentOrderNumbers[agentName] || Number(order.agentOrderNumberCycles[agentName] || 0) !== numberingCycle) {
+      if (!order.agentOrderNumbers[agentName]) {
         order.agentOrderNumbers[agentName] = `${String(nextAgentSequence(agentName)).padStart(actorLedgerSequenceWidth(agentName), "0")}_${brokerNumber}`;
-        order.agentOrderNumberCycles[agentName] = numberingCycle;
       }
       order.agentOrderNumber = order.agentOrderNumbers[agentName];
       order.agentOrderActor = agentName;
@@ -6191,12 +6174,10 @@
       const order = {
         id: state.editingOrderId || nextOrderId(),
         brokerOrderNumber: existingOrder?.brokerOrderNumber || nextBrokerOrderNumber(input.broker),
-        brokerOrderNumberCycle: existingOrder?.brokerOrderNumberCycle ?? actorNumberingCycle(input.broker),
         brokerActorId: brokerActor?.id || existingOrder?.brokerActorId || "",
         agentOrderNumber: existingOrder?.agentOrderNumber || "",
         agentOrderActor: existingOrder?.agentOrderActor || "",
         agentOrderNumbers: existingOrder?.agentOrderNumbers && typeof existingOrder.agentOrderNumbers === "object" ? { ...existingOrder.agentOrderNumbers } : {},
-        agentOrderNumberCycles: existingOrder?.agentOrderNumberCycles && typeof existingOrder.agentOrderNumberCycles === "object" ? { ...existingOrder.agentOrderNumberCycles } : {},
         broker: input.broker,
         agent: stateName === "Pending Forward" ? "Unassigned" : input.agent,
         agentActorId: stateName === "Pending Forward" ? "" : activeActors().find((actor) => actor.name === input.agent)?.id || "",
@@ -7899,7 +7880,7 @@
       document.querySelectorAll("[data-master-action]").forEach((el) => {
         el.classList.toggle("hidden", role !== "Master");
       });
-      const showActorOrderSort = canActAsSelectedActor && !["Owner", "Inactive"].includes(role);
+      const showActorOrderSort = canActAsSelectedActor && !["Master", "Owner", "Inactive"].includes(role);
       els.actorOrderSortControls?.classList.toggle("hidden", !showActorOrderSort);
       if (!showActorOrderSort) {
         if (els.actorOrderStatusFilter) els.actorOrderStatusFilter.value = "";
@@ -8801,7 +8782,7 @@
               <span class="field-error visible">No ${escapeHtml(order.payoutCurrency)} payout actor</span>
               <div class="manual-divider-field master-return-reason-field">
                 <label for="returnReason-${order.id}">Reason for returning</label>
-                <textarea id="returnReason-${order.id}" class="master-return-reason order-return-reason" data-id="${order.id}" maxlength="500" placeholder="Required when returning this order">${escapeHtml(orderReturnReasonDrafts.get(order.id) || "")}</textarea>
+                <textarea id="returnReason-${order.id}" class="master-return-reason" data-id="${order.id}" maxlength="500" placeholder="Required when returning this order"></textarea>
               </div>
               <button class="btn secondary master-return-order" data-id="${order.id}" type="button">Return</button>
               <button class="btn danger cancel-order" data-id="${order.id}" type="button">Cancel</button>
@@ -8823,7 +8804,7 @@
             </div>
             <div class="manual-divider-field master-return-reason-field">
               <label for="returnReason-${order.id}">Reason for returning</label>
-              <textarea id="returnReason-${order.id}" class="master-return-reason order-return-reason" data-id="${order.id}" maxlength="500" placeholder="Required only when returning this order">${escapeHtml(orderReturnReasonDrafts.get(order.id) || "")}</textarea>
+              <textarea id="returnReason-${order.id}" class="master-return-reason" data-id="${order.id}" maxlength="500" placeholder="Required only when returning this order"></textarea>
             </div>
             <button class="btn secondary forward-order" data-id="${order.id}" type="button">Forward</button>
             <button class="btn secondary master-return-order" data-id="${order.id}" type="button">Return</button>
@@ -8842,10 +8823,6 @@
             : "";
         return `
           <div class="order-actions">
-            <div class="manual-divider-field master-return-reason-field">
-              <label for="returnReason-${order.id}">Reason for returning</label>
-              <textarea id="returnReason-${order.id}" class="order-return-reason" data-id="${order.id}" maxlength="500" placeholder="Required when returning this order">${escapeHtml(orderReturnReasonDrafts.get(order.id) || "")}</textarea>
-            </div>
             <span class="proof-upload-row">
               <button class="btn secondary attach-proof" data-id="${order.id}" type="button" ${proofBusy ? "disabled" : ""}>${icons.paperclip}Attach Photo</button>
               <input class="payment-proof-input hidden" data-id="${order.id}" type="file" accept="${paymentProofAccept}">
@@ -10276,7 +10253,7 @@
     }
 
     function renderOrders() {
-      if (document.activeElement?.closest?.(".forward-agent, .forward-payout-divider, .forward-payout-percent, .order-return-reason")) return;
+      if (document.activeElement?.closest?.(".forward-agent, .forward-payout-divider, .forward-payout-percent, .master-return-reason")) return;
       const actor = selectedActor();
       const visibleOrders = actor?.role === "Master"
         ? state.orders
@@ -10287,7 +10264,9 @@
       const activeOrders = visibleOrders
         .filter((order) => !["Voided", "Cancelled"].includes(order.state) && order.locked !== true)
         .sort(orderSortForActor(actor));
-      const orderbookOrders = actorOrderbookOrdersWithControls(visibleOrders, actor);
+      const orderbookOrders = actor?.role === "Master"
+        ? visibleOrders.slice().sort(orderSortForActor(actor))
+        : actorOrderbookOrdersWithControls(visibleOrders, actor);
       const rowsForOrders = (orders) => orders.map((order) => {
         const payoutAgent = payingAgentLabel(order);
         const stateLabel = actor?.role === "Master" && order.state === "Assigned" && payoutAgent !== "Unassigned"
@@ -10311,7 +10290,7 @@
           </tr>
         `;
       }).join("");
-      const actorOrderFilterActive = selectedActorIsOwnLogin() && Boolean(
+      const actorOrderFilterActive = actor?.role !== "Master" && selectedActorIsOwnLogin() && Boolean(
         els.actorOrderStatusFilter?.value || els.actorOrderSort?.value || els.actorOrderDateFrom?.value || els.actorOrderDateTo?.value
       );
       const emptyRows = `<tr><td colspan="6">${actorOrderFilterActive ? "No orders match the selected sorting and date parameters." : "No active orders."}</td></tr>`;
@@ -10595,8 +10574,6 @@
       if (statusFilter === "voided") return orderRecordIsVoided(order);
       if (statusFilter === "cancelled") return order.state === "Cancelled";
       if (statusFilter === "paid") return order.state === "Paid" && !orderRecordIsVoided(order);
-      if (statusFilter === "pending-forward") return order.state === "Pending Forward";
-      if (statusFilter === "returned") return order.state === "Returned";
       if (statusFilter === "pending") return pendingActorOrderStates.has(order.state);
       return true;
     }
@@ -10639,7 +10616,7 @@
     }
 
     function actorOrderbookOrdersWithControls(visibleOrders, actor) {
-      const controlsAvailable = selectedActorIsOwnLogin() && !["Owner", "Inactive"].includes(actor?.role || "Inactive");
+      const controlsAvailable = selectedActorIsOwnLogin() && actor?.role !== "Master";
       const statusFilter = controlsAvailable ? els.actorOrderStatusFilter?.value || "" : "";
       const sortMode = controlsAvailable ? els.actorOrderSort?.value || "" : "";
       const fromTime = controlsAvailable ? actorOrderDateBoundary(els.actorOrderDateFrom?.value || "") : 0;
@@ -12752,12 +12729,10 @@
         id: order.id,
         internalOrderId: order.id,
         brokerOrderNumber: brokerOrderNumberForOrder(order),
-        brokerOrderNumberCycle: Number(order.brokerOrderNumberCycle || 0),
         brokerActorId: order.brokerActorId || "",
         agentOrderNumber: agentOrderNumberForOrder(order, order.agent),
         agentOrderActor: order.agentOrderActor || order.agent || "",
         agentOrderNumbers: order.agentOrderNumbers && typeof order.agentOrderNumbers === "object" ? { ...order.agentOrderNumbers } : {},
-        agentOrderNumberCycles: order.agentOrderNumberCycles && typeof order.agentOrderNumberCycles === "object" ? { ...order.agentOrderNumberCycles } : {},
         actor: actorName,
         broker: order.broker,
         agent: order.agent,
@@ -13130,7 +13105,6 @@
           ];
         });
       if (openingLines.length) state.ledger.unshift(...openingLines);
-      actor.numberingCycle = actorNumberingCycle(actor.name) + 1;
       syncSettlementsFromLedger();
       return true;
     }
@@ -13762,12 +13736,6 @@
         expandedCompactOrderIds.delete(orderId);
       }
     }, true);
-
-    document.addEventListener("input", (event) => {
-      const input = event.target.closest?.(".order-return-reason");
-      if (!input?.dataset?.id) return;
-      orderReturnReasonDrafts.set(input.dataset.id, input.value || "");
-    });
 
     els.receivableRows.addEventListener("input", (event) => {
       const input = event.target.closest?.(".receivable-payment");
@@ -15470,7 +15438,6 @@
           currentOrder.updatedAt = currentOrder.returnedAt;
           currentOrder.agent = "Unassigned";
           currentOrder.agentActorId = "";
-          orderReturnReasonDrafts.delete(currentOrder.id);
           state.orderState = "Returned";
           els.orderState.textContent = "Returned";
           els.orderState.className = "state-pill warn";
@@ -15625,28 +15592,16 @@
       if (returnButton) {
         const actor = selectedActor();
         const order = state.orders.find((item) => item.id === returnButton.dataset.id);
-        if (!actorCanPayOrder(order, actor)) return;
-        const actionBox = returnButton.closest(".order-actions");
-        const reasonInput = actionBox?.querySelector(".order-return-reason");
-        const reason = reasonInput?.value.trim() || orderReturnReasonDrafts.get(order.id)?.trim() || "";
-        if (!reason) {
-          reasonInput?.setCustomValidity("Enter the reason for returning this order.");
-          reasonInput?.reportValidity();
-          return;
-        }
-        reasonInput?.setCustomValidity("");
+        if (!order || order.state !== "Assigned" || order.agent !== actor?.name) return;
         const orderNumber = orderDisplayNumber(order, actor);
         confirmAction(`Return order ${orderNumber} to Master without paying it?`, () => {
           const currentOrder = state.orders.find((item) => item.id === order.id);
-          if (!actorCanPayOrder(currentOrder, actor)) return;
+          if (!currentOrder || currentOrder.state !== "Assigned" || currentOrder.agent !== actor.name) return;
           currentOrder.state = "Returned";
           currentOrder.returnedBy = actor.name;
-          currentOrder.returnedReason = reason;
           currentOrder.returnedAt = new Date().toISOString();
           currentOrder.updatedAt = currentOrder.returnedAt;
           currentOrder.agent = "Unassigned";
-          currentOrder.agentActorId = "";
-          orderReturnReasonDrafts.delete(currentOrder.id);
           state.orderState = "Returned";
           els.orderState.textContent = "Returned";
           els.orderState.className = "state-pill warn";

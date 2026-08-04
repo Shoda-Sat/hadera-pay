@@ -364,10 +364,10 @@ async function uploadChatPhoto(
   });
 }
 
-type ActorOrderStatusFilter = "Default" | "All" | "Paid" | "Pending" | "Pending Forward" | "Returned" | "Cancelled" | "Voided";
+type ActorOrderStatusFilter = "Default" | "All" | "Paid" | "Pending" | "Cancelled" | "Voided";
 type ActorOrderSort = "Default" | "No. Ascending" | "No. Descending" | "Date Newest" | "Date Oldest";
 
-const actorOrderStatusOptions: ActorOrderStatusFilter[] = ["Default", "All", "Paid", "Pending", "Pending Forward", "Returned", "Cancelled", "Voided"];
+const actorOrderStatusOptions: ActorOrderStatusFilter[] = ["Default", "All", "Paid", "Pending", "Cancelled", "Voided"];
 const actorOrderSortOptions: ActorOrderSort[] = ["Default", "No. Ascending", "No. Descending", "Date Newest", "Date Oldest"];
 const pendingActorOrderStates = new Set<OrderRecord["state"]>(["Pending Forward", "Assigned", "Returned", "Void Requested"]);
 
@@ -392,8 +392,6 @@ function actorOrderMatchesStatus(order: OrderRecord, statusFilter: ActorOrderSta
   if (statusFilter === "Voided") return orderRecordIsVoided(order);
   if (statusFilter === "Cancelled") return order.state === "Cancelled";
   if (statusFilter === "Paid") return order.state === "Paid" && !orderRecordIsVoided(order);
-  if (statusFilter === "Pending Forward") return order.state === "Pending Forward";
-  if (statusFilter === "Returned") return order.state === "Returned";
   return pendingActorOrderStates.has(order.state);
 }
 
@@ -435,6 +433,7 @@ function actorOrderbookOrders(
   dateTo: string
 ): OrderRecord[] {
   const defaultOrders = visibleOrders(session, state);
+  if (isMasterView(session) || session.managedByMaster === true) return defaultOrders;
   let orders = statusFilter === "Default"
     ? defaultOrders
     : relatedOrders(session, state).filter((order) => actorOrderMatchesStatus(order, statusFilter)).slice().sort(orderSortForSession(session));
@@ -511,8 +510,6 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "The action could not be completed.";
 }
 
-const orderReturnReasonDrafts = new Map<string, string>();
-
 export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEditReturnedOrder: (order: OrderRecord) => void }) {
   const { session, state, offline, onState, onNavigate, onRefresh, onNewOrder, onEditReturnedOrder } = props;
   const [expanded, setExpanded] = useState<string[]>([]);
@@ -535,17 +532,8 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
   const orderPage = useProgressiveLimit(`${session.actorId}:${session.actorName}:${statusFilter}:${sortMode}:${dateFrom}:${dateTo}`, 20);
   const displayedOrders = orders.slice(0, orderPage.limit);
   const invalidDate = [dateFrom, dateTo].some((value) => value.trim() && manualActorOrderDate(value) === null);
-  const actorSortingAvailable = session.role !== "Owner";
+  const actorSortingAvailable = !isMasterView(session) && session.managedByMaster !== true;
   const actorSortingActive = actorSortingAvailable && (statusFilter !== "Default" || sortMode !== "Default" || Boolean(dateFrom.trim() || dateTo.trim()));
-  const returnReasonKey = (orderId: string) => `${session.workspaceId}:${session.actorId || session.actorName}:${orderId}`;
-  const returnReasonValue = (orderId: string) => {
-    const key = returnReasonKey(orderId);
-    return orderReturnReasonDrafts.has(key) ? orderReturnReasonDrafts.get(key) || "" : returnReasons[orderId] || "";
-  };
-  const updateReturnReason = (orderId: string, value: string) => {
-    orderReturnReasonDrafts.set(returnReasonKey(orderId), value);
-    setReturnReasons((current) => ({ ...current, [orderId]: value }));
-  };
 
   const clearOrderSorting = () => {
     setStatusFilter("Default");
@@ -626,8 +614,8 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
 
   const confirmReturn = (order: OrderRecord) => {
     const masterReturn = isMasterView(session) && order.state === "Pending Forward";
-    const reason = returnReasonValue(order.id).trim();
-    if (!reason) {
+    const reason = (returnReasons[order.id] || "").trim();
+    if (masterReturn && !reason) {
       Alert.alert("Reason required", "Enter the reason for returning this order before continuing.");
       return;
     }
@@ -637,8 +625,7 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
       {
         text: "Return",
         onPress: () => run(`return-${order.id}`, async () => {
-          const next = await returnOrder(order.id, session.actorName, reason, session.actorId);
-          orderReturnReasonDrafts.delete(returnReasonKey(order.id));
+          const next = await returnOrder(order.id, session.actorName, masterReturn ? reason : "");
           setReturnReasons((current) => {
             const updated = { ...current };
             delete updated[order.id];
@@ -715,8 +702,8 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
       {orders.length ? displayedOrders.map((order) => {
         const isExpanded = expanded.includes(order.id);
         const isPayer = order.agent === session.actorName || order.agentActorId === session.actorId;
-        const actorCanSeeReturnReason = order.state === "Returned" && Boolean(order.returnedReason) &&
-          (isMasterView(session) || order.brokerActorId === session.actorId || order.broker === session.actorName);
+        const actorCanSeeReturnReason = !isMasterView(session) && order.state === "Returned" && Boolean(order.returnedReason) &&
+          (order.brokerActorId === session.actorId || order.broker === session.actorName);
         const payerOptions = activeActors(state).filter((actor) => actor.name !== order.broker && actorCanPayoutCurrency(actor, order.payoutCurrency));
         const stateLabel = isMasterView(session) && order.state === "Assigned" ? `Assigned to ${order.agent}` : order.state;
         return (
@@ -727,7 +714,7 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
             <Text style={styles.primaryLine}>{order.receiverName || order.accountNumber || order.phoneNumber || "Receiver not entered"}</Text>
             {actorCanSeeReturnReason ? (
               <View style={styles.returnReasonBox}>
-                <Text style={styles.returnReasonLabel}>Reason for return</Text>
+                <Text style={styles.returnReasonLabel}>Reason from Master</Text>
                 <Text style={styles.returnReasonText}>{order.returnedReason}</Text>
               </View>
             ) : null}
@@ -769,8 +756,8 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
                 ) : null}
                 <Field
                   label="Reason for returning"
-                  value={returnReasonValue(order.id)}
-                  onChangeText={(value) => updateReturnReason(order.id, value)}
+                  value={returnReasons[order.id] || ""}
+                  onChangeText={(value) => setReturnReasons((current) => ({ ...current, [order.id]: value }))}
                   placeholder="Required only when returning this order"
                   multiline
                   maxLength={500}
@@ -784,14 +771,6 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
             ) : null}
             {isPayer && order.state === "Assigned" ? (
               <View style={styles.actionBlock}>
-                <Field
-                  label="Reason for returning"
-                  value={returnReasonValue(order.id)}
-                  onChangeText={(value) => updateReturnReason(order.id, value)}
-                  placeholder="Required when returning this order"
-                  multiline
-                  maxLength={500}
-                />
                 <Button
                   label={proofs[order.id] ? "Image ready" : "Attach payment image"}
                   variant="secondary"
