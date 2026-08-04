@@ -22,19 +22,21 @@ test("Master and paying Actor return reasons are required, latest-only, and refr
   assert.match(index, /if \(!reason\)[\s\S]*Enter the reason for returning this order/);
   assert.match(index, /const orderReturnReasonDrafts = new Map\(\)/);
   assert.match(index, /orderReturnReasonDrafts\.set\(input\.dataset\.id, input\.value \|\| ""\)/);
-  assert.match(index, /currentOrder\.returnedBy = actor\.name;[\s\S]*currentOrder\.returnedReason = reason/);
+  assert.match(index, /if \(!actorCanPayOrder\(order, actor\)\) return;[\s\S]*if \(!actorCanPayOrder\(currentOrder, actor\)\) return;[\s\S]*currentOrder\.returnedBy = actor\.name;[\s\S]*currentOrder\.returnedReason = reason/);
   assert.match(index, /settingsRateInputIsFocused\(\)[\s\S]*\.order-return-reason/);
   assert.match(index, /document\.activeElement\?\.closest\?\.\("\.forward-agent,[^\n]+\.order-return-reason"\)/);
   assert.match(index, /function viewerCanSeeOrderReturnReason[\s\S]*order\?\.state !== "Returned"[\s\S]*order\?\.broker === viewer\?\.name/);
   assert.match(index, /order\.state = "Assigned";[\s\S]*order\.returnedReason = "";/);
 
-  assert.match(mobileDomain, /returnOrder\(orderId: string, actorName = "Master", reason = ""\)/);
+  assert.match(mobileDomain, /returnOrder\(orderId: string, actorName = "Master", reason = "", actorId = ""\)/);
+  assert.match(mobileDomain, /Boolean\(actorId\) && order\.agentActorId === actorId\)[\s\S]*order\.agent === actorName/);
   assert.match(mobileDomain, /if \(!latestReason\) throw new Error\("Enter the reason for returning this order\."\)/);
   assert.match(mobileDomain, /order\.returnedReason = latestReason/);
   assert.match(mobileDomain, /order\.state = "Assigned";[\s\S]*order\.returnedReason = "";/);
 
   assert.match(mobileScreens, /const orderReturnReasonDrafts = new Map<string, string>\(\)/);
   assert.match(mobileScreens, /orderReturnReasonDrafts\.set\(returnReasonKey\(orderId\), value\)/);
+  assert.match(mobileScreens, /returnOrder\(order\.id, session\.actorName, reason, session\.actorId\)/);
   assert.match(mobileScreens, /isPayer && order\.state === "Assigned"[\s\S]*label="Reason for returning"[\s\S]*maxLength=\{500\}/);
   assert.match(mobileScreens, /actorCanSeeReturnReason = order\.state === "Returned"[\s\S]*isMasterView\(session\)/);
   assert.match(mobileScreens, /Reason for return/);

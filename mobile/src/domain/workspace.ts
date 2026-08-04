@@ -486,12 +486,14 @@ export async function assignOrder(orderId: string, agentId: string, dividerText 
   });
 }
 
-export async function returnOrder(orderId: string, actorName = "Master", reason = ""): Promise<WorkspaceState> {
+export async function returnOrder(orderId: string, actorName = "Master", reason = "", actorId = ""): Promise<WorkspaceState> {
   return updateWorkspaceState((state) => {
     const order = state.orders.find((item) => item.id === orderId);
     if (!order) throw new Error("This order is no longer available.");
     const masterReturn = order.state === "Pending Forward";
-    const payerReturn = order.state === "Assigned" && order.agent === actorName;
+    const payerReturn = order.state === "Assigned" && (
+      (Boolean(actorId) && order.agentActorId === actorId) || order.agent === actorName
+    );
     if (!masterReturn && !payerReturn) throw new Error("This order can no longer be returned.");
     const latestReason = reason.trim().slice(0, 500);
     if (!latestReason) throw new Error("Enter the reason for returning this order.");

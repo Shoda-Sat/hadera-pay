@@ -15625,7 +15625,7 @@
       if (returnButton) {
         const actor = selectedActor();
         const order = state.orders.find((item) => item.id === returnButton.dataset.id);
-        if (!order || order.state !== "Assigned" || order.agent !== actor?.name) return;
+        if (!actorCanPayOrder(order, actor)) return;
         const actionBox = returnButton.closest(".order-actions");
         const reasonInput = actionBox?.querySelector(".order-return-reason");
         const reason = reasonInput?.value.trim() || orderReturnReasonDrafts.get(order.id)?.trim() || "";
@@ -15638,7 +15638,7 @@
         const orderNumber = orderDisplayNumber(order, actor);
         confirmAction(`Return order ${orderNumber} to Master without paying it?`, () => {
           const currentOrder = state.orders.find((item) => item.id === order.id);
-          if (!currentOrder || currentOrder.state !== "Assigned" || currentOrder.agent !== actor.name) return;
+          if (!actorCanPayOrder(currentOrder, actor)) return;
           currentOrder.state = "Returned";
           currentOrder.returnedBy = actor.name;
           currentOrder.returnedReason = reason;

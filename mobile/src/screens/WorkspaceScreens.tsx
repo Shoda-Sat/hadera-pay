@@ -637,7 +637,7 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
       {
         text: "Return",
         onPress: () => run(`return-${order.id}`, async () => {
-          const next = await returnOrder(order.id, session.actorName, reason);
+          const next = await returnOrder(order.id, session.actorName, reason, session.actorId);
           orderReturnReasonDrafts.delete(returnReasonKey(order.id));
           setReturnReasons((current) => {
             const updated = { ...current };
