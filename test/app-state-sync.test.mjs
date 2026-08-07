@@ -105,6 +105,19 @@ test("expired subscription viewing controls are available on web and Android", a
   assert.match(mobileTypes, /subscriptionGraceEndsAt\?: string/);
 });
 
+test("new web and Android records use collision-safe hidden IDs", async () => {
+  const [index, preview, mobileClient] = await Promise.all([
+    readFile(path.join(repositoryRoot, "index.html"), "utf8"),
+    readFile(path.join(repositoryRoot, "preview.html"), "utf8"),
+    readFile(path.join(repositoryRoot, "mobile/src/api/client.ts"), "utf8"),
+  ]);
+  assert.equal(index, preview);
+  assert.match(index, /return collisionSafeRecordId\("ORD", state\.orderCounter\)/);
+  assert.match(index, /return collisionSafeRecordId\("REC", state\.receivableCounter\)/);
+  assert.match(mobileClient, /return collisionSafeRecordId\("ORD", nextNumber\)/);
+  assert.match(mobileClient, /return collisionSafeRecordId\("REC", nextNumber\)/);
+});
+
 test("workspace revision checks stay read-only and detect saved changes", async () => {
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "haderapay-sync-"));
   const port = await unusedPort();
@@ -397,6 +410,151 @@ test("workspace revision checks stay read-only and detect saved changes", async 
     clearableForwardingFields.forEach((field) => {
       assert.equal(Object.prototype.hasOwnProperty.call(reloadedClearedOrder, field), false, `${field} must remain cleared after reload`);
     });
+
+    const collisionBaseState = structuredClone(reloadedClearedState.data.state);
+    const goitomCreatedAt = "2026-08-06T16:30:48.000Z";
+    const goitomState = structuredClone(collisionBaseState);
+    goitomState.orders = [
+      {
+        id: "ORD-900",
+        brokerActorId: "ACT-GOITOM",
+        broker: "Goitom",
+        brokerOrderNumber: "GOI001",
+        senderName: "Goitom Sender",
+        receiverName: "Goitom Receiver",
+        accountNumber: "GOITOM-ACCOUNT",
+        sourceCurrency: "EUR",
+        sourceAmountMinor: 10_000,
+        payoutCurrency: "EUR",
+        payoutAmountMinor: 10_000,
+        fundingType: "credit",
+        state: "Pending Forward",
+        createdAt: goitomCreatedAt,
+        updatedAt: goitomCreatedAt,
+      },
+      ...(goitomState.orders || []).filter((order) => order.id !== "ORD-900"),
+    ];
+    goitomState.receivables = [
+      {
+        id: "REC-900",
+        orderId: "ORD-900",
+        brokerOrderNumber: "GOI001",
+        borrowerActorId: "ACT-GOITOM",
+        borrower: "Goitom",
+        receiverName: "Goitom Receiver",
+        accountNumber: "GOITOM-ACCOUNT",
+        currency: "EUR",
+        principalMinor: 10_000,
+        payments: [],
+        createdAt: goitomCreatedAt,
+        updatedAt: goitomCreatedAt,
+      },
+      ...(goitomState.receivables || []).filter((receivable) => receivable.id !== "REC-900"),
+    ];
+    const savedGoitomState = await requestJson(baseUrl, "/api/app-state", {
+      cookie: masterLogin.cookie,
+      method: "PUT",
+      body: { state: goitomState },
+    });
+    assert.ok(savedGoitomState.data.state.orders.find((order) => order.brokerOrderNumber === "GOI001"));
+
+    const lamCreatedAt = "2026-08-06T16:31:12.000Z";
+    const staleLamState = structuredClone(collisionBaseState);
+    staleLamState.orders = [
+      {
+        id: "ORD-900",
+        brokerActorId: "ACT-LAM",
+        broker: "LAM Broker",
+        brokerOrderNumber: "LAM007",
+        senderName: "LAM Sender",
+        receiverName: "LAM Receiver",
+        accountNumber: "LAM-ACCOUNT",
+        sourceCurrency: "EUR",
+        sourceAmountMinor: 20_000,
+        payoutCurrency: "EUR",
+        payoutAmountMinor: 20_000,
+        fundingType: "credit",
+        state: "Pending Forward",
+        createdAt: lamCreatedAt,
+        updatedAt: lamCreatedAt,
+      },
+      ...(staleLamState.orders || []).filter((order) => order.id !== "ORD-900"),
+    ];
+    staleLamState.receivables = [
+      {
+        id: "REC-900",
+        orderId: "ORD-900",
+        brokerOrderNumber: "LAM007",
+        borrowerActorId: "ACT-LAM",
+        borrower: "LAM Broker",
+        receiverName: "LAM Receiver",
+        accountNumber: "LAM-ACCOUNT",
+        currency: "EUR",
+        principalMinor: 20_000,
+        payments: [],
+        createdAt: lamCreatedAt,
+        updatedAt: lamCreatedAt,
+      },
+      ...(staleLamState.receivables || []).filter((receivable) => receivable.id !== "REC-900"),
+    ];
+    staleLamState.ledger = [
+      {
+        entryId: "COLLISION-LINE-LAM",
+        orderId: "ORD-900",
+        journal: "COLLISION-JOURNAL-LAM",
+        source: "COLLISION_TEST",
+        account: "LAM Broker ACTOR_CLEARING",
+        direction: "Debit",
+        currency: "EUR",
+        amountMinor: 20_000,
+        postedAt: lamCreatedAt,
+      },
+      ...(staleLamState.ledger || []).filter((line) => line.entryId !== "COLLISION-LINE-LAM"),
+    ];
+    staleLamState.chatConversations = [
+      {
+        id: "CHAT-COLLISION-LAM",
+        members: ["Updated Master Name", "LAM Broker"],
+        messages: [{ id: "MSG-COLLISION-LAM", orderId: "ORD-900", text: "LAM007", createdAt: lamCreatedAt }],
+      },
+      ...(staleLamState.chatConversations || []).filter((chat) => chat.id !== "CHAT-COLLISION-LAM"),
+    ];
+    const recoveredCollision = await requestJson(baseUrl, "/api/app-state", {
+      cookie: masterLogin.cookie,
+      method: "PUT",
+      body: { state: staleLamState },
+    });
+    const recoveredGoitomOrder = recoveredCollision.data.state.orders.find((order) => order.brokerOrderNumber === "GOI001");
+    const recoveredLamOrder = recoveredCollision.data.state.orders.find((order) => order.brokerOrderNumber === "LAM007");
+    assert.ok(recoveredGoitomOrder);
+    assert.ok(recoveredLamOrder);
+    assert.equal(recoveredGoitomOrder.id, "ORD-900");
+    assert.match(recoveredLamOrder.id, /^ORD-\d+-[A-F0-9]{20}$/);
+    assert.notEqual(recoveredLamOrder.id, recoveredGoitomOrder.id);
+    assert.equal(recoveredGoitomOrder.receiverName, "Goitom Receiver");
+    assert.equal(recoveredGoitomOrder.accountNumber, "GOITOM-ACCOUNT");
+    assert.equal(recoveredLamOrder.receiverName, "LAM Receiver");
+    assert.equal(recoveredLamOrder.accountNumber, "LAM-ACCOUNT");
+
+    const recoveredGoitomReceivable = recoveredCollision.data.state.receivables.find((item) => item.brokerOrderNumber === "GOI001");
+    const recoveredLamReceivable = recoveredCollision.data.state.receivables.find((item) => item.brokerOrderNumber === "LAM007");
+    assert.ok(recoveredGoitomReceivable);
+    assert.ok(recoveredLamReceivable);
+    assert.equal(recoveredGoitomReceivable.id, "REC-900");
+    assert.equal(recoveredGoitomReceivable.orderId, recoveredGoitomOrder.id);
+    assert.match(recoveredLamReceivable.id, /^REC-\d+-[A-F0-9]{20}$/);
+    assert.equal(recoveredLamReceivable.orderId, recoveredLamOrder.id);
+    assert.equal(recoveredLamReceivable.borrower, "LAM Broker");
+    assert.equal(
+      recoveredCollision.data.state.ledger.find((line) => line.entryId === "COLLISION-LINE-LAM")?.orderId,
+      recoveredLamOrder.id
+    );
+    assert.equal(
+      recoveredCollision.data.state.chatConversations
+        .find((chat) => chat.id === "CHAT-COLLISION-LAM")
+        ?.messages.find((message) => message.id === "MSG-COLLISION-LAM")?.orderId,
+      recoveredLamOrder.id
+    );
 
     const setSubscriptionExpiry = async (expiresAt) => {
       const database = JSON.parse(await readFile(databasePath, "utf8"));

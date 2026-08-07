@@ -1138,16 +1138,147 @@ function mergeTransfers(existingItems = [], incomingItems = []) {
 
 function nextOrderNumberFromOrders(orders = []) {
   return orders.reduce((next, order) => {
-    const match = String(order?.id || "").match(/^ORD-(\d+)$/);
+    const match = String(order?.id || "").match(/^ORD-(\d+)(?:-|$)/);
     return match ? Math.max(next, Number(match[1]) + 1) : next;
   }, 1);
 }
 
 function nextReceivableNumberFromReceivables(receivables = []) {
   return receivables.reduce((next, receivable) => {
-    const match = String(receivable?.id || "").match(/^REC-(\d+)$/);
+    const match = String(receivable?.id || "").match(/^REC-(\d+)(?:-|$)/);
     return match ? Math.max(next, Number(match[1]) + 1) : next;
   }, 1);
+}
+
+function archivedWorkspaceRecords(state = {}, key) {
+  return (Array.isArray(state.archives) ? state.archives : [])
+    .flatMap((archive) => Array.isArray(archive?.[key]) ? archive[key] : []);
+}
+
+function recordsHaveDifferentIdentity(existing = {}, incoming = {}, identityFields = []) {
+  for (const field of identityFields) {
+    const existingValue = String(existing?.[field] || "").trim();
+    const incomingValue = String(incoming?.[field] || "").trim();
+    if (existingValue && incomingValue && existingValue !== incomingValue) return true;
+  }
+  const existingCreatedAt = String(existing?.createdAt || existing?.sentAt || "").trim();
+  const incomingCreatedAt = String(incoming?.createdAt || incoming?.sentAt || "").trim();
+  return Boolean(existingCreatedAt && incomingCreatedAt && existingCreatedAt !== incomingCreatedAt);
+}
+
+function orderIdentityConflicts(existing = {}, incoming = {}) {
+  return recordsHaveDifferentIdentity(existing, incoming, ["brokerActorId", "brokerOrderNumber", "broker"]);
+}
+
+function receivableIdentityConflicts(existing = {}, incoming = {}) {
+  return recordsHaveDifferentIdentity(existing, incoming, ["orderId", "borrowerActorId", "borrower"]);
+}
+
+function recordsById(records = []) {
+  return records.reduce((grouped, record) => {
+    const recordId = String(record?.id || "");
+    if (!recordId) return grouped;
+    if (!grouped.has(recordId)) grouped.set(recordId, []);
+    grouped.get(recordId).push(record);
+    return grouped;
+  }, new Map());
+}
+
+function collisionSafeServerRecordId(prefix, sequence, usedIds) {
+  let candidate = "";
+  do {
+    candidate = `${prefix}-${sequence}-${crypto.randomBytes(10).toString("hex").toUpperCase()}`;
+  } while (usedIds.has(candidate));
+  usedIds.add(candidate);
+  return candidate;
+}
+
+function rewriteLinkedRecordId(value, fields, oldId, newId, skippedFields = new Set()) {
+  if (Array.isArray(value)) {
+    value.forEach((item) => rewriteLinkedRecordId(item, fields, oldId, newId, skippedFields));
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  Object.entries(value).forEach(([field, fieldValue]) => {
+    if (skippedFields.has(field)) return;
+    if (fields.has(field) && fieldValue === oldId) {
+      value[field] = newId;
+      return;
+    }
+    rewriteLinkedRecordId(fieldValue, fields, oldId, newId, skippedFields);
+  });
+}
+
+function resolveIncomingWorkspaceRecordCollisions(currentState = {}, incomingState = {}) {
+  const currentOrders = [
+    ...(Array.isArray(currentState.orders) ? currentState.orders : []),
+    ...archivedWorkspaceRecords(currentState, "orders"),
+  ];
+  const currentReceivables = [
+    ...(Array.isArray(currentState.receivables) ? currentState.receivables : []),
+    ...archivedWorkspaceRecords(currentState, "receivables"),
+  ];
+  const incomingOrders = Array.isArray(incomingState.orders) ? incomingState.orders : [];
+  const incomingReceivables = Array.isArray(incomingState.receivables) ? incomingState.receivables : [];
+  const currentOrdersById = recordsById(currentOrders);
+  const currentReceivablesById = recordsById(currentReceivables);
+  const hasOrderCollision = incomingOrders.some((order) => {
+    const matching = currentOrdersById.get(String(order?.id || "")) || [];
+    return matching.some((existing) => orderIdentityConflicts(existing, order));
+  });
+  const hasReceivableCollision = incomingReceivables.some((receivable) => {
+    const matching = currentReceivablesById.get(String(receivable?.id || "")) || [];
+    return matching.some((existing) => receivableIdentityConflicts(existing, receivable));
+  });
+  if (!hasOrderCollision && !hasReceivableCollision) return incomingState;
+
+  const resolved = structuredClone(incomingState);
+  const resolvedOrders = Array.isArray(resolved.orders) ? resolved.orders : [];
+  const resolvedReceivables = Array.isArray(resolved.receivables) ? resolved.receivables : [];
+  const usedOrderIds = new Set([...currentOrders, ...resolvedOrders].map((record) => String(record?.id || "")).filter(Boolean));
+  const usedReceivableIds = new Set([...currentReceivables, ...resolvedReceivables].map((record) => String(record?.id || "")).filter(Boolean));
+  let nextOrderSequence = Math.max(
+    Number(currentState.orderCounter || 0) + 1,
+    Number(resolved.orderCounter || 0) + 1,
+    nextOrderNumberFromOrders([...currentOrders, ...resolvedOrders])
+  );
+  let nextReceivableSequence = Math.max(
+    Number(currentState.receivableCounter || 0) + 1,
+    Number(resolved.receivableCounter || 0) + 1,
+    nextReceivableNumberFromReceivables([...currentReceivables, ...resolvedReceivables])
+  );
+  const orderReferenceFields = new Set(["orderId", "internalOrderId", "editingOrderId"]);
+  const skippedOrderReferenceFields = new Set(["archives", "actorResetTombstones"]);
+
+  resolvedOrders.forEach((order) => {
+    const oldId = String(order?.id || "");
+    if (!oldId) return;
+    const matching = currentOrdersById.get(oldId) || [];
+    if (!matching.some((existing) => orderIdentityConflicts(existing, order))) return;
+    const newId = collisionSafeServerRecordId("ORD", nextOrderSequence, usedOrderIds);
+    nextOrderSequence += 1;
+    order.id = newId;
+    if (order.internalOrderId === oldId) order.internalOrderId = newId;
+    rewriteLinkedRecordId(resolved, orderReferenceFields, oldId, newId, skippedOrderReferenceFields);
+  });
+
+  resolvedReceivables.forEach((receivable) => {
+    const oldId = String(receivable?.id || "");
+    if (!oldId) return;
+    const matching = currentReceivablesById.get(oldId) || [];
+    if (!matching.some((existing) => receivableIdentityConflicts(existing, receivable))) return;
+    const newId = collisionSafeServerRecordId("REC", nextReceivableSequence, usedReceivableIds);
+    nextReceivableSequence += 1;
+    receivable.id = newId;
+    rewriteLinkedRecordId(
+      resolved,
+      new Set(["receivableId", "editingReceivableId"]),
+      oldId,
+      newId,
+      new Set(["archives", "actorResetTombstones"])
+    );
+  });
+  return resolved;
 }
 
 function nextTransferNumberFromTransfers(transfers = []) {
@@ -1299,6 +1430,7 @@ function mergeReceivables(existingItems = [], incomingItems = []) {
 
 function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   const currentState = db.appStates[workspaceId] || {};
+  incomingState = resolveIncomingWorkspaceRecordCollisions(currentState, incomingState);
   const nextState = { ...currentState, ...incomingState };
   const membershipActors = workspaceActors(db, workspaceId);
   const activeActorIds = new Set(membershipActors.map((actor) => actor.id));

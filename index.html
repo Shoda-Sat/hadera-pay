@@ -6285,19 +6285,27 @@
       updateOrderFundingMode();
     }
 
+    function collisionSafeRecordId(prefix, sequence) {
+      const randomToken = (
+        globalThis.crypto?.randomUUID?.() ||
+        `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`
+      ).replace(/[^a-z0-9]/gi, "").slice(0, 20).toUpperCase();
+      return `${prefix}-${sequence}-${randomToken}`;
+    }
+
     function nextOrderId() {
       state.orderCounter = Math.max(Number(state.orderCounter || 0), nextOrderNumberFromOrders() - 1) + 1;
-      return "ORD-" + state.orderCounter;
+      return collisionSafeRecordId("ORD", state.orderCounter);
     }
 
     function nextReceivableId() {
       state.receivableCounter = Math.max(Number(state.receivableCounter || 0), nextReceivableNumberFromReceivables() - 1) + 1;
-      return "REC-" + state.receivableCounter;
+      return collisionSafeRecordId("REC", state.receivableCounter);
     }
 
     function nextReceivableNumberFromReceivables() {
       return state.receivables.reduce((next, receivable) => {
-        const match = String(receivable?.id || "").match(/^REC-(\d+)$/);
+        const match = String(receivable?.id || "").match(/^REC-(\d+)(?:-|$)/);
         return match ? Math.max(next, Number(match[1]) + 1) : next;
       }, 1);
     }
@@ -6350,7 +6358,7 @@
 
     function nextOrderNumberFromOrders() {
       return state.orders.reduce((next, order) => {
-        const match = String(order?.id || "").match(/^ORD-(\d+)$/);
+        const match = String(order?.id || "").match(/^ORD-(\d+)(?:-|$)/);
         return match ? Math.max(next, Number(match[1]) + 1) : next;
       }, 1);
     }
@@ -11299,8 +11307,8 @@
       const timeA = Math.max(new Date(a?.sentAt || 0).getTime(), new Date(a?.createdAt || 0).getTime());
       const timeB = Math.max(new Date(b?.sentAt || 0).getTime(), new Date(b?.createdAt || 0).getTime());
       if (timeA !== timeB) return timeB - timeA;
-      const numberA = Number(String(a?.id || "").match(/^ORD-(\d+)$/)?.[1] || 0);
-      const numberB = Number(String(b?.id || "").match(/^ORD-(\d+)$/)?.[1] || 0);
+      const numberA = Number(String(a?.id || "").match(/^ORD-(\d+)(?:-|$)/)?.[1] || 0);
+      const numberB = Number(String(b?.id || "").match(/^ORD-(\d+)(?:-|$)/)?.[1] || 0);
       return numberB - numberA;
     }
 

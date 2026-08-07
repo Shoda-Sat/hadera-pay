@@ -673,22 +673,30 @@ export async function extendOwnerSubscription(userId: string, plan: string, mode
 
 function nextOrderNumberFromOrders(orders: OrderRecord[]): number {
   return orders.reduce((next, order) => {
-    const match = String(order?.id || "").match(/^ORD-(\d+)$/);
+    const match = String(order?.id || "").match(/^ORD-(\d+)(?:-|$)/);
     return match ? Math.max(next, Number(match[1]) + 1) : next;
   }, 1);
 }
 
 function nextReceivableNumberFromReceivables(receivables: ReceivableRecord[]): number {
   return receivables.reduce((next, receivable) => {
-    const match = String(receivable?.id || "").match(/^REC-(\d+)$/);
+    const match = String(receivable?.id || "").match(/^REC-(\d+)(?:-|$)/);
     return match ? Math.max(next, Number(match[1]) + 1) : next;
   }, 1);
+}
+
+function collisionSafeRecordId(prefix: "ORD" | "REC", sequence: number): string {
+  const randomToken = `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`
+    .replace(/[^a-z0-9]/gi, "")
+    .slice(0, 20)
+    .toUpperCase();
+  return `${prefix}-${sequence}-${randomToken}`;
 }
 
 function nextOrderId(state: WorkspaceState): string {
   const nextNumber = Math.max(Number(state.orderCounter || 0) + 1, nextOrderNumberFromOrders(state.orders));
   state.orderCounter = nextNumber;
-  return `ORD-${nextNumber}`;
+  return collisionSafeRecordId("ORD", nextNumber);
 }
 
 function actorOrderPrefix(name: string): string {
@@ -705,7 +713,7 @@ function nextBrokerOrderNumber(session: UserSession, state: WorkspaceState): str
 function nextReceivableId(state: WorkspaceState): string {
   const nextNumber = Math.max(Number(state.receivableCounter || 0) + 1, nextReceivableNumberFromReceivables(state.receivables));
   state.receivableCounter = nextNumber;
-  return `REC-${nextNumber}`;
+  return collisionSafeRecordId("REC", nextNumber);
 }
 
 function sessionActor(session: UserSession, state: WorkspaceState): ActorRecord | undefined {
