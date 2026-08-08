@@ -3694,8 +3694,8 @@
             <div class="panel span-6 settings-category" data-settings-panel="fixedOrderRates" data-master-settings>
             <div class="panel-header">
               <div class="settings-heading">
-                <h2>Fixed Order Rates</h2>
-                <small>Manage Broker and Special Broker fixed order rates.</small>
+                <h2>Fixed Order Rates &amp; Commission</h2>
+                <small>Manage Broker and Special Broker fixed order rates and commission percentages.</small>
               </div>
               <button class="btn secondary settings-panel-toggle" data-settings-toggle="fixedOrderRates" type="button" aria-expanded="true">
                 <span data-settings-toggle-text>Collapse</span>
@@ -3704,7 +3704,7 @@
             <div class="panel-body table-wrap" data-settings-body>
               <table>
                 <thead>
-                  <tr><th>Broker</th><th>Configured Rates</th><th>Status</th><th>Action</th></tr>
+                  <tr><th>Broker</th><th>Configured Rates / Commission</th><th>Status</th><th>Action</th></tr>
                 </thead>
                 <tbody id="fixedRateRows"></tbody>
               </table>
@@ -4021,6 +4021,18 @@
             };
           });
         }
+        const rawFixedCommission = actor.orderFixedCommission && typeof actor.orderFixedCommission === "object"
+          ? actor.orderFixedCommission
+          : {};
+        const rawFixedCommissionPercent = rawFixedCommission.percent;
+        const hasFixedCommissionPercent = rawFixedCommissionPercent !== null && rawFixedCommissionPercent !== undefined &&
+          String(rawFixedCommissionPercent).trim() !== "" && Number.isFinite(Number(rawFixedCommissionPercent));
+        const orderFixedCommission = actorCanInitiateOrders(actor.role)
+          ? {
+            enabled: rawFixedCommission.enabled === true && hasFixedCommissionPercent,
+            percent: hasFixedCommissionPercent ? Number(rawFixedCommissionPercent) : ""
+          }
+          : {};
         const payoutCurrencies = actorHasSpecialPayout(actor.role) ? workingCurrencies : savedWorkingCurrencies;
         const specialPayoutSettings = {};
         if (actorHasSpecialPayout(actor.role)) {
@@ -4069,6 +4081,7 @@
             ? actor.orderMultiCurrencyEnabled === true
             : false,
           orderFixedRates: actorCanInitiateOrders(actor.role) ? orderFixedRates : {},
+          orderFixedCommission,
           active: actor.role === "Master" ? true : actor.active !== false,
           transferEnabled: actor.role === "Master" ? true : normalizedTransferMode(actor) !== "none",
           transferMode: normalizedTransferMode(actor),
@@ -4295,6 +4308,50 @@
         debit: { account: "MASTER_COMMISSION_EXPENSE", actorName: "" },
         credit: senderCredit
       };
+    }
+
+    const orderCommissionLiabilityOptions = ["Broker", "Master"];
+
+    function normalizedOrderCommissionLiability(order = {}) {
+      const percent = Number(order?.commissionPercent);
+      const storedMinor = Number(order?.commissionMinor);
+      if ((Number.isFinite(percent) && percent < 0) || (Number.isFinite(storedMinor) && storedMinor < 0)) return "Master";
+      const explicit = String(order?.orderCommissionLiability || "").trim();
+      return orderCommissionLiabilityOptions.includes(explicit) ? explicit : "Broker";
+    }
+
+    function orderCommissionAmountMinor(order = {}) {
+      const storedMinor = Number(order?.commissionMinor);
+      if (Number.isFinite(storedMinor) && storedMinor !== 0) return Math.abs(Math.round(storedMinor));
+      const sourceAmountMinor = Number(order?.sourceAmountMinor);
+      const percent = Number(order?.commissionPercent);
+      if (!Number.isFinite(sourceAmountMinor) || !Number.isFinite(percent)) return 0;
+      return Math.abs(Math.round(sourceAmountMinor * percent / 100));
+    }
+
+    function signedOrderCommissionMinor(order = {}) {
+      const amountMinor = orderCommissionAmountMinor(order);
+      return normalizedOrderCommissionLiability(order) === "Master" ? -amountMinor : amountMinor;
+    }
+
+    function orderCommissionLedgerTerms(order = {}) {
+      const liability = normalizedOrderCommissionLiability(order);
+      const amountMinor = orderCommissionAmountMinor(order);
+      return liability === "Master"
+        ? {
+          liability,
+          amountMinor,
+          brokerDirection: "Credit",
+          masterDirection: "Debit",
+          masterAccount: "MASTER_COMMISSION_EXPENSE"
+        }
+        : {
+          liability,
+          amountMinor,
+          brokerDirection: "Debit",
+          masterDirection: "Credit",
+          masterAccount: "MASTER_FEE_REVENUE"
+        };
     }
 
     const state = loadState();
@@ -4826,7 +4883,7 @@
 
     function settingsRateInputIsFocused() {
       return Boolean(document.activeElement?.closest?.(
-        ".forward-transfer-form, .fixed-order-rate, .special-agent-divider, .special-agent-percent, .usd-agent-income-divider, .usd-agent-income-percent, .master-rate-divider, .master-rate-percent, .buying-rate-input, .forward-agent, .forward-payout-divider, .forward-payout-percent, .order-return-reason, .receivable-payment, .ledger-tool-input, .actor-name-input, .actor-currency-input, .actor-currency-rate, #actorResetActor, #actorResetPermit"
+        ".forward-transfer-form, .fixed-order-rate, .fixed-order-commission, .special-agent-divider, .special-agent-percent, .usd-agent-income-divider, .usd-agent-income-percent, .master-rate-divider, .master-rate-percent, .buying-rate-input, .forward-agent, .forward-payout-divider, .forward-payout-percent, .order-return-reason, .receivable-payment, .ledger-tool-input, .actor-name-input, .actor-currency-input, .actor-currency-rate, #actorResetActor, #actorResetPermit"
       ));
     }
 
@@ -5669,6 +5726,27 @@
       return config?.enabled === true && rate > 0 ? rate : null;
     }
 
+    function fixedOrderCommissionFor(brokerName) {
+      const broker = activeActors().find((actor) => actor.name === brokerName);
+      const config = broker?.orderFixedCommission;
+      const rawPercent = config?.percent;
+      if (config?.enabled !== true || rawPercent === null || rawPercent === undefined || String(rawPercent).trim() === "") return null;
+      const percent = Number(rawPercent);
+      return Number.isFinite(percent) ? percent : null;
+    }
+
+    function applyFixedOrderCommission() {
+      const brokerName = document.getElementById("broker").value;
+      const commissionInput = document.getElementById("commission");
+      const fixedCommission = fixedOrderCommissionFor(brokerName);
+      if (fixedCommission !== null) {
+        commissionInput.value = formatRate(fixedCommission);
+        commissionInput.disabled = true;
+      } else {
+        commissionInput.disabled = false;
+      }
+    }
+
     function applyFixedOrderRate() {
       const brokerName = document.getElementById("broker").value;
       const payoutCurrency = document.getElementById("payoutCurrency").value;
@@ -5682,6 +5760,7 @@
       } else {
         rateInput.disabled = false;
       }
+      applyFixedOrderCommission();
     }
 
     function updateOrderFundingMode() {
@@ -5847,7 +5926,9 @@
       const rate = Number.isFinite(enteredRate) && enteredRate > 0 ? enteredRate : 0;
       const fixedRate = fixedOrderRateFor(document.getElementById("broker").value, payoutCurrency);
       const effectiveRate = fixedRate || rate;
-      const commissionPercent = Number(document.getElementById("commission").value) || 0;
+      const fixedCommission = fixedOrderCommissionFor(document.getElementById("broker").value);
+      const enteredCommission = Number(document.getElementById("commission").value) || 0;
+      const commissionPercent = fixedCommission !== null ? fixedCommission : enteredCommission;
       const commissionMinor = Math.round(sourceAmountMinor * commissionPercent / 100);
       const payoutAmountMinor = enteredPayoutMinor > 0
         ? enteredPayoutMinor
@@ -5859,6 +5940,7 @@
         payoutCurrency,
         sourceAmountMinor,
         commissionMinor,
+        orderCommissionLiability: commissionPercent < 0 ? "Master" : "Broker",
         payoutAmountMinor,
         grossMinor: sourceAmountMinor + commissionMinor,
         senderName: text(document.getElementById("senderName").value),
@@ -5985,6 +6067,10 @@
       return order?.state === "Voided" || Boolean(order?.voidedAt || order?.voidJournal);
     }
 
+    function transferRecordIsReversed(transfer) {
+      return transfer?.state === "Reversed" || Boolean(transfer?.reversalJournal || transfer?.reversedAt);
+    }
+
     function orderRecordCountsForActorNumber(record, actorName, reserveVoided = true) {
       if (record.current) return true;
       if (reserveVoided && orderRecordIsVoided(record.order)) return true;
@@ -6048,6 +6134,7 @@
       state.ledger
         .filter((line) =>
           line?.archived !== true &&
+          line.source !== "TRANSFER_REVERSAL" &&
           (line.account === actorName || line.account === `${actorName} ACTOR_CLEARING`)
         )
         .forEach((line) => {
@@ -6103,7 +6190,10 @@
             .forEach((line) => {
               const reference = String(line.transferId || line.entryId || line.journal || "");
               if (!reference) return;
-              const key = `${line.source}:${reference}`;
+              const transferKey = String(line.transferRecordKey || `${Number(line.masterTransactionCycle || 0)}:${line.transferId || line.journal || ""}`);
+              const key = ["TRANSFER", "TRANSFER_REVERSAL"].includes(String(line.source || ""))
+                ? `TRANSFER:${transferKey}`
+                : `${line.source}:${reference}`;
               const group = groups.get(key) || { lines: [], reference, postedAt: String(line.postedAt || "") };
               group.lines.push(line);
               if (!group.postedAt || new Date(line.postedAt || 0).getTime() < new Date(group.postedAt || 0).getTime()) {
@@ -6114,10 +6204,11 @@
           Array.from(groups.values())
             .sort((left, right) => new Date(left.postedAt || 0).getTime() - new Date(right.postedAt || 0).getTime())
             .forEach((group) => {
-              const existing = group.lines.find((line) => line.actorLedgerNumber)?.actorLedgerNumber;
+              const existing = group.lines.find((line) => line.source === "TRANSFER" && line.actorLedgerNumber)?.actorLedgerNumber ||
+                group.lines.find((line) => line.actorLedgerNumber)?.actorLedgerNumber;
               if (existing) {
                 group.lines.forEach((line) => {
-                  if (line.actorLedgerNumber) return;
+                  if (line.actorLedgerNumber === existing) return;
                   line.actorLedgerNumber = existing;
                   changed = true;
                 });
@@ -6219,6 +6310,7 @@
         sourceAmountMinor: input.sourceAmountMinor,
         payoutAmountMinor: input.payoutAmountMinor,
         commissionMinor: input.commissionMinor,
+        orderCommissionLiability: input.orderCommissionLiability,
         grossMinor: input.grossMinor,
         rate: input.rate,
         commissionPercent: input.commissionPercent,
@@ -6427,6 +6519,7 @@
 
     function buildJournalPreview() {
       const input = getOrderInput();
+      const commissionTerms = orderCommissionLedgerTerms(input);
       const hasReceiver = input.receiverFields.some((value) => value.trim().length > 0);
       const actor = selectedActor();
       const showGenericPayer = ["Broker", "Special Broker"].includes(actor?.role);
@@ -6434,9 +6527,9 @@
       els.receiverError.classList.toggle("visible", !hasReceiver && state.orderValidationVisible);
       const lines = [
         { direction: "Debit", account: input.broker + " ACTOR_CLEARING", currency: input.sourceCurrency, amountMinor: input.sourceAmountMinor },
-        { direction: "Debit", account: input.broker + " ACTOR_CLEARING", currency: input.sourceCurrency, amountMinor: input.commissionMinor },
+        { direction: commissionTerms.brokerDirection, account: input.broker + " ACTOR_CLEARING", currency: input.sourceCurrency, amountMinor: commissionTerms.amountMinor },
         { direction: "Credit", account: "MASTER_FX_CLEARING", currency: input.sourceCurrency, amountMinor: input.sourceAmountMinor },
-        { direction: "Credit", account: "MASTER_FEE_REVENUE", currency: input.sourceCurrency, amountMinor: input.commissionMinor },
+        { direction: commissionTerms.masterDirection, account: commissionTerms.masterAccount, currency: input.sourceCurrency, amountMinor: commissionTerms.amountMinor },
         { direction: "Debit", account: "MASTER_FX_CLEARING", currency: input.payoutCurrency, amountMinor: input.payoutAmountMinor },
         {
           direction: "Credit",
@@ -8245,12 +8338,17 @@
     }
 
     function renderFixedRateSettings() {
-      if (document.activeElement?.closest?.(".fixed-order-rate")) return;
+      if (document.activeElement?.closest?.(".fixed-order-rate, .fixed-order-commission")) return;
       const brokers = activeActors().filter((actor) => ["Broker", "Special Broker"].includes(actor.role));
       const rows = brokers.flatMap((actor) => {
         const expanded = state.expandedFixedRateActorId === actor.id;
         const enabledCount = supportedCurrencies.filter((currency) => actor.orderFixedRates?.[currency]?.enabled === true).length;
         const configuredCount = supportedCurrencies.filter((currency) => Number(actor.orderFixedRates?.[currency]?.rate || 0) > 0).length;
+        const fixedCommission = fixedOrderCommissionFor(actor.name);
+        const commissionConfig = actor.orderFixedCommission || {};
+        const hasCommission = commissionConfig.percent !== null && commissionConfig.percent !== undefined &&
+          String(commissionConfig.percent).trim() !== "" && Number.isFinite(Number(commissionConfig.percent));
+        const anyEnabled = enabledCount > 0 || fixedCommission !== null;
         const summary = `
           <tr>
             <td>
@@ -8258,12 +8356,30 @@
                 ${expanded ? "Hide" : "Show"} ${escapeHtml(actor.name)}
               </button>
             </td>
-            <td>${configuredCount} configured / ${enabledCount} active</td>
-            <td><span class="state-pill ${enabledCount ? "good" : "danger"}">${enabledCount ? "Active" : "Off"}</span></td>
+            <td>${configuredCount} rates configured / ${enabledCount} active<br><small>Commission: ${hasCommission ? `${escapeHtml(formatRate(commissionConfig.percent))}%${fixedCommission !== null ? " fixed" : " off"}` : "not set"}</small></td>
+            <td><span class="state-pill ${anyEnabled ? "good" : "danger"}">${anyEnabled ? "Active" : "Off"}</span></td>
             <td>${escapeHtml(actor.role)}</td>
           </tr>
         `;
         if (!expanded) return [summary];
+        const commissionRow = `
+          <tr class="fixed-rate-detail">
+            <td>Commission %</td>
+            <td>
+              <div class="setting-inline">
+                <input class="fixed-order-commission" data-id="${actor.id}" type="text" inputmode="decimal" step="0.000001" value="${hasCommission ? escapeHtml(formatRate(commissionConfig.percent)) : ""}" placeholder="Percent">
+                <button class="btn primary save-fixed-order-commission" data-id="${actor.id}" type="button">Save</button>
+              </div>
+              <small>Positive: Broker liable. Negative: Master liable. Zero is allowed.</small>
+            </td>
+            <td><span class="state-pill ${fixedCommission !== null ? "good" : "danger"}">${fixedCommission !== null ? "On" : "Off"}</span></td>
+            <td>
+              <button class="btn ${fixedCommission !== null ? "danger" : "primary"} toggle-fixed-order-commission" data-id="${actor.id}" type="button">
+                ${fixedCommission !== null ? "Switch Off" : "Switch On"}
+              </button>
+            </td>
+          </tr>
+        `;
         const details = supportedCurrencies.map((currency) => {
           const config = actor.orderFixedRates?.[currency] || {};
           const enabled = config.enabled === true;
@@ -8286,7 +8402,7 @@
             </tr>
           `;
         });
-        return [summary, ...details];
+        return [summary, commissionRow, ...details];
       });
       els.fixedRateRows.innerHTML = rows.length ? rows.join("") : '<tr><td colspan="4">No Brokers or Special Brokers available.</td></tr>';
     }
@@ -9253,10 +9369,18 @@
         (line) => ledgerReferenceNumber(line, actor, ledgerActor),
         (line) => line.journal
       );
+      const displayLines = sortedTransactionRows(
+        consolidatedLedgerDisplayLines(unsortedLines),
+        els.ledgerTransactionSort?.value || "date-desc",
+        (line) => line.postedAt,
+        (line) => ledgerReferenceNumber(line, actor, ledgerActor),
+        (line) => line.journal
+      );
       return {
         actor,
         ledgerActor,
         lines,
+        displayLines,
         title: `${ledgerActor?.name || actor?.name || "Ledger"} Ledger`
       };
     }
@@ -9295,6 +9419,155 @@
         transfer.reversalJournal === line.journal ||
         transfer.id === line.transferId
       ) || null;
+    }
+
+    function ledgerOriginalDisplayAmounts(lines, originalSource) {
+      const originals = lines.filter((line) => line.source === originalSource);
+      const byCurrency = new Map();
+      originals.forEach((line) => {
+        const signedMinor = line.direction === "Debit"
+          ? Number(line.amountMinor || 0)
+          : -Number(line.amountMinor || 0);
+        byCurrency.set(line.currency, (byCurrency.get(line.currency) || 0) + signedMinor);
+      });
+      const amounts = Array.from(byCurrency, ([currency, signedMinor]) => ({ currency, signedMinor }))
+        .filter((item) => item.signedMinor !== 0);
+      if (amounts.length) return amounts;
+      const fallback = originals
+        .slice()
+        .sort((left, right) => Number(right.amountMinor || 0) - Number(left.amountMinor || 0))[0];
+      return fallback
+        ? [{
+            currency: fallback.currency,
+            signedMinor: fallback.direction === "Debit"
+              ? Number(fallback.amountMinor || 0)
+              : -Number(fallback.amountMinor || 0)
+          }]
+        : [];
+    }
+
+    function ledgerDisplayDirectionFromAmounts(amounts, fallback) {
+      if (amounts.length && amounts.every((amount) => amount.signedMinor >= 0)) return "Debit";
+      if (amounts.length && amounts.every((amount) => amount.signedMinor <= 0)) return "Credit";
+      return fallback;
+    }
+
+    function ledgerDisplayGroup(line) {
+      const order = orderForLedgerLine(line);
+      if (order && orderRecordIsVoided(order)) {
+        return {
+          key: `void-order:${order.internalOrderId || order.id || order.brokerOrderNumber}`,
+          kind: "order",
+          record: order
+        };
+      }
+      const transfer = transferForLedgerLine(line);
+      if (transfer && transferRecordIsReversed(transfer)) {
+        return {
+          key: `reversed-transfer:${transferIdentity(transfer)}`,
+          kind: "transfer",
+          record: transfer
+        };
+      }
+      return null;
+    }
+
+    function consolidatedLedgerDisplayLine(group) {
+      const { kind, record, lines } = group;
+      const originalSource = kind === "order" ? "ORDER_PAYMENT" : "TRANSFER";
+      const originals = lines.filter((line) => line.source === originalSource);
+      const primary = originals[0] || lines[0];
+      const amounts = ledgerOriginalDisplayAmounts(lines, originalSource);
+      const displayState = kind === "order" ? "Voided" : "Reversed";
+      const statusDetails = kind === "order"
+        ? [
+            "VOIDED - Excluded from all calculations",
+            record.senderName ? `Sender: ${record.senderName}` : "",
+            record.receiverName ? `Receiver: ${record.receiverName}` : ""
+          ]
+        : [
+            "REVERSED - Original and reversal net to zero",
+            record.from || record.to ? `${record.from || "Unknown"} -> ${record.to || "Unknown"}` : ""
+          ];
+      const journal = joinedJournalNumbers(
+        record.journal,
+        kind === "order" ? record.voidJournal : record.reversalJournal,
+        ...lines.map((line) => line.journal)
+      );
+      const postedAt = kind === "order"
+        ? record.voidedAt || lines.find((line) => line.source === "ORDER_VOID")?.postedAt || primary.postedAt
+        : record.reversedAt || lines.find((line) => line.source === "TRANSFER_REVERSAL")?.postedAt || primary.postedAt;
+      return {
+        ...primary,
+        journal,
+        orderId: kind === "order" ? record.id : primary.orderId,
+        transferId: kind === "transfer" ? record.id || primary.transferId : primary.transferId,
+        transferRecordKey: kind === "transfer" ? primary.transferRecordKey || transferIdentity(record) : primary.transferRecordKey,
+        actorLedgerNumber: originals.find((line) => line.actorLedgerNumber)?.actorLedgerNumber || primary.actorLedgerNumber,
+        source: kind === "order" ? "ORDER_VOID" : "TRANSFER_REVERSAL",
+        direction: ledgerDisplayDirectionFromAmounts(amounts, primary.direction),
+        currency: amounts[0]?.currency || primary.currency,
+        amountMinor: Math.abs(amounts[0]?.signedMinor ?? Number(primary.amountMinor || 0)),
+        postedAt,
+        displayState,
+        displayAmounts: amounts,
+        displayDetails: statusDetails.filter(Boolean).join(" - "),
+        displayRawLineCount: lines.length,
+        displaySearchTarget: ledgerSearchTargetKey(lines[0])
+      };
+    }
+
+    function consolidatedLedgerDisplayLines(lines = []) {
+      const groups = new Map();
+      lines.forEach((line) => {
+        const displayGroup = ledgerDisplayGroup(line);
+        if (!displayGroup) return;
+        const group = groups.get(displayGroup.key) || { ...displayGroup, lines: [] };
+        group.lines.push(line);
+        groups.set(displayGroup.key, group);
+      });
+      const renderedGroups = new Set();
+      return lines.flatMap((line) => {
+        const displayGroup = ledgerDisplayGroup(line);
+        if (!displayGroup) return [line];
+        if (renderedGroups.has(displayGroup.key)) return [];
+        renderedGroups.add(displayGroup.key);
+        const group = groups.get(displayGroup.key);
+        return group?.lines?.length ? [consolidatedLedgerDisplayLine(group)] : [line];
+      });
+    }
+
+    function ledgerDisplayAmounts(line) {
+      if (Array.isArray(line?.displayAmounts) && line.displayAmounts.length) return line.displayAmounts;
+      return [{
+        currency: line.currency,
+        signedMinor: line.direction === "Debit"
+          ? Number(line.amountMinor || 0)
+          : -Number(line.amountMinor || 0)
+      }];
+    }
+
+    function ledgerDisplayDirection(line) {
+      if (!line?.displayState) return line.direction;
+      const directions = Array.from(new Set(
+        ledgerDisplayAmounts(line)
+          .filter((amount) => amount.signedMinor !== 0)
+          .map((amount) => amount.signedMinor > 0 ? "Debit" : "Credit")
+      ));
+      return `${line.displayState} / ${directions.length === 1 ? directions[0] : "Mixed"}`;
+    }
+
+    function ledgerDisplayCurrencyCells(line) {
+      const amounts = new Map(ledgerDisplayAmounts(line).map((amount) => [amount.currency, amount.signedMinor]));
+      const className = !line?.displayState && line.direction === "Credit" && line.commissionLiability
+        ? toneClass("credit")
+        : "";
+      return supportedCurrencies
+        .map((currency) => {
+          const signedMinor = amounts.get(currency);
+          return `<td class="${className}">${signedMinor === undefined ? "" : money(currency, Math.abs(signedMinor))}</td>`;
+        })
+        .join("");
     }
 
     function transferLedgerDetails(transfer) {
@@ -9404,7 +9677,7 @@
     function ledgerOrderPercent(order, ledgerActor) {
       if (orderViewerIsAssignedPayer(order, ledgerActor)) return forwardedPayoutPercentValue(order);
       const commissionPercent = Number(order.commissionPercent);
-      return Number.isFinite(commissionPercent) && commissionPercent >= 0 ? commissionPercent : null;
+      return Number.isFinite(commissionPercent) ? commissionPercent : null;
     }
 
     function compactCurrencyAmount(currency, amountMinor) {
@@ -9446,7 +9719,7 @@
     }
 
     function ledgerPaidOutLabel(line) {
-      if (line?.source !== "ORDER_PAYMENT") return "";
+      if (line?.source !== "ORDER_PAYMENT" && line?.displayState !== "Voided") return "";
       return orderPaidOutLabel(orderForLedgerLine(line));
     }
 
@@ -9546,7 +9819,7 @@
       const sourceCurrency = order.sourceCurrency || "USD";
       const payoutCurrency = order.payoutCurrency || sourceCurrency;
       const sourceAmountMinor = Number(order.sourceAmountMinor || 0);
-      const commissionMinor = Number(order.commissionMinor || 0);
+      const commissionMinor = signedOrderCommissionMinor(order);
       const collectedMinor = sourceAmountMinor + commissionMinor;
       if (sourceCurrency === "USD") {
         return {
@@ -9705,6 +9978,7 @@
     }
 
     function ledgerLineDetails(line, viewer, contextActor = null) {
+      if (line?.displayDetails) return line.displayDetails;
       if (line.source === "PREVIOUS_CLOSE") return line.details || "Previous Close";
       const transfer = transferForLedgerLine(line);
       if (transfer) {
@@ -9764,11 +10038,20 @@
       ]));
     }
 
-    function ledgerExportRows(lines, actor, { dateOnly = false } = {}) {
+    function ledgerExportCurrencyColumnsForLine(line) {
+      const amounts = new Map(ledgerDisplayAmounts(line).map((amount) => [amount.currency, amount.signedMinor]));
+      return Object.fromEntries(supportedCurrencies.map((currency) => {
+        const signedMinor = amounts.get(currency);
+        return [currency, signedMinor === undefined ? "" : formatMinor(Math.abs(signedMinor), currency)];
+      }));
+    }
+
+    function ledgerExportRows(lines, actor, { dateOnly = false, displayLines = null } = {}) {
       const viewer = selectedActor();
       const options = ledgerExportOptions(actor);
       const showPaidOutInfo = showSpecialAgentPaidOutColumn(viewer, actor);
-      const rows = lines.map((line) => {
+      const exportedLines = Array.isArray(displayLines) ? displayLines : consolidatedLedgerDisplayLines(lines);
+      const rows = exportedLines.map((line) => {
         const row = {
           Date: dateOnly ? displayDateOnly(line.postedAt) : displayDate(line.postedAt),
           Journal: line.journal,
@@ -9781,9 +10064,14 @@
         return {
           ...row,
           Account: line.account,
-          Direction: line.direction,
-          ...ledgerExportCurrencyColumns(line.currency, line.amountMinor)
+          Direction: ledgerDisplayDirection(line),
+          ...ledgerExportCurrencyColumnsForLine(line)
         };
+      });
+      rows.forEach((row, index) => {
+        if (exportedLines[index]?.displayState) {
+          Object.defineProperty(row, "__voided", { value: true, enumerable: false });
+        }
       });
       if (!actor || actor.role === "Master") return rows;
       const totals = calculableLedgerLines(lines).reduce((acc, line) => {
@@ -9850,11 +10138,11 @@
     function exportLedgerExcel() {
       if (warnSubscriptionReadOnly()) return;
       const context = currentLedgerContext();
-      const rows = ledgerExportRows(context.lines, context.ledgerActor);
+      const rows = ledgerExportRows(context.lines, context.ledgerActor, { displayLines: context.displayLines });
       if (rows.length === 0) return;
       const headers = Object.keys(rows[0]);
       const tableRows = rows.map((row) => `
-        <tr>${headers.map((header) => `<td>${escapeHtml(row[header])}</td>`).join("")}</tr>
+        <tr${row.__voided === true ? ' style="background:#fde8e8;color:#9f1f26"' : ""}>${headers.map((header) => `<td>${escapeHtml(row[header])}</td>`).join("")}</tr>
       `).join("");
       const html = `
         <html>
@@ -9991,7 +10279,7 @@
 
       let y = drawPageHeading();
       rows.forEach((row) => {
-        const voided = row.__voided === true || String(row.Status || "").startsWith("Voided");
+        const voided = row.__highlighted === true || row.__voided === true || /^(Voided|Reversed)/.test(String(row.Status || ""));
         const cellLines = headers.map((header, index) => wrapCell(row[header], widths[index]));
         const rowLineCount = Math.max(...cellLines.map((lines) => lines.length), 1);
         let lineOffset = 0;
@@ -10046,7 +10334,7 @@
     async function exportLedgerPdf() {
       if (warnSubscriptionReadOnly()) return;
       const context = currentLedgerContext();
-      const rows = ledgerExportRows(context.lines, context.ledgerActor, { dateOnly: true });
+      const rows = ledgerExportRows(context.lines, context.ledgerActor, { dateOnly: true, displayLines: context.displayLines });
       if (rows.length === 0) return;
       await runPdfExport(
         els.exportLedgerPdfButton,
@@ -10111,6 +10399,7 @@
       const includeTime = pdfMode && options.includeTime !== false;
       const presentCurrencies = Array.from(new Set(orderedRecords.flatMap((record) => [
         record.currency,
+        ...Object.keys(record.currencyAmountsMinor || {}),
         pdfMode && record.convertedBaseAmountMinor !== null && record.convertedBaseAmountMinor !== undefined
           ? record.baseCurrency
           : ""
@@ -10131,6 +10420,8 @@
       const showPaidOut = orderedRecords.some((record) => Boolean(record.paidOut));
       const buildRow = (record) => {
         const voided = record.voided === true || String(record.status || "").startsWith("Voided");
+        const reversed = record.reversed === true || String(record.status || "").startsWith("Reversed");
+        const excludedFromCalculations = voided || reversed;
         const exportedAmountMinor = pdfMode && Number.isFinite(Number(record.signedAmountMinor))
           ? Number(record.signedAmountMinor)
           : Number(record.amountMinor || 0);
@@ -10151,13 +10442,17 @@
         if (showCurrencyColumns) {
           currencies.forEach((currency) => {
             if (pdfMode && currency === "EUR" && !includeEur) return;
+            const hasExplicitCurrencyAmount = Object.prototype.hasOwnProperty.call(record.currencyAmountsMinor || {}, currency);
+            const explicitCurrencyAmountMinor = Number(record.currencyAmountsMinor?.[currency]);
             const convertedBaseAmountMinor = Number(record.convertedBaseAmountMinor);
             const hasConvertedBaseAmount = pdfMode &&
               record.convertedBaseAmountMinor !== null &&
               record.convertedBaseAmountMinor !== undefined &&
               Number.isFinite(convertedBaseAmountMinor);
-            row[currency] = voided
+            row[currency] = excludedFromCalculations
               ? ""
+              : hasExplicitCurrencyAmount && Number.isFinite(explicitCurrencyAmountMinor)
+                ? formatMinor(explicitCurrencyAmountMinor, currency)
               : record.currency === currency
               ? formatMinor(exportedAmountMinor, currency)
               : hasConvertedBaseAmount && record.baseCurrency === currency
@@ -10167,6 +10462,7 @@
         }
         row.Status = record.status;
         Object.defineProperty(row, "__voided", { value: voided, enumerable: false });
+        Object.defineProperty(row, "__highlighted", { value: excludedFromCalculations, enumerable: false });
         return row;
       };
       return orderedRecords.map(buildRow);
@@ -10175,7 +10471,7 @@
     function buildLandscapeExcelHtml(title, rows) {
       const headers = Object.keys(rows[0]);
       const tableRows = rows.map((row) => `
-        <tr>${headers.map((header) => `<td>${escapeHtml(row[header])}</td>`).join("")}</tr>
+        <tr${row.__highlighted === true ? ' style="background:#fde8e8;color:#9f1f26"' : ""}>${headers.map((header) => `<td>${escapeHtml(row[header])}</td>`).join("")}</tr>
       `).join("");
       return `
         <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel">
@@ -10523,11 +10819,12 @@
         };
       }
       const percentValue = Number(order.commissionPercent || 0);
+      const masterLiable = normalizedOrderCommissionLiability(order) === "Master";
       return {
-        label: "Order commission",
-        percent: Number.isFinite(percentValue) && percentValue >= 0 ? percentValue : 0,
+        label: masterLiable ? "Master-liable commission" : "Order commission",
+        percent: Number.isFinite(percentValue) ? percentValue : 0,
         currency: order.sourceCurrency || "USD",
-        amountMinor: Number(order.commissionMinor || 0)
+        amountMinor: signedOrderCommissionMinor(order)
       };
     }
 
@@ -11479,7 +11776,7 @@
     }
 
     function renderLedger() {
-      const { actor, ledgerActor, lines: visibleLines } = currentLedgerContext();
+      const { actor, ledgerActor, lines: visibleLines, displayLines } = currentLedgerContext();
       const showOrderInfo = showMasterOrderInfoColumns(actor, ledgerActor);
       const showPaidOutInfo = showSpecialAgentPaidOutColumn(actor, ledgerActor);
       renderLedgerHeader(showOrderInfo, showPaidOutInfo);
@@ -11487,15 +11784,15 @@
       els.exportLedgerPdfButton.disabled = !ledgerActor;
       renderTrialBalance();
       renderIncomeStatement(visibleLines, ledgerActor);
-      if (visibleLines.length === 0) {
+      if (displayLines.length === 0) {
         const emptyName = actor?.role === "Master" && ledgerActor ? `${escapeHtml(ledgerActor.name)} ledger is empty.` : "No journal entries posted. Ledger balance is zero.";
         els.ledgerRows.innerHTML = `<tr><td colspan="${ledgerColumnCount(showOrderInfo, showPaidOutInfo)}">${emptyName}</td></tr>`;
         els.metricLines.textContent = "0";
         scheduleLedgerLayoutUpdate();
         return;
       }
-      const lineRows = visibleLines.map((line) => `
-        <tr class="${ledgerLineIsForVoidedOrder(line) ? "void-row" : ""}" data-search-target="${escapeHtml(ledgerSearchTargetKey(line))}" tabindex="-1">
+      const lineRows = displayLines.map((line) => `
+        <tr class="${line.displayState || ledgerLineIsForVoidedOrder(line) ? "void-row" : ""}" data-search-target="${escapeHtml(line.displaySearchTarget || ledgerSearchTargetKey(line))}" tabindex="-1">
           <td class="ledger-date-cell">${escapeHtml(displayDate(line.postedAt))}</td>
           <td class="ledger-journal-cell"><strong>${escapeHtml(line.journal)}</strong></td>
           <td class="ledger-reference-cell">${escapeHtml(ledgerReferenceNumber(line, actor, ledgerActor))}</td>
@@ -11504,12 +11801,12 @@
           ${showOrderInfo ? ledgerOrderInfoCells(line, ledgerActor) : ""}
           ${showPaidOutInfo ? ledgerPaidOutCell(line) : ""}
           <td class="ledger-account-cell">${escapeHtml(line.account)}</td>
-          <td class="ledger-direction-cell ${toneClass(line.direction.toLowerCase())}"><strong>${escapeHtml(line.direction)}</strong></td>
-          ${currencyCells(line.currency, line.amountMinor, line.direction === "Credit" && line.commissionLiability ? toneClass("credit") : "")}
+          <td class="ledger-direction-cell ${line.displayState ? toneClass("credit") : toneClass(line.direction.toLowerCase())}"><strong>${escapeHtml(ledgerDisplayDirection(line))}</strong></td>
+          ${ledgerDisplayCurrencyCells(line)}
         </tr>
       `).join("");
       els.ledgerRows.innerHTML = lineRows + ledgerBalanceRows(visibleLines, ledgerActor, showOrderInfo, showPaidOutInfo);
-      els.metricLines.textContent = String(visibleLines.length);
+      els.metricLines.textContent = String(displayLines.length);
       scheduleLedgerLayoutUpdate();
     }
 
@@ -11594,6 +11891,48 @@
         });
     }
 
+    function consolidatedMasterBankDisplayRows(entries = []) {
+      const byId = new Map(entries.map((entry) => [entry.id, entry]));
+      const consumed = new Set();
+      const output = [];
+      entries.forEach((entry) => {
+        if (consumed.has(entry.id)) return;
+        if (!String(entry.id).endsWith("-OUT")) {
+          if (!String(entry.id).endsWith("-REVERSAL")) output.push(entry);
+          else {
+            const outId = `${String(entry.id).slice(0, -"-REVERSAL".length)}-OUT`;
+            if (!byId.has(outId)) output.push(entry);
+          }
+          consumed.add(entry.id);
+          return;
+        }
+        const reversalId = `${String(entry.id).slice(0, -"-OUT".length)}-REVERSAL`;
+        const reversal = byId.get(reversalId);
+        if (!reversal || reversal.currency !== entry.currency) {
+          output.push(entry);
+          consumed.add(entry.id);
+          return;
+        }
+        consumed.add(entry.id);
+        consumed.add(reversal.id);
+        output.push({
+          ...entry,
+          id: `${entry.id}-REVERSED-DISPLAY`,
+          type: "Reversed Transfer",
+          postedAt: reversal.postedAt || entry.postedAt,
+          details: reversal.details || entry.details,
+          runningMinor: reversal.runningMinor,
+          displayReversed: true,
+          moneyInMinor: Number(reversal.amountMinor || 0),
+          moneyOutMinor: Number(entry.amountMinor || 0)
+        });
+      });
+      return output.sort((left, right) => {
+        const timeDifference = new Date(left.postedAt || 0).getTime() - new Date(right.postedAt || 0).getTime();
+        return timeDifference || String(left.id).localeCompare(String(right.id));
+      });
+    }
+
     function masterBankMonthKey(entry) {
       return String(entry?.postedAt || "").slice(0, 7);
     }
@@ -11635,18 +11974,21 @@
         els.masterBankMonth.value = availableMonths.includes(currentMonth) ? currentMonth : availableMonths[0] || currentMonth;
       }
       const rows = selectedMasterBankStatementRows();
+      const displayRows = consolidatedMasterBankDisplayRows(rows);
       els.exportMasterBankStatementButton.disabled = rows.length === 0;
-      els.masterBankRows.innerHTML = rows.length
-        ? rows.slice().reverse().map((entry) => {
+      els.masterBankRows.innerHTML = displayRows.length
+        ? displayRows.slice().reverse().map((entry) => {
             const isCredit = entry.direction === "Credit";
+            const moneyInMinor = entry.displayReversed ? Number(entry.moneyInMinor || 0) : isCredit ? entry.amountMinor : 0;
+            const moneyOutMinor = entry.displayReversed ? Number(entry.moneyOutMinor || 0) : !isCredit ? entry.amountMinor : 0;
             return `
-              <tr>
+              <tr class="${entry.displayReversed ? "void-row" : ""}">
                 <td>${escapeHtml(displayDate(entry.postedAt))}</td>
                 <td>${escapeHtml(entry.type)}</td>
                 <td><strong>${escapeHtml(entry.reference || entry.id)}</strong></td>
                 <td>${escapeHtml(entry.details || "")}</td>
-                <td class="master-bank-amount ${isCredit ? toneClass("debit") : ""}">${isCredit ? money(entry.currency, entry.amountMinor) : ""}</td>
-                <td class="master-bank-amount ${!isCredit ? toneClass("credit") : ""}">${!isCredit ? money(entry.currency, entry.amountMinor) : ""}</td>
+                <td class="master-bank-amount ${moneyInMinor ? toneClass("debit") : ""}">${moneyInMinor ? money(entry.currency, moneyInMinor) : ""}</td>
+                <td class="master-bank-amount ${moneyOutMinor ? toneClass("credit") : ""}">${moneyOutMinor ? money(entry.currency, moneyOutMinor) : ""}</td>
                 <td class="master-bank-amount ${entry.runningMinor >= 0 ? toneClass("debit") : toneClass("credit")}">${escapeHtml(signedMoney(entry.currency, entry.runningMinor))}</td>
               </tr>
             `;
@@ -11669,18 +12011,18 @@
 
     function exportMasterBankStatement() {
       if (warnSubscriptionReadOnly()) return;
-      const rows = selectedMasterBankStatementRows();
+      const rows = consolidatedMasterBankDisplayRows(selectedMasterBankStatementRows());
       if (!rows.length) return;
       const month = els.masterBankMonth.value || "all";
       const tableRows = rows.map((entry) => `
-        <tr>
+        <tr${entry.displayReversed ? ' style="background:#fde8e8;color:#9f1f26"' : ""}>
           <td>${escapeHtml(displayDate(entry.postedAt))}</td>
           <td>${escapeHtml(entry.type)}</td>
           <td>${escapeHtml(entry.reference || entry.id)}</td>
           <td>${escapeHtml(entry.details || "")}</td>
           <td>${escapeHtml(entry.currency)}</td>
-          <td>${entry.direction === "Credit" ? escapeHtml(formatMinor(entry.amountMinor, entry.currency)) : ""}</td>
-          <td>${entry.direction === "Debit" ? escapeHtml(formatMinor(entry.amountMinor, entry.currency)) : ""}</td>
+          <td>${entry.displayReversed || entry.direction === "Credit" ? escapeHtml(formatMinor(entry.displayReversed ? entry.moneyInMinor : entry.amountMinor, entry.currency)) : ""}</td>
+          <td>${entry.displayReversed || entry.direction === "Debit" ? escapeHtml(formatMinor(entry.displayReversed ? entry.moneyOutMinor : entry.amountMinor, entry.currency)) : ""}</td>
           <td>${escapeHtml(formatMinor(entry.runningMinor, entry.currency))}</td>
         </tr>
       `).join("");
@@ -12097,6 +12439,7 @@
           order.internalOrderId === receivable.orderId ||
           order.brokerOrderNumber === receivable.brokerOrderNumber
         );
+        if (linkedOrder && orderRecordIsVoided(linkedOrder)) return;
         const journal = joinedJournalNumbers(receivable.journal, receivable.voidJournal, linkedOrder?.journal, linkedOrder?.voidJournal);
         const payments = receivable.payments || [];
         const lastPayment = payments.slice().sort((a, b) => new Date(b.paidAt || 0).getTime() - new Date(a.paidAt || 0).getTime())[0];
@@ -12140,13 +12483,31 @@
         ]);
       });
       (archive.transfers || []).forEach((transfer) => {
-        const date = transfer.sentAt || transfer.createdAt || transfer.postedAt || archive.closedAt;
+        const reversed = transferRecordIsReversed(transfer);
+        const date = transfer.reversedAt || transfer.sentAt || transfer.createdAt || transfer.postedAt || archive.closedAt;
         const journal = joinedJournalNumbers(transfer.journal, transfer.reversalJournal);
         const direction = `${transfer.from || ""} -> ${transfer.to || ""}`;
+        const sourceCurrency = transfer.sourceCurrency || transfer.currency || "USD";
+        const payoutCurrency = transfer.currency || sourceCurrency;
+        const archiveIsSender = Boolean(
+          (archive.actorId && transfer.fromActorId === archive.actorId) ||
+          (archive.actor && transfer.from === archive.actor)
+        );
+        const displayCurrency = archiveIsSender ? sourceCurrency : payoutCurrency;
+        const displayAmountMinor = archiveIsSender
+          ? Number(transfer.sourceAmountMinor || transfer.amountMinor || 0)
+          : Number(transfer.amountMinor || 0);
+        const archivedTransferActor = state.actors.find((actor) => actor.id === archive.actorId || actor.name === archive.actor);
+        const archivedTransferActorRole = archive.actorRole || archivedTransferActor?.role || "";
+        const currencyAmountsMinor = { [displayCurrency]: displayAmountMinor };
+        if (archivedTransferActorRole === "Special Agent") {
+          currencyAmountsMinor[payoutCurrency] = Number(transfer.amountMinor || 0);
+        }
         const completeDetails = transfer.details || [
           transfer.remarks ? `Remarks: ${transfer.remarks}` : "",
           transfer.paidOutAt ? `Paid out ${displayDate(transfer.paidOutAt)}` : "",
-          transfer.reversedAt ? `Reversed ${displayDate(transfer.reversedAt)}` : ""
+          transfer.reversedAt ? `Reversed ${displayDate(transfer.reversedAt)}` : "",
+          reversed ? "Original and reversal net to zero" : ""
         ].filter(Boolean).join(" - ");
         const details = completeDetails.startsWith(`${direction} - `)
           ? completeDetails.slice(direction.length + 3)
@@ -12161,9 +12522,12 @@
           searchTarget: transferSearchTargetKey(transfer),
           direction,
           details,
-          currency: transfer.currency || transfer.sourceCurrency || "USD",
-          amountMinor: Number(transfer.amountMinor || 0),
-          convertedBaseAmountMinor: specialAgentTransferBaseAmountMinor(archive, transfer)
+          currency: displayCurrency,
+          amountMinor: displayAmountMinor,
+          currencyAmountsMinor,
+          convertedBaseAmountMinor: specialAgentTransferBaseAmountMinor(archive, transfer),
+          reversed,
+          status: reversed ? "Reversed - Netted to zero" : "Locked"
         }, [
           transfer.id,
           transfer.from,
@@ -12176,6 +12540,22 @@
         ]);
       });
       (archive.ledger || []).forEach((line) => {
+        const source = String(line.source || "");
+        const linkedArchivedOrder = source.startsWith("ORDER_")
+          ? (archive.orders || []).find((order) =>
+              (line.orderId && (order.id === line.orderId || order.internalOrderId === line.orderId)) ||
+              (line.journal && (order.journal === line.journal || order.voidJournal === line.journal))
+            )
+          : null;
+        if (linkedArchivedOrder && orderRecordIsVoided(linkedArchivedOrder)) return;
+        const linkedArchivedTransfer = source.startsWith("TRANSFER")
+          ? (archive.transfers || []).find((transfer) =>
+              (line.transferRecordKey && transferIdentity(transfer) === line.transferRecordKey) ||
+              (line.transferId && transfer.id === line.transferId) ||
+              (line.journal && (transfer.journal === line.journal || transfer.reversalJournal === line.journal))
+            )
+          : null;
+        if (linkedArchivedTransfer && transferRecordIsReversed(linkedArchivedTransfer)) return;
         const date = line.postedAt || archive.closedAt;
         const reference = line.actorLedgerNumber || line.entryId || line.transferId || line.orderId || line.journal;
         const voided = ledgerLineIsForVoidedOrder(line);
@@ -12286,11 +12666,12 @@
               </tr>
             `);
             records.forEach((record) => {
+              const highlighted = record.voided || record.reversed;
               const description = record.type === "Ledger"
                 ? record.details
                 : [record.direction, record.details].filter(Boolean).join(" - ");
               actorRows.push(`
-                <tr class="${record.voided ? "void-row" : ""}" data-search-target="${escapeHtml(record.searchTarget || "")}" tabindex="-1">
+                <tr class="${highlighted ? "void-row" : ""}" data-search-target="${escapeHtml(record.searchTarget || "")}" tabindex="-1">
                   <td>${escapeHtml(displayDate(record.date))}</td>
                   <td>${escapeHtml(record.type)}</td>
                   <td><strong>${escapeHtml(record.reference)}</strong></td>
@@ -12298,7 +12679,7 @@
                   <td>${escapeHtml(description)}</td>
                   <td>${lockedAmount(record.currency, record.amountMinor)}</td>
                   <td>${escapeHtml(record.paidOut || "")}</td>
-                  <td><span class="state-pill ${record.voided ? "danger" : ""}">${escapeHtml(record.status || "Locked")}</span></td>
+                  <td><span class="state-pill ${highlighted ? "danger" : ""}">${escapeHtml(record.status || "Locked")}</span></td>
                 </tr>
               `);
             });
@@ -12624,7 +13005,7 @@
         originalLines.forEach((line) => {
           const actorName = actorNameFromAccount(line.account);
           if (actorName && !actorLedgerNumbers.has(actorName)) {
-            actorLedgerNumbers.set(actorName, nextActorLedgerNumber(actorName, transfer.id));
+            actorLedgerNumbers.set(actorName, line.actorLedgerNumber || nextActorLedgerNumber(actorName, transfer.id));
           }
         });
         state.ledger.unshift(...originalLines.map((line) => ({
@@ -12756,7 +13137,7 @@
       const sourceCurrency = order.sourceCurrency || "USD";
       const payoutCurrency = order.payoutCurrency || sourceCurrency;
       const sourceAmountMinor = Number(order.sourceAmountMinor || 0);
-      const commissionMinor = Number(order.commissionMinor || 0);
+      const commissionTerms = orderCommissionLedgerTerms(order);
       const payoutAmountMinor = Number(order.payoutAmountMinor || sourceAmountMinor);
       const payerStatement = payingActorStatement(order);
       const postedAt = new Date().toISOString();
@@ -12767,9 +13148,9 @@
       }
       const lines = [
         { journal: journalId, orderId: order.id, source: "ORDER_PAYMENT", account: `${order.broker} ACTOR_CLEARING`, direction: "Debit", currency: sourceCurrency, amountMinor: sourceAmountMinor, postedAt },
-        { journal: journalId, orderId: order.id, source: "ORDER_PAYMENT", account: `${order.broker} ACTOR_CLEARING`, direction: "Debit", currency: sourceCurrency, amountMinor: commissionMinor, postedAt },
+        { journal: journalId, orderId: order.id, source: "ORDER_PAYMENT", account: `${order.broker} ACTOR_CLEARING`, direction: commissionTerms.brokerDirection, currency: sourceCurrency, amountMinor: commissionTerms.amountMinor, postedAt },
         { journal: journalId, orderId: order.id, source: "ORDER_PAYMENT", account: "MASTER_FX_CLEARING", direction: "Credit", currency: sourceCurrency, amountMinor: sourceAmountMinor, postedAt },
-        { journal: journalId, orderId: order.id, source: "ORDER_PAYMENT", account: "MASTER_FEE_REVENUE", direction: "Credit", currency: sourceCurrency, amountMinor: commissionMinor, postedAt },
+        { journal: journalId, orderId: order.id, source: "ORDER_PAYMENT", account: commissionTerms.masterAccount, direction: commissionTerms.masterDirection, currency: sourceCurrency, amountMinor: commissionTerms.amountMinor, postedAt },
         { journal: journalId, orderId: order.id, source: "ORDER_PAYMENT", account: "MASTER_FX_CLEARING", direction: "Debit", currency: payerStatement.currency, amountMinor: payerStatement.amountMinor, postedAt },
         { journal: journalId, orderId: order.id, source: "ORDER_PAYMENT", account: `${order.agent} ACTOR_CLEARING`, direction: "Credit", currency: payerStatement.currency, amountMinor: payerStatement.amountMinor, postedAt }
       ].filter((line) => line.amountMinor > 0);
@@ -15122,7 +15503,12 @@
 
       const removeActorButton = event.target.closest(".remove-actor");
       if (removeActorButton) {
-        await removeActor(removeActorButton.dataset.id);
+        const actor = state.actors.find((item) => item.id === removeActorButton.dataset.id);
+        if (!actor || actor.role === "Master" || selectedActor()?.role !== "Master") return;
+        confirmAction(
+          `Remove ${actor.name} from this workspace? Their login access will be permanently removed. Existing transaction history will remain visible. This cannot be undone.`,
+          () => removeActor(actor.id)
+        );
         return;
       }
 
@@ -15201,6 +15587,51 @@
         actor.orderFixedRates ||= {};
         actor.orderFixedRates[currency] = { ...(actor.orderFixedRates[currency] || {}), rate };
         orderConversionTouches = [];
+        renderAll();
+        return;
+      }
+
+      const saveFixedCommissionButton = event.target.closest(".save-fixed-order-commission");
+      if (saveFixedCommissionButton) {
+        if (!signedInAsMaster()) return;
+        const actor = state.actors.find((item) => item.id === saveFixedCommissionButton.dataset.id);
+        const input = saveFixedCommissionButton.closest(".setting-inline")?.querySelector(".fixed-order-commission");
+        const rawPercent = String(input?.value || "").trim();
+        const percent = Number(rawPercent);
+        if (!actor || !["Broker", "Special Broker"].includes(actor.role)) return;
+        if (!rawPercent || !Number.isFinite(percent)) {
+          input?.setCustomValidity("Enter a valid fixed commission percentage. Zero and negative values are allowed.");
+          input?.reportValidity();
+          return;
+        }
+        input?.setCustomValidity("");
+        actor.orderFixedCommission = {
+          enabled: actor.orderFixedCommission?.enabled === true,
+          percent
+        };
+        renderAll();
+        return;
+      }
+
+      const toggleFixedCommissionButton = event.target.closest(".toggle-fixed-order-commission");
+      if (toggleFixedCommissionButton) {
+        if (!signedInAsMaster()) return;
+        const actor = state.actors.find((item) => item.id === toggleFixedCommissionButton.dataset.id);
+        const input = toggleFixedCommissionButton.closest("tr")?.querySelector(".fixed-order-commission");
+        const storedPercent = actor?.orderFixedCommission?.percent;
+        const rawPercent = String(input?.value ?? storedPercent ?? "").trim();
+        const percent = Number(rawPercent);
+        if (!actor || !["Broker", "Special Broker"].includes(actor.role)) return;
+        if (!rawPercent || !Number.isFinite(percent)) {
+          input?.setCustomValidity("Enter a valid fixed commission percentage before switching on.");
+          input?.reportValidity();
+          return;
+        }
+        input?.setCustomValidity("");
+        actor.orderFixedCommission = {
+          percent,
+          enabled: actor.orderFixedCommission?.enabled !== true
+        };
         renderAll();
         return;
       }
@@ -15880,7 +16311,7 @@
       ".reject-transfer", ".return-transfer", ".approve-transfer", ".chat-delete-group",
       ".react-message", ".forward-message", ".save-actor-name", ".save-actor-currency",
       ".remove-actor", ".toggle-order-currency-permission", ".toggle-transfer-receive-currency-permission",
-      ".save-fixed-order-rate", ".toggle-fixed-order-rate", ".save-special-divider",
+      ".save-fixed-order-rate", ".toggle-fixed-order-rate", ".save-fixed-order-commission", ".toggle-fixed-order-commission", ".save-special-divider",
       ".toggle-special-divider", ".save-usd-agent-income-rate", ".save-master-rate-divisor",
       ".save-buying-rates", ".toggle-master-rate-divisor", ".remind-order-actor",
       ".order-visibility-toggle", ".transfer-target-toggle", ".invite-actor-active"

@@ -19,7 +19,7 @@ import type {
   WorkspaceState
 } from "../types";
 import { ensureActorLedgerNumbers, nextActorLedgerSequence } from "../domain/ledgerNumbering";
-import { calculateQuote, compactAmount, fixedOrderRateForActor, minorFromMajor } from "../utils/money";
+import { calculateQuote, compactAmount, fixedOrderCommissionForActor, fixedOrderRateForActor, minorFromMajor, parseDecimalNumber } from "../utils/money";
 
 declare const process: { env?: Record<string, string | undefined> } | undefined;
 
@@ -817,16 +817,21 @@ export async function submitTransferOrder(session: UserSession, draft: TransferD
   }
   const sourceCurrency = actor?.orderMultiCurrencyEnabled === true ? draft.sourceCurrency : safeCurrency(actor?.currency, session.currency);
   const fixedRate = fixedOrderRateForActor(actor, draft.payoutCurrency);
+  const fixedCommission = fixedOrderCommissionForActor(actor);
+  const parsedCommissionPercent = parseDecimalNumber(draft.commissionPercent);
+  const commissionPercent = fixedCommission !== null
+    ? fixedCommission
+    : Number.isFinite(parsedCommissionPercent) ? parsedCommissionPercent : 0;
   const quote = calculateQuote({
     ...draft,
     broker: session.actorName,
     sourceCurrency,
+    commissionPercent: String(commissionPercent),
     ...(fixedRate ? { rate: String(fixedRate), payoutAmount: "" } : {})
   });
   if (quote.sourceAmount <= 0 || quote.payoutAmount <= 0 || quote.rate <= 0) {
     throw new Error("Enter source amount, payout amount, and rate greater than zero.");
   }
-
   const now = new Date().toISOString();
   const order: OrderRecord = {
     ...(existingOrder || {}),
@@ -842,10 +847,11 @@ export async function submitTransferOrder(session: UserSession, draft: TransferD
     sourceAmountMinor: minorFromMajor(quote.sourceAmount, sourceCurrency),
     payoutAmountMinor: minorFromMajor(quote.payoutAmount, draft.payoutCurrency),
     commissionMinor: minorFromMajor(quote.commissionAmount, sourceCurrency),
+    orderCommissionLiability: commissionPercent < 0 ? "Master" : "Broker",
     grossMinor: minorFromMajor(quote.grossAmount, sourceCurrency),
     moneyUnitVersion: 2,
     rate: quote.rate,
-    commissionPercent: Number(draft.commissionPercent || 0) || 0,
+    commissionPercent,
     senderName: draft.senderName.trim(),
     receiverName: draft.receiverName.trim(),
     receiverCity: draft.receiverCity.trim(),

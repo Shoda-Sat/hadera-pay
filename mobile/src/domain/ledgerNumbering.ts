@@ -93,7 +93,11 @@ export function actorLedgerUsedSequences(state: WorkspaceState, actorName: strin
     if (details && Number.isFinite(details.value) && details.value > 0) used.add(details.value);
   });
   state.ledger
-    .filter((line) => line.archived !== true && ledgerLineBelongsToActor(line, actorName))
+    .filter((line) =>
+      line.archived !== true &&
+      line.source !== "TRANSFER_REVERSAL" &&
+      ledgerLineBelongsToActor(line, actorName)
+    )
     .forEach((line) => {
       const match = String(line.actorLedgerNumber || "").match(/^(\d+)_/);
       if (match) used.add(Number(match[1]));
@@ -150,7 +154,10 @@ export function ensureActorLedgerNumbers(state: WorkspaceState): boolean {
         .forEach((line) => {
           const reference = String(line.transferId || line.entryId || line.journal || "");
           if (!reference) return;
-          const key = `${line.source}:${reference}`;
+          const transferKey = String(line.transferRecordKey || `${Number(line.masterTransactionCycle || 0)}:${line.transferId || line.journal || ""}`);
+          const key = ["TRANSFER", "TRANSFER_REVERSAL"].includes(String(line.source || ""))
+            ? `TRANSFER:${transferKey}`
+            : `${line.source}:${reference}`;
           const group = groups.get(key) || { lines: [], reference, postedAt: String(line.postedAt || "") };
           group.lines.push(line);
           if (!group.postedAt || new Date(line.postedAt || 0).getTime() < new Date(group.postedAt || 0).getTime()) {
@@ -161,10 +168,11 @@ export function ensureActorLedgerNumbers(state: WorkspaceState): boolean {
       const orderedGroups = Array.from(groups.values())
         .sort((left, right) => new Date(left.postedAt || 0).getTime() - new Date(right.postedAt || 0).getTime());
       orderedGroups.forEach((group) => {
-        const existing = group.lines.find((line) => line.actorLedgerNumber)?.actorLedgerNumber;
+        const existing = group.lines.find((line) => line.source === "TRANSFER" && line.actorLedgerNumber)?.actorLedgerNumber ||
+          group.lines.find((line) => line.actorLedgerNumber)?.actorLedgerNumber;
         if (existing) {
           group.lines.forEach((line) => {
-            if (line.actorLedgerNumber) return;
+            if (line.actorLedgerNumber === existing) return;
             line.actorLedgerNumber = existing;
             changed = true;
           });

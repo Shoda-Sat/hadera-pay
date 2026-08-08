@@ -17,7 +17,7 @@ import type {
   UserSession,
   WorkspaceState
 } from "../types";
-import { compactAmount, majorFromMinor, minorFromMajor, parseAmount, parseDecimalNumber } from "../utils/money";
+import { compactAmount, majorFromMinor, minorFromMajor, orderCommissionLedgerTerms, parseAmount, parseDecimalNumber, signedOrderCommissionMinor } from "../utils/money";
 import { actorLedgerSequenceWidth, nextActorLedgerNumber, nextActorLedgerSequence } from "./ledgerNumbering";
 
 export const supportedCurrencies: Currency[] = ["USD", "ETB", "EUR", "ERN", "SSP", "SDG", "LYD"];
@@ -398,7 +398,7 @@ export function applyUsdAgentIncomeRate(amountMinor: number, setting: RateSettin
 function freezeIncome(state: WorkspaceState, order: OrderRecord, lines: LedgerLine[]): void {
   const sourceCurrency = order.sourceCurrency;
   const payoutCurrency = order.payoutCurrency;
-  const collectedMinor = Number(order.sourceAmountMinor || 0) + Number(order.commissionMinor || 0);
+  const collectedMinor = Number(order.sourceAmountMinor || 0) + signedOrderCommissionMinor(order);
   const rates = buyingRates(state);
   const payerLine = lines.find((line) => line.account === `${order.agent} ACTOR_CLEARING` && line.direction === "Credit");
   const payingActor = activeActors(state).find((actor) => actor.name === order.agent);
@@ -569,12 +569,13 @@ export async function markOrderPaid(orderId: string, actorId: string, proof?: Pr
     const journal = nextJournalId(state);
     const postedAt = new Date().toISOString();
     const payer = payingActorStatement(state, order);
+    const commissionTerms = orderCommissionLedgerTerms(order);
     const details = orderDetails(order);
     const lines: LedgerLine[] = [
       { journal, orderId: order.id, source: "ORDER_PAYMENT", account: `${order.broker} ACTOR_CLEARING`, direction: "Debit" as const, currency: order.sourceCurrency, amountMinor: Number(order.sourceAmountMinor || 0), details, postedAt },
-      { journal, orderId: order.id, source: "ORDER_PAYMENT", account: `${order.broker} ACTOR_CLEARING`, direction: "Debit" as const, currency: order.sourceCurrency, amountMinor: Number(order.commissionMinor || 0), details, postedAt },
+      { journal, orderId: order.id, source: "ORDER_PAYMENT", account: `${order.broker} ACTOR_CLEARING`, direction: commissionTerms.brokerDirection, currency: order.sourceCurrency, amountMinor: commissionTerms.amountMinor, details, postedAt },
       { journal, orderId: order.id, source: "ORDER_PAYMENT", account: "MASTER_FX_CLEARING", direction: "Credit" as const, currency: order.sourceCurrency, amountMinor: Number(order.sourceAmountMinor || 0), details, postedAt },
-      { journal, orderId: order.id, source: "ORDER_PAYMENT", account: "MASTER_FEE_REVENUE", direction: "Credit" as const, currency: order.sourceCurrency, amountMinor: Number(order.commissionMinor || 0), details, postedAt },
+      { journal, orderId: order.id, source: "ORDER_PAYMENT", account: commissionTerms.masterAccount, direction: commissionTerms.masterDirection, currency: order.sourceCurrency, amountMinor: commissionTerms.amountMinor, details, postedAt },
       { journal, orderId: order.id, source: "ORDER_PAYMENT", account: "MASTER_FX_CLEARING", direction: "Debit" as const, currency: payer.currency, amountMinor: payer.amountMinor, details, postedAt },
       { journal, orderId: order.id, source: "ORDER_PAYMENT", account: `${order.agent} ACTOR_CLEARING`, direction: "Credit" as const, currency: payer.currency, amountMinor: payer.amountMinor, details, postedAt }
     ].filter((line) => line.amountMinor > 0);
@@ -1263,6 +1264,7 @@ export async function updateUsdAgentIncomeRate(actorId: string, setting: RateSet
 export async function updateActorOrderSettings(actorId: string, input: {
   orderMultiCurrencyEnabled?: boolean;
   transferReceiveMultiCurrencyEnabled?: boolean;
+  orderFixedCommission?: { enabled: boolean; percent: number };
   visibility?: ActorRecord["orderVisibilityPermissions"];
 }): Promise<WorkspaceState> {
   return updateWorkspaceState((state) => {
@@ -1271,6 +1273,15 @@ export async function updateActorOrderSettings(actorId: string, input: {
     if (typeof input.orderMultiCurrencyEnabled === "boolean") actor.orderMultiCurrencyEnabled = input.orderMultiCurrencyEnabled;
     if (typeof input.transferReceiveMultiCurrencyEnabled === "boolean") {
       actor.transferReceiveMultiCurrencyEnabled = input.transferReceiveMultiCurrencyEnabled;
+    }
+    if (input.orderFixedCommission) {
+      if (!["Broker", "Special Broker"].includes(actor.role)) throw new Error("Fixed commission is available only for Brokers and Special Brokers.");
+      const percent = Number(input.orderFixedCommission.percent);
+      if (!Number.isFinite(percent)) throw new Error("Enter a valid fixed commission percentage.");
+      actor.orderFixedCommission = {
+        enabled: input.orderFixedCommission.enabled === true,
+        percent
+      };
     }
     if (input.visibility) actor.orderVisibilityPermissions = { ...(actor.orderVisibilityPermissions || {}), ...input.visibility };
   });

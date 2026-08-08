@@ -1,4 +1,4 @@
-import type { ActorRecord, Currency, TransferDraft, TransferQuote } from "../types";
+import type { ActorRecord, Currency, OrderCommissionLiability, TransferDraft, TransferQuote } from "../types";
 
 export const currencies: Currency[] = ["USD", "ETB", "EUR", "ERN", "SSP", "SDG", "LYD"];
 const currencyDecimalPlaces: Record<Currency, number> = {
@@ -116,6 +116,14 @@ export function fixedOrderRateForActor(actor: Pick<ActorRecord, "orderFixedRates
   return setting?.enabled === true && Number.isFinite(rate) && rate > 0 ? rate : null;
 }
 
+export function fixedOrderCommissionForActor(actor: Pick<ActorRecord, "orderFixedCommission"> | undefined): number | null {
+  const setting = actor?.orderFixedCommission;
+  const rawPercent = setting?.percent;
+  if (setting?.enabled !== true || rawPercent === null || rawPercent === undefined || String(rawPercent).trim() === "") return null;
+  const percent = parseDecimalNumber(rawPercent);
+  return Number.isFinite(percent) ? percent : null;
+}
+
 export function reconcileFixedOrderConversion<T extends ConversionDraft>(
   draft: T,
   fixedRate: number,
@@ -177,11 +185,66 @@ export function reconcileOrderConversion<T extends ConversionDraft>(draft: T, to
   return draft;
 }
 
+type OrderCommissionLike = {
+  sourceAmountMinor?: number;
+  commissionMinor?: number;
+  commissionPercent?: number;
+  orderCommissionLiability?: OrderCommissionLiability;
+};
+
+export function normalizedOrderCommissionLiability(order: OrderCommissionLike): OrderCommissionLiability {
+  const percent = Number(order.commissionPercent);
+  const storedMinor = Number(order.commissionMinor);
+  if ((Number.isFinite(percent) && percent < 0) || (Number.isFinite(storedMinor) && storedMinor < 0)) return "Master";
+  return order.orderCommissionLiability === "Master" ? "Master" : "Broker";
+}
+
+export function orderCommissionAmountMinor(order: OrderCommissionLike): number {
+  const storedMinor = Number(order.commissionMinor);
+  if (Number.isFinite(storedMinor) && storedMinor !== 0) return Math.abs(Math.round(storedMinor));
+  const sourceAmountMinor = Number(order.sourceAmountMinor);
+  const percent = Number(order.commissionPercent);
+  if (!Number.isFinite(sourceAmountMinor) || !Number.isFinite(percent)) return 0;
+  return Math.abs(Math.round(sourceAmountMinor * percent / 100));
+}
+
+export function signedOrderCommissionMinor(order: OrderCommissionLike): number {
+  const amountMinor = orderCommissionAmountMinor(order);
+  return normalizedOrderCommissionLiability(order) === "Master" ? -amountMinor : amountMinor;
+}
+
+export function orderCommissionLedgerTerms(order: OrderCommissionLike): {
+  liability: OrderCommissionLiability;
+  amountMinor: number;
+  brokerDirection: "Debit" | "Credit";
+  masterDirection: "Debit" | "Credit";
+  masterAccount: "MASTER_FEE_REVENUE" | "MASTER_COMMISSION_EXPENSE";
+} {
+  const liability = normalizedOrderCommissionLiability(order);
+  const amountMinor = orderCommissionAmountMinor(order);
+  return liability === "Master"
+    ? {
+      liability,
+      amountMinor,
+      brokerDirection: "Credit",
+      masterDirection: "Debit",
+      masterAccount: "MASTER_COMMISSION_EXPENSE"
+    }
+    : {
+      liability,
+      amountMinor,
+      brokerDirection: "Debit",
+      masterDirection: "Credit",
+      masterAccount: "MASTER_FEE_REVENUE"
+    };
+}
+
 export function calculateQuote(draft: TransferDraft): TransferQuote {
   const sourceAmount = normalizedMajor(parseAmount(draft.sourceAmount), draft.sourceCurrency);
   const manualPayout = normalizedMajor(parseAmount(draft.payoutAmount), draft.payoutCurrency);
   const rate = parseAmount(draft.rate);
-  const commissionPercent = Math.max(0, parseDecimalNumber(draft.commissionPercent) || 0);
+  const parsedCommissionPercent = parseDecimalNumber(draft.commissionPercent);
+  const commissionPercent = Number.isFinite(parsedCommissionPercent) ? parsedCommissionPercent : 0;
   const commissionAmount = normalizedMajor(sourceAmount * commissionPercent / 100, draft.sourceCurrency);
   const payoutAmount = manualPayout > 0
     ? manualPayout

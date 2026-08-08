@@ -92,7 +92,7 @@ import type {
   WorkspaceState
 } from "./src/types";
 import { formatDate, formatDateTime, formatMonthYear } from "./src/utils/date";
-import { calculateQuote, compactAmount, currencies, financialPosition, fixedOrderRateForActor, formatAmount, inputAmount, inputRate, majorFromMinor, reconcileFixedOrderConversion, reconcileOrderConversion } from "./src/utils/money";
+import { calculateQuote, compactAmount, currencies, financialPosition, fixedOrderCommissionForActor, fixedOrderRateForActor, formatAmount, inputAmount, inputRate, majorFromMinor, reconcileFixedOrderConversion, reconcileOrderConversion } from "./src/utils/money";
 import type { OrderConversionField } from "./src/utils/money";
 
 type IconComponent = React.ComponentType<LucideProps>;
@@ -1092,10 +1092,16 @@ function ArchiveScreen({
   const archivePage = useProgressiveLimit(`${session.actorId}:${activeMonth}`, 10);
   const displayedArchives = filteredArchives.slice(0, archivePage.limit);
   const monthOptions = ["", ...months];
-  const archivedReceivables = filteredArchives.flatMap((archive) => (archive.receivables || []).map((receivable) => ({
-    archive,
-    receivable
-  })));
+  const archivedReceivables = filteredArchives.flatMap((archive) => (archive.receivables || [])
+    .filter((receivable) => {
+      const linkedOrder = (archive.orders || []).find((order) =>
+        order.id === receivable.orderId ||
+        order.internalOrderId === receivable.orderId ||
+        order.brokerOrderNumber === receivable.brokerOrderNumber
+      );
+      return !linkedOrder || !orderRecordIsVoided(linkedOrder);
+    })
+    .map((receivable) => ({ archive, receivable })));
   const receivableMonths = Array.from(new Set(archivedReceivables.map(({ archive, receivable }) => archiveMonthKey(receivable.archivedAt || archive.closedAt)).filter(Boolean))).sort().reverse();
 
   useEffect(() => {
@@ -1267,7 +1273,24 @@ function ArchiveScreen({
         const transfers = (archive.transfers || []).slice().sort((a, b) => transactionSort === "Date"
           ? new Date(b.reversedAt || b.paidOutAt || b.approvedAt || b.sentAt || b.createdAt || 0).getTime() - new Date(a.reversedAt || a.paidOutAt || a.approvedAt || a.sentAt || a.createdAt || 0).getTime()
           : referenceCompare(a.id || a.journal || "", b.id || b.journal || ""));
-        const ledger = (archive.ledger || []).slice().sort((a, b) => transactionSort === "Date"
+        const ledger = (archive.ledger || []).filter((line) => {
+          const source = String(line.source || "");
+          const linkedOrder = source.startsWith("ORDER_")
+            ? (archive.orders || []).find((order) =>
+                (line.orderId && (order.id === line.orderId || order.internalOrderId === line.orderId)) ||
+                (line.journal && (order.journal === line.journal || order.voidJournal === line.journal))
+              )
+            : undefined;
+          if (linkedOrder && orderRecordIsVoided(linkedOrder)) return false;
+          const linkedTransfer = source.startsWith("TRANSFER")
+            ? (archive.transfers || []).find((transfer) =>
+                (line.transferId && transfer.id === line.transferId) ||
+                (line.journal && (transfer.journal === line.journal || transfer.reversalJournal === line.journal))
+              )
+            : undefined;
+          const reversed = linkedTransfer?.state === "Reversed" || Boolean(linkedTransfer?.reversalJournal || linkedTransfer?.reversedAt);
+          return !linkedTransfer || !reversed;
+        }).slice().sort((a, b) => transactionSort === "Date"
           ? new Date(b.postedAt || 0).getTime() - new Date(a.postedAt || 0).getTime()
           : referenceCompare(String(a.journal || a.orderId || a.transferId || a.entryId || ""), String(b.journal || b.orderId || b.transferId || b.entryId || "")));
         const detailCount = orders.length + transfers.length + ledger.length;
@@ -1337,13 +1360,24 @@ function ArchiveScreen({
                   </View>;
                 })}
                 {displayedTransfers.map((transfer, transferIndex) => {
-                  const currency = transfer.currency || transfer.sourceCurrency || session.currency;
+                  const sourceCurrency = transfer.sourceCurrency || transfer.currency || session.currency;
+                  const payoutCurrency = transfer.currency || sourceCurrency;
+                  const archiveIsSender = Boolean(
+                    (archive.actorId && transfer.fromActorId === archive.actorId) ||
+                    (archive.actor && transfer.from === archive.actor)
+                  );
+                  const currency = archiveIsSender ? sourceCurrency : payoutCurrency;
+                  const amountMinor = archiveIsSender
+                    ? Number(transfer.sourceAmountMinor || transfer.amountMinor || 0)
+                    : Number(transfer.amountMinor || 0);
+                  const reversed = transfer.state === "Reversed" || Boolean(transfer.reversalJournal || transfer.reversedAt);
                   return (
-                    <View key={`transfer-${statementId}-${transfer.id || transferIndex}`} style={styles.archiveDetailRow}>
+                    <View key={`transfer-${statementId}-${transfer.id || transferIndex}`} style={[styles.archiveDetailRow, reversed && styles.reportVoidRow]}>
                       <Text style={styles.archiveDetailTitle}>Transfer {transfer.id || transferIndex + 1}</Text>
-                      <Text style={styles.archiveDetailMeta}>{transfer.from || "Unknown"} to {transfer.to || "Unknown"}</Text>
-                      <Text style={styles.archiveDetailAmount}>{compactAmount(currency, majorFromMinor(Number(transfer.amountMinor || 0), currency))}</Text>
-                      {transfer.remarks ? <Text style={styles.archiveDetailMeta}>{transfer.remarks}</Text> : null}
+                      {reversed ? <Text style={styles.reportVoidText}>Reversed - Original and reversal net to zero</Text> : null}
+                      <Text style={[styles.archiveDetailMeta, reversed && styles.reportVoidText]}>{transfer.from || "Unknown"} to {transfer.to || "Unknown"}</Text>
+                      <Text style={[styles.archiveDetailAmount, reversed && styles.reportVoidText]}>{compactAmount(currency, majorFromMinor(amountMinor, currency))}</Text>
+                      {transfer.remarks ? <Text style={[styles.archiveDetailMeta, reversed && styles.reportVoidText]}>{transfer.remarks}</Text> : null}
                     </View>
                   );
                 })}
@@ -1416,6 +1450,8 @@ function TransferScreen({
   const sourceCurrency = sourceOptions.includes(draft.sourceCurrency) ? draft.sourceCurrency : sourceOptions[0] || session.currency;
   const fixedRate = fixedOrderRateForActor(actor, draft.payoutCurrency);
   const fixedRateText = fixedRate ? inputRate(fixedRate) : "";
+  const fixedCommission = fixedOrderCommissionForActor(actor);
+  const fixedCommissionText = fixedCommission === null ? "" : String(fixedCommission);
 
   useEffect(() => {
     if (!fixedRate) return;
@@ -1427,6 +1463,13 @@ function TransferScreen({
         : next;
     });
   }, [fixedRate, setDraft]);
+
+  useEffect(() => {
+    if (fixedCommission === null) return;
+    setDraft((current) => current.commissionPercent === fixedCommissionText
+      ? current
+      : { ...current, broker: session.actorName, commissionPercent: fixedCommissionText });
+  }, [fixedCommission, fixedCommissionText, session.actorName, setDraft]);
 
   const setField = <K extends keyof TransferDraft>(key: K, value: TransferDraft[K]) => {
     setDraft((current) => ({ ...current, broker: session.actorName, [key]: value }));
@@ -1492,7 +1535,15 @@ function TransferScreen({
         />
         {fixedRate ? <Text style={styles.fixedRateNote}>This rate is fixed for your account and cannot be changed.</Text> : null}
         <Field label="Total payout" value={draft.payoutAmount} onChangeText={(value) => setConversionField("payoutAmount", value)} keyboardType="decimal-pad" placeholder="Calculated from any other two fields" />
-        <Field label="Commission %" value={draft.commissionPercent} onChangeText={(value) => setField("commissionPercent", value)} keyboardType="decimal-pad" />
+        <Field
+          label={fixedCommission !== null ? "Commission % (fixed by Master)" : "Commission %"}
+          value={fixedCommission !== null ? fixedCommissionText : draft.commissionPercent}
+          onChangeText={(value) => setField("commissionPercent", value)}
+          keyboardType="numeric"
+          editable={fixedCommission === null}
+          style={fixedCommission !== null ? styles.fixedRateInput : undefined}
+        />
+        {fixedCommission !== null ? <Text style={styles.fixedRateNote}>This commission is fixed for your account and cannot be changed.</Text> : null}
         <SelectRow<FundingType> label="Payment type" options={["cash", "credit"]} value={draft.fundingType} onChange={(value) => setDraft((current) => ({ ...current, broker: session.actorName, fundingType: value, creditReminder: value === "credit" ? current.creditReminder : "" }))} />
         {draft.fundingType === "credit" ? <Field label="Credit Reminder" value={draft.creditReminder} onChangeText={(value) => setField("creditReminder", value)} multiline /> : null}
       </Panel>
@@ -1557,7 +1608,7 @@ function ConversionScreen({
       <QuotePanel quote={quote} expanded />
       <Panel title="Conversion Flow" badge={draft.fundingType === "credit" ? "Credit" : "Cash"}>
         <SummaryRow label="Source leg" value={`${compactAmount(quote.sourceCurrency, quote.sourceAmount)} from ${session.actorName}`} />
-        <SummaryRow label="Commission" value={`${compactAmount(quote.sourceCurrency, quote.commissionAmount)} at ${draft.commissionPercent || "0"}%`} />
+        <SummaryRow label={quote.commissionAmount < 0 ? "Master commission liability" : "Commission"} value={`${formatAmount(quote.sourceCurrency, quote.commissionAmount)} at ${draft.commissionPercent || "0"}%`} />
         <SummaryRow label="Collected total" value={compactAmount(quote.sourceCurrency, quote.grossAmount)} strong />
         <SummaryRow label="Rate" value={`1 ${quote.sourceCurrency} = ${quote.rate} ${quote.payoutCurrency}`} />
         <SummaryRow label="Payout leg" value={compactAmount(quote.payoutCurrency, quote.payoutAmount)} strong />
@@ -1633,7 +1684,7 @@ function ConfirmationScreen({
         <SummaryRow label="Account" value={draft.accountNumber || "Not provided"} />
         <SummaryRow label="Funding" value={draft.fundingType === "credit" ? "Credit" : "Cash"} />
         <SummaryRow label="Source amount" value={formatAmount(quote.sourceCurrency, quote.sourceAmount)} />
-        <SummaryRow label="Commission" value={formatAmount(quote.sourceCurrency, quote.commissionAmount)} />
+        <SummaryRow label={quote.commissionAmount < 0 ? "Master commission liability" : "Commission"} value={formatAmount(quote.sourceCurrency, quote.commissionAmount)} />
         <SummaryRow label="Payout amount" value={formatAmount(quote.payoutCurrency, quote.payoutAmount)} strong />
       </Panel>
       {error ? <Text style={styles.errorText}>{error}</Text> : null}
@@ -1661,7 +1712,7 @@ function QuotePanel({ quote, expanded = false }: { quote: ReturnType<typeof calc
           <Text style={styles.quoteValue}>{compactAmount(quote.payoutCurrency, quote.payoutAmount)}</Text>
         </View>
       </View>
-      <SummaryRow label="Commission" value={formatAmount(quote.sourceCurrency, quote.commissionAmount)} />
+      <SummaryRow label={quote.commissionAmount < 0 ? "Master commission liability" : "Commission"} value={formatAmount(quote.sourceCurrency, quote.commissionAmount)} />
       {expanded ? <SummaryRow label="Collected total" value={formatAmount(quote.sourceCurrency, quote.grossAmount)} strong /> : null}
       <SummaryRow label="Rate" value={`${quote.rate} ${quote.payoutCurrency}`} />
     </Panel>

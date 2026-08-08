@@ -101,6 +101,7 @@ export interface ActorRecord {
   specialPayoutSettings?: Partial<Record<Currency, RateSetting>>;
   incomeUsdPayoutSetting?: RateSetting;
   orderFixedRates?: Partial<Record<Currency, { enabled?: boolean; rate?: number | string }>>;
+  orderFixedCommission?: { enabled?: boolean; percent?: number | string };
   orderVisibilityPermissions?: Partial<Record<"sourceCurrency" | "rate" | "commission" | "baseAmount", boolean>>;
   numberingCycle?: number;
 }
@@ -121,6 +122,8 @@ export type OrderState =
   | "Voided"
   | "Cancelled";
 
+export type OrderCommissionLiability = "Broker" | "Master";
+
 export interface OrderRecord {
   id: string;
   internalOrderId?: string;
@@ -139,6 +142,7 @@ export interface OrderRecord {
   sourceAmountMinor: number;
   payoutAmountMinor: number;
   commissionMinor: number;
+  orderCommissionLiability?: OrderCommissionLiability;
   grossMinor: number;
   moneyUnitVersion?: 2;
   rate: number;

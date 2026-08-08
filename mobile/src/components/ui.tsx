@@ -83,21 +83,26 @@ export function Panel({
   title,
   badge,
   badgeTone,
+  headerAction,
   children,
   style
 }: {
   title?: string;
   badge?: string;
   badgeTone?: PillTone;
+  headerAction?: React.ReactNode;
   children: React.ReactNode;
   style?: StyleProp<ViewStyle>;
 }) {
   return (
     <View style={[styles.panel, style]}>
-      {(title || badge) && (
+      {(title || badge || headerAction) && (
         <View style={styles.panelHead}>
           {title ? <Text style={styles.panelTitle}>{title}</Text> : <View />}
-          {badge ? <Pill label={badge} tone={badgeTone} /> : null}
+          <View style={styles.panelHeadActions}>
+            {badge ? <Pill label={badge} tone={badgeTone} /> : null}
+            {headerAction}
+          </View>
         </View>
       )}
       {children}
@@ -317,6 +322,13 @@ export const styles = StyleSheet.create({
     color: colors.ink,
     fontSize: 16,
     fontWeight: "900",
+    flexShrink: 1
+  },
+  panelHeadActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "flex-end",
+    gap: spacing.sm,
     flexShrink: 1
   },
   field: {

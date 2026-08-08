@@ -54,6 +54,16 @@ test("create-order fields and cleared payer terms stay empty", async () => {
   assert.match(mobileScreens, /percentDisplay \? `\$\{percentDisplay\.label\}: \$\{percentDisplay\.percent\}%` : ""/);
   assert.doesNotMatch(mobileScreens, /<SummaryRow label="Commission" value=\{`\$\{order\.commissionPercent/);
 
+  const mobileMasterForwardStart = mobileScreens.indexOf('{isMasterView(session) && order.state === "Pending Forward" ? (');
+  const mobilePayerActionsStart = mobileScreens.indexOf('{isPayer && order.state === "Assigned" ? (', mobileMasterForwardStart);
+  assert.ok(mobileMasterForwardStart >= 0 && mobilePayerActionsStart > mobileMasterForwardStart, "Missing Android Master forwarding controls");
+  const mobileMasterForwardBlock = mobileScreens.slice(mobileMasterForwardStart, mobilePayerActionsStart);
+  assert.match(mobileMasterForwardBlock, /<Field label="Payout divisor"[^\r\n]*placeholder="Optional"/);
+  assert.match(mobileMasterForwardBlock, /<Field label="Payer %"[^\r\n]*placeholder="Optional"/);
+  assert.doesNotMatch(mobileMasterForwardBlock, /payerOptions\.some|Special Agent|Special Broker/, "Payout terms must be available for every paying Actor");
+  assert.doesNotMatch(mobileMasterForwardBlock, /commissionPercent/, "Broker commission must not populate Master payout terms");
+  assert.match(mobileMasterForwardBlock, /assignOrder\(order\.id, selectedAgent\[order\.id\], divider\[order\.id\], percent\[order\.id\]\)/);
+
   for (const field of [
     "forwardedPayoutDivider",
     "forwardedPayoutPercent",

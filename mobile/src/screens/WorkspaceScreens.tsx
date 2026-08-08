@@ -1,4 +1,5 @@
 import * as DocumentPicker from "expo-document-picker";
+import * as Clipboard from "expo-clipboard";
 import {
   RecordingPresets,
   requestRecordingPermissionsAsync,
@@ -18,6 +19,7 @@ import {
   Check,
   ChevronDown,
   ChevronUp,
+  Copy,
   Forward as ForwardIcon,
   Heart,
   Image as ImageIcon,
@@ -59,6 +61,11 @@ import {
   updateIdleTimeout
 } from "../api/client";
 import { Button, Field, Panel, Pill, SelectRow, SummaryRow, type PillTone } from "../components/ui";
+import {
+  consolidatedLedgerDisplayLines,
+  consolidatedMasterBankDisplayEntries,
+  type LedgerDisplayLine,
+} from "../domain/ledgerDisplay";
 import {
   activeActors,
   actionRequiredNoticesFor,
@@ -131,7 +138,9 @@ import type {
   WorkspaceState
 } from "../types";
 import { formatDate, formatDateTime } from "../utils/date";
-import { compactAmount, financialPosition, inputAmount, majorFromMinor, parseAmount, parseDecimalNumber, reconcileOrderConversion } from "../utils/money";
+import { compactAmount, financialPosition, inputAmount, majorFromMinor, normalizedOrderCommissionLiability, parseAmount, parseDecimalNumber, reconcileOrderConversion, signedOrderCommissionMinor } from "../utils/money";
+import { orderDetailsClipboardText, viewerCanCopyOrderDetails } from "../utils/orderCopy";
+import { receivableCollectedMinor, receivableIsVoided, receivableTotalsByCurrency, visibleReceivablesForSession } from "../utils/receivables";
 import type { OrderConversionField } from "../utils/money";
 
 type CommonProps = {
@@ -194,22 +203,49 @@ function orderNumber(order: OrderRecord, session: UserSession): string {
   return order.brokerOrderNumber || order.id;
 }
 
+function CopyOrderDetailsButton({ order, session, viewer }: { order: OrderRecord; session: UserSession; viewer: ActorRecord | undefined }) {
+  if (!viewerCanCopyOrderDetails(order, session, viewer)) return null;
+  const copyDetails = async () => {
+    const value = orderDetailsClipboardText(order, session, viewer);
+    if (!value) return;
+    try {
+      await Clipboard.setStringAsync(value);
+      Alert.alert("Order copied", `${orderNumber(order, session)} details copied.`);
+    } catch {
+      Alert.alert("Copy failed", "Your phone could not copy this order.");
+    }
+  };
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel="Copy order details"
+      accessibilityHint="Copies the visible order details to your clipboard"
+      hitSlop={8}
+      onPress={() => void copyDetails()}
+      style={({ pressed }) => [styles.orderCopyButton, pressed && styles.orderCopyButtonPressed]}
+    >
+      <Copy size={16} color={colors.accent} />
+    </Pressable>
+  );
+}
+
 type OrderPercentDisplay = {
-  label: "Order commission" | "Payer %";
+  label: "Order commission" | "Master-liable commission" | "Payer %";
   percent: number;
 };
 
-function orderPercentValue(value: unknown): number | null {
+function orderPercentValue(value: unknown, allowNegative = false): number | null {
   if (value === null || value === undefined || String(value).trim() === "") return null;
   const percent = Number(value);
-  return Number.isFinite(percent) && percent >= 0 ? percent : null;
+  return Number.isFinite(percent) && (allowNegative || percent >= 0) ? percent : null;
 }
 
 function orderPercentDisplayForViewer(order: OrderRecord, session: UserSession): OrderPercentDisplay | null {
   const isBroker = Boolean(session.actorId && order.brokerActorId === session.actorId) || order.broker === session.actorName;
   if (isMasterView(session) || isBroker) {
-    const percent = orderPercentValue(order.commissionPercent);
-    return percent === null ? null : { label: "Order commission", percent };
+    const percent = orderPercentValue(order.commissionPercent, true);
+    const label = normalizedOrderCommissionLiability(order) === "Master" ? "Master-liable commission" : "Order commission";
+    return percent === null ? null : { label, percent };
   }
   const isPayer = Boolean(session.actorId && order.agentActorId === session.actorId) || order.agent === session.actorName;
   if (!isPayer || !actorCanReceivePayouts(session.actorRole) || !Object.prototype.hasOwnProperty.call(order, "forwardedPayoutPercent")) return null;
@@ -559,6 +595,7 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
   const displayedOrders = orders.slice(0, orderPage.limit);
   const invalidDate = [dateFrom, dateTo].some((value) => value.trim() && manualActorOrderDate(value) === null);
   const actorSortingAvailable = session.role !== "Owner";
+  const viewerActor = actorForSession(session, state);
   const actorSortingActive = actorSortingAvailable && (statusFilter !== "Default" || sortMode !== "Default" || Boolean(dateFrom.trim() || dateTo.trim()));
   const returnReasonKey = (orderId: string) => `${session.workspaceId}:${session.actorId || session.actorName}:${orderId}`;
   const returnReasonValue = (orderId: string) => {
@@ -744,7 +781,13 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
         const payerOptions = activeActors(state).filter((actor) => actor.name !== order.broker && actorCanPayoutCurrency(actor, order.payoutCurrency));
         const stateLabel = isMasterView(session) && order.state === "Assigned" ? `Assigned to ${order.agent}` : order.state;
         return (
-          <Panel key={order.id} title={orderNumber(order, session)} badge={stateLabel} badgeTone={orderStatusTone(order.state)}>
+          <Panel
+            key={order.id}
+            title={orderNumber(order, session)}
+            badge={stateLabel}
+            badgeTone={orderStatusTone(order.state)}
+            headerAction={<CopyOrderDetailsButton order={order} session={session} viewer={viewerActor} />}
+          >
             <Text style={styles.amountLine}>
               {compactAmount(order.sourceCurrency, majorFromMinor(order.sourceAmountMinor, order.sourceCurrency))} to {compactAmount(order.payoutCurrency, majorFromMinor(order.payoutAmountMinor, order.payoutCurrency))}
             </Text>
@@ -785,12 +828,10 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
                     </Pressable>
                   ))}
                 </View>
-                {payerOptions.some((actor) => actor.id === selectedAgent[order.id] && ["Special Agent", "Special Broker"].includes(actor.role)) ? (
-                  <View style={styles.twoColumns}>
-                    <Field label="Payout divisor" value={divider[order.id] || ""} onChangeText={(value) => setDivider((current) => ({ ...current, [order.id]: value }))} keyboardType="decimal-pad" />
-                    <Field label="Percent" value={percent[order.id] || ""} onChangeText={(value) => setPercent((current) => ({ ...current, [order.id]: value }))} keyboardType="decimal-pad" />
-                  </View>
-                ) : null}
+                <View style={styles.twoColumns}>
+                  <Field label="Payout divisor" value={divider[order.id] || ""} onChangeText={(value) => setDivider((current) => ({ ...current, [order.id]: value }))} keyboardType="decimal-pad" placeholder="Optional" />
+                  <Field label="Payer %" value={percent[order.id] || ""} onChangeText={(value) => setPercent((current) => ({ ...current, [order.id]: value }))} keyboardType="decimal-pad" placeholder="Optional" />
+                </View>
                 <Field
                   label="Reason for returning"
                   value={returnReasonValue(order.id)}
@@ -876,6 +917,7 @@ export function PendingCancelledScreen({ session, state, offline, onState, onNav
     .sort((a, b) => new Date(pendingCancelledDate(b)).getTime() - new Date(pendingCancelledDate(a)).getTime());
   const orderPage = useProgressiveLimit(`${session.actorId}:${session.actorName}`, 20);
   const displayedOrders = orders.slice(0, orderPage.limit);
+  const viewerActor = actorForSession(session, state);
 
   const sendReminder = async (order: OrderRecord) => {
     if (offline) return Alert.alert("Offline", "Reconnect before sending an order reminder.");
@@ -902,7 +944,13 @@ export function PendingCancelledScreen({ session, state, offline, onState, onNav
         const payoutActor = payer?.name || (!["Unassigned", "Cancelled", "Forwarded"].includes(order.agent) ? order.agent : "Unassigned");
         const stateLabel = order.state === "Assigned" && payoutActor !== "Unassigned" ? `Assigned to ${payoutActor}` : order.state;
         return (
-          <Panel key={order.id} title={orderNumber(order, session)} badge={stateLabel} badgeTone={orderStatusTone(order.state)}>
+          <Panel
+            key={order.id}
+            title={orderNumber(order, session)}
+            badge={stateLabel}
+            badgeTone={orderStatusTone(order.state)}
+            headerAction={<CopyOrderDetailsButton order={order} session={session} viewer={viewerActor} />}
+          >
             <SummaryRow label="Broker" value={order.broker} />
             <SummaryRow label="Payout actor" value={payoutActor} />
             <SummaryRow label="Amount" value={`${compactAmount(order.sourceCurrency, majorFromMinor(order.sourceAmountMinor, order.sourceCurrency))} to ${compactAmount(order.payoutCurrency, majorFromMinor(order.payoutAmountMinor, order.payoutCurrency))}`} />
@@ -1441,14 +1489,55 @@ export function SearchScreen({ session, state, onNavigate }: CommonProps) {
 export function ReceivablesScreen({ session, state, offline, onState }: CommonProps) {
   const [amounts, setAmounts] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState("");
-  const records = state.receivables.filter((item) => !item.archivedAt && (isMasterView(session) || item.borrower === session.actorName));
-  const totals = supportedCurrencies.map((currency) => ({ currency, minor: records.filter((item) => item.currency === currency && !item.voided).reduce((sum, item) => sum + receivableBalance(item), 0) })).filter((item) => item.minor);
+  const records = visibleReceivablesForSession(state.receivables, session);
+  const totals = receivableTotalsByCurrency(records);
   const collect = async (id: string) => {
     if (offline) return Alert.alert("Offline", "Reconnect before recording a collection.");
     setBusy(id);
     try { onState(await collectReceivable(id, amounts[id] || "", session.actorName)); setAmounts((current) => ({ ...current, [id]: "" })); } catch (error) { Alert.alert("Collection", errorMessage(error)); } finally { setBusy(""); }
   };
-  return <View style={styles.screen}><ScreenTitle title="Receivables" subtitle="Credit orders and loan collections" /><OfflineGuard offline={offline} />{records.map((item) => { const balance = receivableBalance(item); const showReminder = !isMasterView(session) && item.borrower === session.actorName && Boolean(item.creditReminder); return <Panel key={item.id} title={item.brokerOrderNumber || item.orderId} badge={item.voided ? "Voided" : balance ? "Open" : "Collected"}><SummaryRow label="Borrower" value={item.borrower} />{item.senderName ? <SummaryRow label="Sender" value={item.senderName} /> : null}{item.receiverName ? <SummaryRow label="Receiver" value={item.receiverName} /> : null}{item.receiverCity ? <SummaryRow label="Receiver city" value={item.receiverCity} /> : null}{showReminder ? <SummaryRow label="Credit Reminder" value={item.creditReminder || ""} /> : null}<SummaryRow label="Principal" value={compactAmount(item.currency, majorFromMinor(item.principalMinor, item.currency))} /><SummaryRow label="Collected" value={compactAmount(item.currency, majorFromMinor(item.principalMinor - balance, item.currency))} /><SummaryRow label="Balance" value={compactAmount(item.currency, majorFromMinor(balance, item.currency))} strong />{balance > 0 && !item.voided ? <View style={styles.actionBlock}><Field label="Collection amount" value={amounts[item.id] || ""} onChangeText={(value) => setAmounts((current) => ({ ...current, [item.id]: value }))} keyboardType="decimal-pad" /><Button label="Record collection" loading={busy === item.id} disabled={offline} onPress={() => collect(item.id)} /></View> : null}</Panel>; })}<Panel title="Outstanding totals">{totals.length ? totals.map((item) => <SummaryRow key={item.currency} label={item.currency} value={compactAmount(item.currency, majorFromMinor(item.minor, item.currency))} strong />) : <Text style={styles.muted}>No outstanding receivables.</Text>}</Panel></View>;
+  return (
+    <View style={styles.screen}>
+      <ScreenTitle title="Receivables" subtitle="Credit orders and loan collections" />
+      <OfflineGuard offline={offline} />
+      {records.length ? (
+        <Panel title="Receivables totals" badge={String(totals.length)}>
+          {totals.map((total) => (
+            <View key={total.currency} style={styles.receivableTotalGroup}>
+              <Text style={styles.sectionLabel}>Total {total.currency}</Text>
+              <SummaryRow label="Principal" value={compactAmount(total.currency, majorFromMinor(total.principalMinor, total.currency))} strong />
+              <SummaryRow label="Collected" value={compactAmount(total.currency, majorFromMinor(total.collectedMinor, total.currency))} strong />
+              <SummaryRow label="Balance" value={compactAmount(total.currency, majorFromMinor(total.balanceMinor, total.currency))} strong />
+            </View>
+          ))}
+        </Panel>
+      ) : null}
+      {records.length ? records.map((item) => {
+        const balance = receivableBalance(item);
+        const collected = receivableCollectedMinor(item);
+        const voided = receivableIsVoided(item);
+        const showReminder = !isMasterView(session) && (item.borrowerActorId === session.actorId || item.borrower === session.actorName) && Boolean(item.creditReminder);
+        return (
+          <Panel key={item.id} title={item.brokerOrderNumber || item.orderId} badge={voided ? "Voided" : balance ? "Open" : "Collected"}>
+            <SummaryRow label="Borrower" value={item.borrower} />
+            {item.senderName ? <SummaryRow label="Sender" value={item.senderName} /> : null}
+            {item.receiverName ? <SummaryRow label="Receiver" value={item.receiverName} /> : null}
+            {item.receiverCity ? <SummaryRow label="Receiver city" value={item.receiverCity} /> : null}
+            {showReminder ? <SummaryRow label="Credit Reminder" value={item.creditReminder || ""} /> : null}
+            <SummaryRow label="Principal" value={compactAmount(item.currency, majorFromMinor(item.principalMinor, item.currency))} />
+            <SummaryRow label="Collected" value={compactAmount(item.currency, majorFromMinor(collected, item.currency))} />
+            <SummaryRow label="Balance" value={compactAmount(item.currency, majorFromMinor(balance, item.currency))} strong />
+            {balance > 0 && !voided ? (
+              <View style={styles.actionBlock}>
+                <Field label="Collection amount" value={amounts[item.id] || ""} onChangeText={(value) => setAmounts((current) => ({ ...current, [item.id]: value }))} keyboardType="decimal-pad" />
+                <Button label="Record collection" loading={busy === item.id} disabled={offline} onPress={() => collect(item.id)} />
+              </View>
+            ) : null}
+          </Panel>
+        );
+      }) : <Panel><Text style={styles.muted}>No credit receivables yet.</Text></Panel>}
+    </View>
+  );
 }
 
 const likeReaction = "\uD83D\uDC4D";
@@ -2011,6 +2100,8 @@ export function ChatScreen({ session, state, offline, onState, onRefresh, onScro
 }
 
 function ledgerDetailsForDisplay(state: WorkspaceState, line: WorkspaceState["ledger"][number]): string {
+  const displayDetails = (line as LedgerDisplayLine).displayDetails;
+  if (displayDetails) return displayDetails;
   if (String(line.source || "").toUpperCase() !== "ORDER_PAYMENT") return line.details || line.source || "";
   const order = state.orders.find((item) =>
     (line.orderId && item.id === line.orderId) ||
@@ -2049,8 +2140,14 @@ export function LedgerScreen({ session, state, onState }: CommonProps) {
         ? new Date(b.postedAt || 0).getTime() - new Date(a.postedAt || 0).getTime()
         : referenceForLine(a).localeCompare(referenceForLine(b), undefined, { numeric: true, sensitivity: "base" })),
     [actorName, selected, session, state, transactionSort]);
+  const displayLines = useMemo(() => consolidatedLedgerDisplayLines(state, lines)
+      .slice()
+      .sort((a, b) => transactionSort === "Date"
+        ? new Date(b.postedAt || 0).getTime() - new Date(a.postedAt || 0).getTime()
+        : referenceForLine(a).localeCompare(referenceForLine(b), undefined, { numeric: true, sensitivity: "base" })),
+    [actorName, lines, state, transactionSort]);
   const ledgerPage = useProgressiveLimit(`${actorName}:${transactionSort}`, 30);
-  const displayedLines = lines.slice(0, ledgerPage.limit);
+  const displayedLines = displayLines.slice(0, ledgerPage.limit);
   const balanceLines = useMemo(() => calculableLedgerLines(state, lines), [lines, state]);
   const balances = useMemo(() => supportedCurrencies.map((currency) => ({
     currency,
@@ -2071,10 +2168,11 @@ export function LedgerScreen({ session, state, onState }: CommonProps) {
     () => bankEntries.filter((entry) => entry.postedAt.slice(0, 7) === selectedBankMonth),
     [bankEntries, selectedBankMonth]
   );
+  const bankDisplayRows = useMemo(() => consolidatedMasterBankDisplayEntries(bankRows), [bankRows]);
   const incomePage = useProgressiveLimit(`${actorName}:income`, 20);
   const displayedIncomeOrders = incomeOrders.slice(0, incomePage.limit);
   const bankPage = useProgressiveLimit(`${selectedBankMonth}:bank`, 30);
-  const displayedBankRows = bankRows.slice().reverse().slice(0, bankPage.limit);
+  const displayedBankRows = bankDisplayRows.slice().reverse().slice(0, bankPage.limit);
   const bankBalances = useMemo(() => supportedCurrencies.map((currency) => ({
     currency,
     minor: bankEntries.filter((entry) => entry.currency === currency).at(-1)?.runningMinor || 0
@@ -2106,14 +2204,18 @@ export function LedgerScreen({ session, state, onState }: CommonProps) {
     const statement = [
       `Master Bank Account - ${selectedBankMonth}`,
       line(["Date", "Type", "Reference", "Details", "Currency", "Money In", "Money Out", "Running Balance"]),
-      ...bankRows.map((entry) => line([
+      ...bankDisplayRows.map((entry) => line([
         formatDateTime(entry.postedAt),
         entry.type,
         entry.reference || entry.id,
         entry.details,
         entry.currency,
-        entry.direction === "Credit" ? majorFromMinor(entry.amountMinor, entry.currency).toFixed(2) : "",
-        entry.direction === "Debit" ? majorFromMinor(entry.amountMinor, entry.currency).toFixed(2) : "",
+        entry.displayReversed || entry.direction === "Credit"
+          ? majorFromMinor(entry.displayReversed ? Number(entry.moneyInMinor || 0) : entry.amountMinor, entry.currency).toFixed(2)
+          : "",
+        entry.displayReversed || entry.direction === "Debit"
+          ? majorFromMinor(entry.displayReversed ? Number(entry.moneyOutMinor || 0) : entry.amountMinor, entry.currency).toFixed(2)
+          : "",
         majorFromMinor(entry.runningMinor, entry.currency).toFixed(2)
       ]))
     ].join("\n");
@@ -2138,29 +2240,45 @@ export function LedgerScreen({ session, state, onState }: CommonProps) {
         <View style={styles.ledgerTable}>
           <View style={[styles.ledgerRow, styles.ledgerHead]}><Text style={styles.colDate}>Date</Text><Text style={styles.colRef}>Journal / No.</Text><Text style={styles.colDirection}>Type</Text><Text style={styles.colAmount}>Amount</Text><Text style={styles.colDetails}>Details</Text></View>
           {displayedLines.map((line, index) => {
+            const displayState = line.displayState;
             const voided = ledgerLineIsForVoidedOrder(state, line);
-            const signedMinor = line.direction === "Debit" ? Number(line.amountMinor || 0) : -Number(line.amountMinor || 0);
-            const position = financialPosition(line.currency, signedMinor, masterFinancialView);
+            const highlighted = Boolean(displayState) || voided;
+            const displayAmounts = line.displayAmounts?.length
+              ? line.displayAmounts
+              : [{
+                  currency: line.currency,
+                  signedMinor: line.direction === "Debit" ? Number(line.amountMinor || 0) : -Number(line.amountMinor || 0),
+                }];
+            const positions = displayAmounts.map((amount) => financialPosition(amount.currency, amount.signedMinor, masterFinancialView));
+            const position = positions[0];
             const financialStyle = position.tone === "good"
               ? styles.ledgerGood
               : position.tone === "danger"
                 ? styles.ledgerDanger
                 : undefined;
-            const details = [voided ? "VOIDED - Excluded from all calculations" : "", ledgerDetailsForDisplay(state, line)].filter(Boolean).join(" - ");
+            const details = [!displayState && voided ? "VOIDED - Excluded from all calculations" : "", ledgerDetailsForDisplay(state, line)].filter(Boolean).join(" - ");
+            const originalDirections = Array.from(new Set(
+              displayAmounts
+                .filter((amount) => amount.signedMinor !== 0)
+                .map((amount) => amount.signedMinor > 0 ? "Debit" : "Credit")
+            ));
+            const directionLabel = displayState
+              ? `${displayState} / ${originalDirections.length === 1 ? originalDirections[0] : "Mixed"}`
+              : line.direction;
             return (
-              <View key={`${line.journal}-${index}`} style={[styles.ledgerRow, voided && styles.ledgerVoidRow]}>
-                <Text style={[styles.colDate, voided && styles.ledgerVoidText]}>{formatDate(line.postedAt)}</Text>
-                <Text style={[styles.colRef, voided && styles.ledgerVoidText]}>{referenceForLine(line) || "-"}</Text>
-                <Text style={[styles.colDirection, financialStyle, voided && styles.ledgerVoidText]}>{line.direction}</Text>
-                <Text style={[styles.colAmount, financialStyle, voided && styles.ledgerVoidText]}>{position.amount}</Text>
-                <Text style={[styles.colDetails, voided && styles.ledgerVoidText]} numberOfLines={3}>{details}</Text>
+              <View key={`${line.journal}-${index}`} style={[styles.ledgerRow, highlighted && styles.ledgerVoidRow]}>
+                <Text style={[styles.colDate, highlighted && styles.ledgerVoidText]}>{formatDate(line.postedAt)}</Text>
+                <Text style={[styles.colRef, highlighted && styles.ledgerVoidText]}>{referenceForLine(line) || "-"}</Text>
+                <Text style={[styles.colDirection, financialStyle, highlighted && styles.ledgerVoidText]}>{directionLabel}</Text>
+                <Text style={[styles.colAmount, financialStyle, highlighted && styles.ledgerVoidText]}>{positions.map((item) => item.amount).join(" / ")}</Text>
+                <Text style={[styles.colDetails, highlighted && styles.ledgerVoidText]} numberOfLines={3}>{details}</Text>
               </View>
             );
           })}
         </View>
       </ScrollView>
-      {displayedLines.length < lines.length ? (
-        <Button label={`Load 30 more ledger entries (${lines.length - displayedLines.length} remaining)`} variant="secondary" onPress={ledgerPage.showMore} />
+      {displayedLines.length < displayLines.length ? (
+        <Button label={`Load 30 more ledger entries (${displayLines.length - displayedLines.length} remaining)`} variant="secondary" onPress={ledgerPage.showMore} />
       ) : null}
       {isMasterView(session) ? (
         <Panel title="Income statement" badge="USD total">
@@ -2172,8 +2290,8 @@ export function LedgerScreen({ session, state, onState }: CommonProps) {
             {displayedIncomeOrders.map((order) => {
               const collectedCurrency = order.incomeCollectedCurrency || order.sourceCurrency || "USD";
               const collectedMinor = Number(
-                order.incomeCollectedOriginalMinor ||
-                (Number(order.sourceAmountMinor || 0) + Number(order.commissionMinor || 0))
+                order.incomeCollectedOriginalMinor ??
+                (Number(order.sourceAmountMinor || 0) + signedOrderCommissionMinor(order))
               );
               return (
                 <View key={`income-${order.id}`} style={styles.recordRow}>
@@ -2218,19 +2336,21 @@ export function LedgerScreen({ session, state, onState }: CommonProps) {
               <Button label="Share monthly statement" icon={<Share2 size={17} color={colors.ink} />} variant="secondary" disabled={!bankRows.length} onPress={shareBankStatement} />
               {bankRows.length ? displayedBankRows.map((entry) => {
                 const moneyIn = entry.direction === "Credit";
-                return <View key={entry.id} style={styles.bankStatementRow}>
-                  <View style={styles.bankStatementHead}><Text style={styles.primaryLine}>{entry.type}</Text><Text style={styles.muted}>{formatDateTime(entry.postedAt)}</Text></View>
-                  <Text style={styles.bankReference}>{entry.reference || entry.id}</Text>
-                  {entry.details ? <Text style={styles.muted}>{entry.details}</Text> : null}
+                const moneyInMinor = entry.displayReversed ? Number(entry.moneyInMinor || 0) : moneyIn ? entry.amountMinor : 0;
+                const moneyOutMinor = entry.displayReversed ? Number(entry.moneyOutMinor || 0) : !moneyIn ? entry.amountMinor : 0;
+                return <View key={entry.id} style={[styles.bankStatementRow, entry.displayReversed && styles.ledgerVoidRow]}>
+                  <View style={styles.bankStatementHead}><Text style={[styles.primaryLine, entry.displayReversed && styles.ledgerVoidText]}>{entry.type}</Text><Text style={[styles.muted, entry.displayReversed && styles.ledgerVoidText]}>{formatDateTime(entry.postedAt)}</Text></View>
+                  <Text style={[styles.bankReference, entry.displayReversed && styles.ledgerVoidText]}>{entry.reference || entry.id}</Text>
+                  {entry.details ? <Text style={[styles.muted, entry.displayReversed && styles.ledgerVoidText]}>{entry.details}</Text> : null}
                   <View style={styles.bankAmountGrid}>
-                    <View style={styles.bankAmountCell}><Text style={styles.bankAmountLabel}>Money In</Text><Text style={[styles.bankAmountValue, styles.bankMoneyIn]}>{moneyIn ? compactAmount(entry.currency, majorFromMinor(entry.amountMinor, entry.currency)) : "-"}</Text></View>
-                    <View style={styles.bankAmountCell}><Text style={styles.bankAmountLabel}>Money Out</Text><Text style={[styles.bankAmountValue, styles.bankMoneyOut]}>{!moneyIn ? compactAmount(entry.currency, majorFromMinor(entry.amountMinor, entry.currency)) : "-"}</Text></View>
-                    <View style={styles.bankAmountCell}><Text style={styles.bankAmountLabel}>Running</Text><Text style={[styles.bankAmountValue, entry.runningMinor >= 0 ? styles.bankMoneyIn : styles.bankMoneyOut]}>{signedBankAmount(entry.currency, entry.runningMinor)}</Text></View>
+                    <View style={styles.bankAmountCell}><Text style={[styles.bankAmountLabel, entry.displayReversed && styles.ledgerVoidText]}>Money In</Text><Text style={[styles.bankAmountValue, styles.bankMoneyIn, entry.displayReversed && styles.ledgerVoidText]}>{moneyInMinor ? compactAmount(entry.currency, majorFromMinor(moneyInMinor, entry.currency)) : "-"}</Text></View>
+                    <View style={styles.bankAmountCell}><Text style={[styles.bankAmountLabel, entry.displayReversed && styles.ledgerVoidText]}>Money Out</Text><Text style={[styles.bankAmountValue, styles.bankMoneyOut, entry.displayReversed && styles.ledgerVoidText]}>{moneyOutMinor ? compactAmount(entry.currency, majorFromMinor(moneyOutMinor, entry.currency)) : "-"}</Text></View>
+                    <View style={styles.bankAmountCell}><Text style={[styles.bankAmountLabel, entry.displayReversed && styles.ledgerVoidText]}>Running</Text><Text style={[styles.bankAmountValue, entry.runningMinor >= 0 ? styles.bankMoneyIn : styles.bankMoneyOut, entry.displayReversed && styles.ledgerVoidText]}>{signedBankAmount(entry.currency, entry.runningMinor)}</Text></View>
                   </View>
                 </View>;
               }) : <Text style={styles.muted}>No Master Bank Account transactions for this month.</Text>}
-              {displayedBankRows.length < bankRows.length ? (
-                <Button label={`Load 30 more bank entries (${bankRows.length - displayedBankRows.length} remaining)`} variant="secondary" onPress={bankPage.showMore} />
+              {displayedBankRows.length < bankDisplayRows.length ? (
+                <Button label={`Load 30 more bank entries (${bankDisplayRows.length - displayedBankRows.length} remaining)`} variant="secondary" onPress={bankPage.showMore} />
               ) : null}
               {bankPeriodTotals.length ? <View style={styles.bankPeriodTotals}>{bankPeriodTotals.map((item) => <View key={`bank-total-${item.currency}`} style={styles.bankPeriodRow}><Text style={styles.bankBalanceCurrency}>{item.currency}</Text><Text style={styles.bankMoneyIn}>In {compactAmount(item.currency, majorFromMinor(item.moneyIn, item.currency))}</Text><Text style={styles.bankMoneyOut}>Out {compactAmount(item.currency, majorFromMinor(item.moneyOut, item.currency))}</Text><Text style={item.net >= 0 ? styles.bankMoneyIn : styles.bankMoneyOut}>Net {signedBankAmount(item.currency, item.net)}</Text></View>)}</View> : null}
             </View>
@@ -2325,7 +2445,13 @@ export function ProfilesScreen({ session, state }: CommonProps) {
               ? `Assigned to ${assignedActor}`
               : order.state;
             return (
-              <Panel key={order.id} title={orderNumber(order, displaySession)} badge={stateLabel} badgeTone={orderStatusTone(order.state)}>
+              <Panel
+                key={order.id}
+                title={orderNumber(order, displaySession)}
+                badge={stateLabel}
+                badgeTone={orderStatusTone(order.state)}
+                headerAction={<CopyOrderDetailsButton order={order} session={displaySession} viewer={selectedProfile} />}
+              >
                 <SummaryRow label="Ordering broker" value={order.broker || "Unknown"} />
                 <SummaryRow label="Paying Actor" value={assignedActor} />
                 <SummaryRow label="Amount" value={`${compactAmount(order.sourceCurrency, majorFromMinor(order.sourceAmountMinor, order.sourceCurrency))} to ${compactAmount(order.payoutCurrency, majorFromMinor(order.payoutAmountMinor, order.payoutCurrency))}`} strong />
@@ -2379,6 +2505,12 @@ export function SettingsScreen({ session, state, offline, onState, onSessionTime
     percent: String(state.masterRateDivisorSettings?.[currency]?.percent || "")
   }])) as Record<Currency, { enabled: boolean; divider: string; percent: string }>);
   const usdPayoutActors = activeActors(state).filter((actor) => actor.role === "Agent" && actor.currency === "USD");
+  const fixedCommissionActors = activeActors(state).filter((actor) => ["Broker", "Special Broker"].includes(actor.role));
+  const [fixedCommissionDrafts, setFixedCommissionDrafts] = useState<Record<string, { enabled: boolean; percent: string }>>(() => Object.fromEntries(fixedCommissionActors.map((actor) => [actor.id, {
+    enabled: actor.orderFixedCommission?.enabled === true,
+    percent: String(actor.orderFixedCommission?.percent ?? "")
+  }])));
+  const dirtyFixedCommissionActors = useRef(new Set<string>());
   const [usdAgentRatesExpanded, setUsdAgentRatesExpanded] = useState(false);
   const [usdAgentRates, setUsdAgentRates] = useState<Record<string, { divider: string; percent: string }>>(() => Object.fromEntries(usdPayoutActors.map((actor) => [actor.id, {
     divider: String(actor.incomeUsdPayoutSetting?.divider || 1),
@@ -2391,6 +2523,15 @@ export function SettingsScreen({ session, state, offline, onState, onSessionTime
   const selectedResetActorName = resettableActors.some((actor) => actor.name === resetActorName) ? resetActorName : resettableActors[0]?.name || "";
   const [storageStatus, setStorageStatus] = useState<{ configured: boolean; storedFiles: number; pendingFiles: number; legacyAttachments: number } | null>(null);
   const master = isMasterView(session);
+  useEffect(() => {
+    setFixedCommissionDrafts((current) => Object.fromEntries(fixedCommissionActors.map((actor) => {
+      if (dirtyFixedCommissionActors.current.has(actor.id) && current[actor.id]) return [actor.id, current[actor.id]];
+      return [actor.id, {
+        enabled: actor.orderFixedCommission?.enabled === true,
+        percent: String(actor.orderFixedCommission?.percent ?? "")
+      }];
+    })));
+  }, [state.actors]);
   const saveTimeout = async () => {
     if (offline) return Alert.alert("Offline", "Reconnect before changing the automatic logout time.");
     const selectedIndex = timeoutOptions.indexOf(timeoutLabel);
@@ -2450,6 +2591,34 @@ export function SettingsScreen({ session, state, offline, onState, onSessionTime
   };
   const saveStatementRate = async (currency: Currency) => { if (offline) return Alert.alert("Offline", "Reconnect before saving rates."); setBusy(`rate-${currency}`); const draft = statementRates[currency]; try { onState(await updateMasterRateSetting(currency, { enabled: draft.enabled, divider: Number(draft.divider), percent: Number(draft.percent) })); } catch (error) { Alert.alert("Income statement rate", errorMessage(error)); } finally { setBusy(""); } };
   const saveUsdAgentRate = async (actorId: string) => { if (offline) return Alert.alert("Offline", "Reconnect before saving rates."); setBusy(`usd-agent-rate-${actorId}`); const draft = usdAgentRates[actorId] || { divider: "1", percent: "0" }; try { onState(await updateUsdAgentIncomeRate(actorId, { divider: Number(draft.divider), percent: Number(draft.percent) })); } catch (error) { Alert.alert("USD Agent payout rate", errorMessage(error)); } finally { setBusy(""); } };
+  const saveFixedCommission = async (actor: ActorRecord) => {
+    if (offline) return Alert.alert("Offline", "Reconnect before saving the fixed commission.");
+    const draft = fixedCommissionDrafts[actor.id] || {
+      enabled: actor.orderFixedCommission?.enabled === true,
+      percent: String(actor.orderFixedCommission?.percent ?? "")
+    };
+    const rawPercent = draft.percent.trim();
+    const percent = parseDecimalNumber(rawPercent);
+    if (!rawPercent || !Number.isFinite(percent)) return Alert.alert("Fixed commission", "Enter a valid commission percentage. Zero and negative percentages are allowed.");
+    setBusy(`fixed-commission-${actor.id}`);
+    try {
+      const nextState = await updateActorOrderSettings(actor.id, { orderFixedCommission: { enabled: draft.enabled, percent } });
+      dirtyFixedCommissionActors.current.delete(actor.id);
+      const savedActor = nextState.actors.find((item) => item.id === actor.id);
+      setFixedCommissionDrafts((current) => ({
+        ...current,
+        [actor.id]: {
+          enabled: savedActor?.orderFixedCommission?.enabled === true,
+          percent: String(savedActor?.orderFixedCommission?.percent ?? "")
+        }
+      }));
+      onState(nextState);
+    } catch (error) {
+      Alert.alert("Fixed commission", errorMessage(error));
+    } finally {
+      setBusy("");
+    }
+  };
   const updateActor = async (actorId: string, input: Parameters<typeof updateActorOrderSettings>[1]) => { if (offline) return Alert.alert("Offline", "Reconnect before changing permissions."); setBusy(actorId); try { onState(await updateActorOrderSettings(actorId, input)); } catch (error) { Alert.alert("Permissions", errorMessage(error)); } finally { setBusy(""); } };
   const checkFileStorage = async () => {
     if (offline) return Alert.alert("Offline", "Reconnect before checking private file storage.");
@@ -2566,6 +2735,45 @@ export function SettingsScreen({ session, state, offline, onState, onSessionTime
               );
             }) : <Text style={styles.muted}>No active USD Agents.</Text>
           ) : null}
+        </Panel>
+        <Panel title="Fixed order commission" badge="Brokers">
+          <Text style={styles.muted}>Positive commission is liable to the Broker. Negative commission is liable to Master. A fixed zero keeps commission at 0%.</Text>
+          {fixedCommissionActors.length ? fixedCommissionActors.map((actor) => {
+            const draft = fixedCommissionDrafts[actor.id] || {
+              enabled: actor.orderFixedCommission?.enabled === true,
+              percent: String(actor.orderFixedCommission?.percent ?? "")
+            };
+            return (
+              <View key={`fixed-commission-${actor.id}`} style={styles.permissionRow}>
+                <Text style={styles.primaryLine}>{actor.name} - {actor.role}</Text>
+                <Field
+                  label="Commission %"
+                  value={draft.percent}
+                  onChangeText={(value) => {
+                    dirtyFixedCommissionActors.current.add(actor.id);
+                    setFixedCommissionDrafts((current) => ({ ...current, [actor.id]: { ...draft, percent: value } }));
+                  }}
+                  keyboardType="numeric"
+                />
+                <ToggleChoice
+                  label="Fix commission for this Actor"
+                  checked={draft.enabled}
+                  disabled={offline || busy === `fixed-commission-${actor.id}`}
+                  onPress={() => {
+                    dirtyFixedCommissionActors.current.add(actor.id);
+                    setFixedCommissionDrafts((current) => ({ ...current, [actor.id]: { ...draft, enabled: !draft.enabled } }));
+                  }}
+                />
+                <Button
+                  label={`Save ${actor.name}`}
+                  variant="secondary"
+                  loading={busy === `fixed-commission-${actor.id}`}
+                  disabled={offline}
+                  onPress={() => saveFixedCommission(actor)}
+                />
+              </View>
+            );
+          }) : <Text style={styles.muted}>No Brokers or Special Brokers available.</Text>}
         </Panel>
         <Panel title="Actor permissions" badge="Orders and transfers">
           {activeActors(state).filter((actor) => actor.role !== "Master").map((actor) => {
@@ -2834,6 +3042,8 @@ const styles = StyleSheet.create({
   versionText: { color: colors.muted, fontSize: 10, textAlign: "center", marginTop: spacing.sm, marginBottom: spacing.sm },
   primaryLine: { color: colors.ink, fontWeight: "900", flexShrink: 1 },
   amountLine: { color: colors.accent, fontSize: 17, fontWeight: "900" },
+  orderCopyButton: { width: 30, height: 30, borderRadius: radius.sm, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.panel, alignItems: "center", justifyContent: "center" },
+  orderCopyButtonPressed: { opacity: 0.65, backgroundColor: colors.accentSoft },
   returnReasonBox: { gap: spacing.xs, borderWidth: 1, borderColor: colors.returned, borderRadius: radius.md, backgroundColor: colors.returnedSoft, padding: spacing.md },
   returnReasonLabel: { color: colors.returned, fontSize: 12, fontWeight: "900" },
   returnReasonText: { color: colors.ink, lineHeight: 20 },
@@ -2841,6 +3051,7 @@ const styles = StyleSheet.create({
   showMore: { minHeight: 38, borderTopWidth: 1, borderTopColor: colors.line, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   linkText: { color: colors.accent, fontWeight: "900" },
   detailBlock: { gap: 0 },
+  receivableTotalGroup: { gap: spacing.xs, paddingBottom: spacing.sm, borderBottomWidth: 1, borderBottomColor: colors.line },
   actionBlock: { gap: spacing.md, borderTopWidth: 1, borderTopColor: colors.line, paddingTop: spacing.md },
   forwardTransferBlock: { gap: spacing.md, borderTopWidth: 1, borderTopColor: colors.line, paddingTop: spacing.md },
   rowButtons: { flexDirection: "row", flexWrap: "wrap", gap: spacing.sm },

@@ -186,6 +186,24 @@ test("workspace revision checks stay read-only and detect saved changes", async 
     assert.equal(invite.data.invite.currency, "LYD");
     assert.equal(invite.data.invite.workingCurrencies.includes("LYD"), true);
 
+    const fixedCommissionInvite = await requestJson(baseUrl, "/api/invites", {
+      cookie: masterLogin.cookie,
+      method: "POST",
+      body: { actorRole: "Broker", currency: "USD", workingCurrencies: [] },
+    });
+    const fixedCommissionActorPassword = crypto.randomBytes(12).toString("base64url");
+    const fixedCommissionActorSignup = await requestJson(baseUrl, "/api/auth/signup", {
+      method: "POST",
+      body: {
+        name: "Fixed Commission Broker",
+        email: "fixed-commission-broker@example.com",
+        password: fixedCommissionActorPassword,
+        inviteCode: fixedCommissionInvite.data.invite.code,
+        role: "Actor",
+      },
+    });
+    assert.equal(fixedCommissionActorSignup.data.session.membership.actorRole, "Broker");
+
     const masterRowsBeforeEmailChange = await requestJson(baseUrl, "/api/owner/masters", {
       cookie: ownerLogin.cookie,
     });
@@ -348,6 +366,207 @@ test("workspace revision checks stay read-only and detect saved changes", async 
     assert.equal(changedVersion.data.revision, saved.data.revision);
     assert.equal(afterVersionRead.mtimeNs, beforeVersionRead.mtimeNs);
 
+    const fixedCommissionActorId = fixedCommissionActorSignup.data.session.membership.actorId;
+    const stateWithFixedCommission = structuredClone(saved.data.state);
+    const fixedCommissionActor = stateWithFixedCommission.actors.find((actor) => actor.id === fixedCommissionActorId);
+    assert.ok(fixedCommissionActor);
+    fixedCommissionActor.orderFixedRates = { ETB: { enabled: true, rate: 200 } };
+    fixedCommissionActor.orderFixedCommission = { enabled: true, percent: -2 };
+    const savedFixedCommission = await requestJson(baseUrl, "/api/app-state", {
+      cookie: masterLogin.cookie,
+      method: "PUT",
+      body: { state: stateWithFixedCommission },
+    });
+    assert.deepEqual(
+      savedFixedCommission.data.state.actors.find((actor) => actor.id === fixedCommissionActorId)?.orderFixedCommission,
+      { enabled: true, percent: -2 }
+    );
+    const actorState = await requestJson(baseUrl, "/api/app-state", { cookie: fixedCommissionActorSignup.cookie });
+    const actorTamperState = structuredClone(actorState.data.state);
+    const actorTamperRecord = actorTamperState.actors.find((actor) => actor.id === fixedCommissionActorId);
+    assert.ok(actorTamperRecord);
+    actorTamperRecord.orderFixedRates = { ETB: { enabled: false, rate: 999 } };
+    actorTamperRecord.orderFixedCommission = { enabled: false, percent: 99 };
+    actorTamperState.orders = [
+      {
+        id: "ORD-FIXED-COMMISSION",
+        brokerActorId: "ACT-SPOOFED",
+        broker: "Spoofed Broker",
+        agent: "Unassigned",
+        sourceCurrency: "USD",
+        payoutCurrency: "ETB",
+        sourceAmountMinor: 10_000,
+        payoutAmountMinor: 2_000_000,
+        commissionPercent: 5,
+        commissionMinor: 500,
+        grossMinor: 10_500,
+        orderCommissionLiability: "Broker",
+        rate: 200,
+        state: "Pending Forward",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+      ...(actorTamperState.orders || []).filter((order) => order.id !== "ORD-FIXED-COMMISSION"),
+    ];
+    const actorProtectedSave = await requestJson(baseUrl, "/api/app-state", {
+      cookie: fixedCommissionActorSignup.cookie,
+      method: "PUT",
+      body: { state: actorTamperState },
+    });
+    const protectedActor = actorProtectedSave.data.state.actors.find((actor) => actor.id === fixedCommissionActorId);
+    assert.deepEqual(protectedActor.orderFixedRates, { ETB: { enabled: true, rate: 200 } });
+    assert.deepEqual(protectedActor.orderFixedCommission, { enabled: true, percent: -2 });
+    const protectedOrder = actorProtectedSave.data.state.orders.find((order) => order.id === "ORD-FIXED-COMMISSION");
+    assert.equal(protectedOrder.brokerActorId, fixedCommissionActorId);
+    assert.equal(protectedOrder.broker, "Fixed Commission Broker");
+    assert.equal(protectedOrder.commissionPercent, -2);
+    assert.equal(protectedOrder.commissionMinor, -200);
+    assert.equal(protectedOrder.grossMinor, 9_800);
+    assert.equal(protectedOrder.orderCommissionLiability, "Master");
+
+    const collisionFixtureState = structuredClone(actorProtectedSave.data.state);
+    const originalCollisionOrder = collisionFixtureState.orders.find((order) => order.id === "ORD-FIXED-COMMISSION");
+    assert.ok(originalCollisionOrder);
+    originalCollisionOrder.brokerOrderNumber = "FIX001";
+    originalCollisionOrder.journal = "JRN-COLLISION-ORIGINAL";
+    originalCollisionOrder.updatedAt = new Date(Date.now() + 5_000).toISOString();
+    collisionFixtureState.receivables = [
+      {
+        id: "REC-COLLISION-ORIGINAL",
+        orderId: "ORD-FIXED-COMMISSION",
+        brokerOrderNumber: "FIX001",
+        borrower: "Fixed Commission Broker",
+        borrowerActorId: fixedCommissionActorId,
+        currency: "USD",
+        principalMinor: 10_000,
+        payments: [],
+        createdAt: originalCollisionOrder.createdAt,
+        updatedAt: originalCollisionOrder.updatedAt,
+      },
+      ...(collisionFixtureState.receivables || []),
+    ];
+    collisionFixtureState.ledger = [
+      {
+        journal: "JRN-COLLISION-ORIGINAL",
+        orderId: "ORD-FIXED-COMMISSION",
+        source: "ORDER_PAYMENT",
+        account: "Fixed Commission Broker ACTOR_CLEARING",
+        direction: "Debit",
+        currency: "USD",
+        amountMinor: 10_000,
+        postedAt: originalCollisionOrder.updatedAt,
+      },
+      ...(collisionFixtureState.ledger || []),
+    ];
+    collisionFixtureState.chatConversations = [
+      {
+        id: "CHAT-COLLISION-SCOPE",
+        type: "direct",
+        name: "Collision scope",
+        members: ["Master", "Fixed Commission Broker"],
+        createdAt: originalCollisionOrder.createdAt,
+        messages: [{
+          id: "MSG-COLLISION-ORIGINAL",
+          from: "Master",
+          text: "Original order message",
+          orderId: "ORD-FIXED-COMMISSION",
+          orderNumber: "FIX001",
+          createdAt: originalCollisionOrder.updatedAt,
+        }],
+      },
+      ...(collisionFixtureState.chatConversations || []),
+    ];
+    const savedCollisionFixture = await requestJson(baseUrl, "/api/app-state", {
+      cookie: masterLogin.cookie,
+      method: "PUT",
+      body: { state: collisionFixtureState },
+    });
+
+    const actorCollisionState = structuredClone(savedCollisionFixture.data.state);
+    actorCollisionState.orders = [
+      {
+        id: "ORD-FIXED-COMMISSION",
+        brokerActorId: "ACT-SPOOFED-COLLISION",
+        broker: "Spoofed Collision Broker",
+        brokerOrderNumber: "FIX002",
+        agent: "Unassigned",
+        sourceCurrency: "USD",
+        payoutCurrency: "ETB",
+        sourceAmountMinor: 20_000,
+        payoutAmountMinor: 4_000_000,
+        commissionPercent: 8,
+        commissionMinor: 1_600,
+        grossMinor: 21_600,
+        orderCommissionLiability: "Broker",
+        rate: 200,
+        journal: "JRN-COLLISION-NEW",
+        state: "Pending Forward",
+        createdAt: new Date(Date.now() + 10_000).toISOString(),
+        updatedAt: new Date(Date.now() + 10_000).toISOString(),
+      },
+      ...(actorCollisionState.orders || []),
+    ];
+    actorCollisionState.receivables = [
+      {
+        id: "REC-COLLISION-NEW",
+        orderId: "ORD-FIXED-COMMISSION",
+        brokerOrderNumber: "FIX002",
+        borrower: "Spoofed Collision Broker",
+        borrowerActorId: "ACT-SPOOFED-COLLISION",
+        currency: "USD",
+        principalMinor: 20_000,
+        payments: [],
+        createdAt: actorCollisionState.orders[0].createdAt,
+        updatedAt: actorCollisionState.orders[0].updatedAt,
+      },
+      ...(actorCollisionState.receivables || []),
+    ];
+    actorCollisionState.ledger = [
+      {
+        journal: "JRN-COLLISION-NEW",
+        orderId: "ORD-FIXED-COMMISSION",
+        source: "ORDER_PAYMENT",
+        account: "Spoofed Collision Broker ACTOR_CLEARING",
+        direction: "Debit",
+        currency: "USD",
+        amountMinor: 20_000,
+        postedAt: actorCollisionState.orders[0].updatedAt,
+      },
+      ...(actorCollisionState.ledger || []),
+    ];
+    const collisionConversation = actorCollisionState.chatConversations.find((chat) => chat.id === "CHAT-COLLISION-SCOPE");
+    assert.ok(collisionConversation);
+    collisionConversation.messages.push({
+      id: "MSG-COLLISION-NEW",
+      from: "Fixed Commission Broker",
+      text: "New colliding order message",
+      orderId: "ORD-FIXED-COMMISSION",
+      orderNumber: "FIX002",
+      createdAt: actorCollisionState.orders[0].updatedAt,
+    });
+    const actorCollisionSave = await requestJson(baseUrl, "/api/app-state", {
+      cookie: fixedCommissionActorSignup.cookie,
+      method: "PUT",
+      body: { state: actorCollisionState },
+    });
+    const collisionOrder = actorCollisionSave.data.state.orders.find((order) => order.brokerOrderNumber === "FIX002");
+    assert.ok(collisionOrder);
+    assert.notEqual(collisionOrder.id, "ORD-FIXED-COMMISSION");
+    assert.equal(collisionOrder.brokerActorId, fixedCommissionActorId);
+    assert.equal(collisionOrder.broker, "Fixed Commission Broker");
+    assert.equal(collisionOrder.commissionPercent, -2);
+    assert.equal(collisionOrder.commissionMinor, -400);
+    assert.equal(collisionOrder.grossMinor, 19_600);
+    assert.equal(collisionOrder.orderCommissionLiability, "Master");
+    assert.equal(actorCollisionSave.data.state.orders.some((order) => order.id === "ORD-FIXED-COMMISSION" && order.brokerOrderNumber === "FIX001"), true);
+    assert.equal(actorCollisionSave.data.state.receivables.find((item) => item.id === "REC-COLLISION-ORIGINAL")?.orderId, "ORD-FIXED-COMMISSION");
+    assert.equal(actorCollisionSave.data.state.receivables.find((item) => item.id === "REC-COLLISION-NEW")?.orderId, collisionOrder.id);
+    assert.equal(actorCollisionSave.data.state.ledger.find((line) => line.journal === "JRN-COLLISION-ORIGINAL")?.orderId, "ORD-FIXED-COMMISSION");
+    assert.equal(actorCollisionSave.data.state.ledger.find((line) => line.journal === "JRN-COLLISION-NEW")?.orderId, collisionOrder.id);
+    const savedCollisionConversation = actorCollisionSave.data.state.chatConversations.find((chat) => chat.id === "CHAT-COLLISION-SCOPE");
+    assert.equal(savedCollisionConversation?.messages.find((message) => message.id === "MSG-COLLISION-ORIGINAL")?.orderId, "ORD-FIXED-COMMISSION");
+    assert.equal(savedCollisionConversation?.messages.find((message) => message.id === "MSG-COLLISION-NEW")?.orderId, collisionOrder.id);
+
     const clearableForwardingFields = [
       "forwardedPayoutDivider",
       "forwardedPayoutPercent",
@@ -356,7 +575,7 @@ test("workspace revision checks stay read-only and detect saved changes", async 
       "manualMasterRateDivider",
       "manualMasterRatePercent",
     ];
-    const stateWithForwardingTerms = structuredClone(saved.data.state);
+    const stateWithForwardingTerms = structuredClone(actorCollisionSave.data.state);
     const forwardingOrder = {
       id: "ORD-SYNC-FORWARDING",
       broker: "Galaxy Broker",

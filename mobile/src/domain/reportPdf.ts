@@ -21,6 +21,7 @@ export interface ReportPdfRow {
   currencyAmounts: Partial<Record<Currency, string>>;
   status: string;
   voided: boolean;
+  reversed: boolean;
 }
 
 function archiveMonthKey(value: string | undefined): string {
@@ -137,6 +138,7 @@ function orderRow(
     currencyAmounts: { [amount.currency]: formattedMinor(amount.currency, amount.amountMinor) },
     status: voided ? "Voided - Excluded" : "Locked",
     voided,
+    reversed: false,
   };
 }
 
@@ -150,16 +152,26 @@ function transferRow(
   const payoutCurrency = transfer.currency || sourceCurrency;
   const sourceAmountMinor = Number(transfer.sourceAmountMinor || transfer.amountMinor || 0);
   const payoutAmountMinor = Number(transfer.amountMinor || 0);
+  const archiveIsSender = Boolean(
+    (archive.actorId && transfer.fromActorId === archive.actorId) ||
+    (archive.actor && transfer.from === archive.actor)
+  );
+  const displayCurrency = archiveIsSender ? sourceCurrency : payoutCurrency;
+  const displayAmountMinor = archiveIsSender ? sourceAmountMinor : payoutAmountMinor;
   const baseCurrency = archiveBaseCurrency(archive, actors);
   const baseAmountMinor = specialAgentTransferBaseAmountMinor(archive, transfer, actors);
+  const reversed = transfer.state === "Reversed" || Boolean(transfer.reversalJournal || transfer.reversedAt);
   const currencyAmounts: Partial<Record<Currency, string>> = {
-    [payoutCurrency]: formattedMinor(payoutCurrency, payoutAmountMinor),
+    [displayCurrency]: formattedMinor(displayCurrency, displayAmountMinor),
   };
+  if (archiveActorRole(archive, actors) === "Special Agent" && payoutCurrency !== displayCurrency) {
+    currencyAmounts[payoutCurrency] = formattedMinor(payoutCurrency, payoutAmountMinor);
+  }
   if (baseAmountMinor !== null) {
     currencyAmounts[baseCurrency] = formattedMinor(baseCurrency, baseAmountMinor);
   }
   return {
-    date: formatDate(transfer.sentAt || transfer.createdAt || archive.closedAt),
+    date: formatDate(transfer.reversedAt || transfer.sentAt || transfer.createdAt || archive.closedAt),
     statement: statementLabel(archive),
     actor: archive.actor || viewer.actorName,
     type: "Transfer",
@@ -170,12 +182,14 @@ function transferRow(
       `Payout: ${moneyLabel(payoutCurrency, payoutAmountMinor)}`,
       transfer.rate ? `Rate: ${transfer.rate}` : "",
       transfer.remarks ? `Remarks: ${transfer.remarks}` : "",
+      reversed ? "Reversed - Original and reversal net to zero" : "",
     ].filter(Boolean).join(" - "),
-    amount: moneyLabel(payoutCurrency, payoutAmountMinor),
+    amount: moneyLabel(displayCurrency, displayAmountMinor),
     paidOut: "",
     currencyAmounts,
-    status: "Locked",
+    status: reversed ? "Reversed - Netted to zero" : "Locked",
     voided: false,
+    reversed,
   };
 }
 
@@ -192,6 +206,7 @@ function archiveRows(archive: ArchiveRecord, actors: ActorRecord[], viewer: User
     const voided = receivable.voided === true || Boolean(receivable.voidedAt) ||
       linkedOrder?.state === "Voided" ||
       Boolean(linkedOrder?.voidedAt || linkedOrder?.voidJournal || linkedOrder?.excludedFromCalculations);
+    if (linkedOrder && voided) return;
     rows.push({
       date: formatDate(receivable.archivedAt || archive.closedAt),
       statement: statementLabel(archive),
@@ -209,10 +224,32 @@ function archiveRows(archive: ArchiveRecord, actors: ActorRecord[], viewer: User
       currencyAmounts: { [currency]: formattedMinor(currency, Number(receivable.principalMinor || 0)) },
       status: voided ? "Voided - Excluded" : "Locked",
       voided,
+      reversed: false,
     });
   });
   (archive.transfers || []).forEach((transfer) => rows.push(transferRow(archive, transfer, actors, viewer)));
   (archive.ledger || []).forEach((line) => {
+    const source = String(line.source || "");
+    const linkedOrder = source.startsWith("ORDER_")
+      ? (archive.orders || []).find((order) =>
+          (line.orderId && (order.id === line.orderId || order.internalOrderId === line.orderId)) ||
+          (line.journal && (order.journal === line.journal || order.voidJournal === line.journal))
+        )
+      : undefined;
+    const linkedOrderVoided = linkedOrder?.state === "Voided" || Boolean(
+      linkedOrder?.voidedAt || linkedOrder?.voidJournal || linkedOrder?.excludedFromCalculations
+    );
+    if (linkedOrder && linkedOrderVoided) return;
+    const linkedTransfer = source.startsWith("TRANSFER")
+      ? (archive.transfers || []).find((transfer) =>
+          (line.transferId && transfer.id === line.transferId) ||
+          (line.journal && (transfer.journal === line.journal || transfer.reversalJournal === line.journal))
+        )
+      : undefined;
+    const linkedTransferReversed = linkedTransfer?.state === "Reversed" || Boolean(
+      linkedTransfer?.reversalJournal || linkedTransfer?.reversedAt
+    );
+    if (linkedTransfer && linkedTransferReversed) return;
     const currency = line.currency || "USD";
     const voided = line.voided === true || line.excludedFromCalculations === true;
     rows.push({
@@ -231,6 +268,7 @@ function archiveRows(archive: ArchiveRecord, actors: ActorRecord[], viewer: User
       currencyAmounts: { [currency]: formattedMinor(currency, Number(line.amountMinor || 0)) },
       status: voided ? "Voided - Excluded" : "Locked",
       voided,
+      reversed: false,
     });
   });
   currencies.forEach((currency) => {
@@ -251,6 +289,7 @@ function archiveRows(archive: ArchiveRecord, actors: ActorRecord[], viewer: User
       currencyAmounts: { [currency]: formattedMinor(currency, netMinor) },
       status: "Locked",
       voided: false,
+      reversed: false,
     });
   });
   return rows;
@@ -285,7 +324,7 @@ export function buildArchiveReportPdfHtml(
     rows.some((row) => row.currencyAmounts[currency] !== undefined)
   );
   const body = rows.map((row) => `
-    <tr class="${row.voided ? "void-row" : ""}">
+    <tr class="${row.voided || row.reversed ? "void-row" : ""}">
       <td>${escapeHtml(row.date)}</td>
       <td>${escapeHtml(row.statement)}</td>
       <td>${escapeHtml(row.actor)}</td>
@@ -295,7 +334,7 @@ export function buildArchiveReportPdfHtml(
       <td class="details">${escapeHtml(row.details)}</td>
       <td>${escapeHtml(row.amount)}</td>
       ${rows.some((item) => item.paidOut) ? `<td>${escapeHtml(row.paidOut)}</td>` : ""}
-      ${presentCurrencies.map((currency) => `<td>${escapeHtml(row.voided ? "" : row.currencyAmounts[currency] || "")}</td>`).join("")}
+      ${presentCurrencies.map((currency) => `<td>${escapeHtml(row.voided || row.reversed ? "" : row.currencyAmounts[currency] || "")}</td>`).join("")}
       <td>${escapeHtml(row.status)}</td>
     </tr>
   `).join("");
