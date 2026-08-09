@@ -1,6 +1,6 @@
 {
   "name": "haderapay-mobile",
-  "version": "0.1.47",
+  "version": "0.1.48",
   "private": true,
   "main": "expo/AppEntry",
   "scripts": {

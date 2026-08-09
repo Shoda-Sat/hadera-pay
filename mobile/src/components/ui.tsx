@@ -191,31 +191,42 @@ export function SelectRow<T extends string>({
 }
 
 export function Pill({ label, tone = "neutral" }: { label: string; tone?: PillTone }) {
+  const words = label.trim().split(/\s+/).filter(Boolean);
+  const textStyle = [
+    styles.pillText,
+    tone === "good" && styles.pillGoodText,
+    tone === "warn" && styles.pillWarnText,
+    tone === "danger" && styles.pillDangerText,
+    tone === "assigned" && styles.pillAssignedText,
+    tone === "returned" && styles.pillReturnedText,
+    tone === "reversed" && styles.pillReversedText,
+    tone === "cancelled" && styles.pillCancelledText,
+    tone === "voided" && styles.pillVoidedText
+  ];
+
   return (
-    <View style={[
-      styles.pill,
-      tone === "good" && styles.pillGood,
-      tone === "warn" && styles.pillWarn,
-      tone === "danger" && styles.pillDanger,
-      tone === "assigned" && styles.pillAssigned,
-      tone === "returned" && styles.pillReturned,
-      tone === "reversed" && styles.pillReversed,
-      tone === "cancelled" && styles.pillCancelled,
-      tone === "voided" && styles.pillVoided
-    ]}>
-      <Text style={[
-        styles.pillText,
-        tone === "good" && styles.pillGoodText,
-        tone === "warn" && styles.pillWarnText,
-        tone === "danger" && styles.pillDangerText,
-        tone === "assigned" && styles.pillAssignedText,
-        tone === "returned" && styles.pillReturnedText,
-        tone === "reversed" && styles.pillReversedText,
-        tone === "cancelled" && styles.pillCancelledText,
-        tone === "voided" && styles.pillVoidedText
-      ]}>
-        {label}
-      </Text>
+    <View
+      accessible
+      accessibilityLabel={label}
+      accessibilityRole="text"
+      style={[
+        styles.pill,
+        words.length > 1 && styles.pillWrap,
+        tone === "good" && styles.pillGood,
+        tone === "warn" && styles.pillWarn,
+        tone === "danger" && styles.pillDanger,
+        tone === "assigned" && styles.pillAssigned,
+        tone === "returned" && styles.pillReturned,
+        tone === "reversed" && styles.pillReversed,
+        tone === "cancelled" && styles.pillCancelled,
+        tone === "voided" && styles.pillVoided
+      ]}
+    >
+      {words.map((word, index) => (
+        <Text accessible={false} key={`${word}-${index}`} numberOfLines={1} style={textStyle}>
+          {word}
+        </Text>
+      ))}
     </View>
   );
 }
@@ -380,11 +391,17 @@ export const styles = StyleSheet.create({
   },
   pill: {
     alignSelf: "flex-start",
-    maxWidth: "62%",
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "center",
+    columnGap: 3,
     paddingVertical: 4,
     paddingHorizontal: 9,
     borderRadius: radius.sm,
     backgroundColor: colors.accentSoft
+  },
+  pillWrap: {
+    flexShrink: 1
   },
   pillGood: {
     backgroundColor: colors.goodSoft
@@ -413,8 +430,7 @@ export const styles = StyleSheet.create({
   pillText: {
     color: colors.accent,
     fontSize: 12,
-    fontWeight: "900",
-    flexShrink: 1
+    fontWeight: "900"
   },
   pillGoodText: {
     color: colors.good
