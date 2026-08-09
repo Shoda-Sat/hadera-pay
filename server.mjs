@@ -1410,6 +1410,28 @@ function normalizeArchiveSnapshots(archives = []) {
   return normalized;
 }
 
+function mergeArchiveSnapshots(existingArchives = [], incomingArchives = []) {
+  const archiveKey = (archive) => archive?.id || [archive?.actor, archive?.closedAt, archive?.closedBy].join(":");
+  const existingByKey = new Map((Array.isArray(existingArchives) ? existingArchives : [])
+    .map((archive) => [archiveKey(archive), archive]));
+  const incomingByKey = new Map((Array.isArray(incomingArchives) ? incomingArchives : [])
+    .map((archive) => [archiveKey(archive), archive]));
+  const archives = mergeByKey(existingArchives, incomingArchives, archiveKey).map((archive) => {
+    const key = archiveKey(archive);
+    const existing = existingByKey.get(key);
+    const incoming = incomingByKey.get(key);
+    const mergedItems = (type) => mergeByKey(existing?.[type], incoming?.[type], (item) => archiveSnapshotItemKey(type, item));
+    return {
+      ...archive,
+      orders: mergedItems("orders"),
+      receivables: mergedItems("receivables"),
+      transfers: mergedItems("transfers"),
+      ledger: mergedItems("ledger"),
+    };
+  });
+  return normalizeArchiveSnapshots(archives);
+}
+
 function removeOrdersAlreadyArchived(orders = [], archives = []) {
   const archivedOrderTimes = new Map();
   normalizeArchiveSnapshots(archives).forEach((archive) => {
@@ -1483,9 +1505,7 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
     [line.journal, line.source, line.account, line.direction, line.currency, line.amountMinor, line.postedAt].join(":")
   );
   nextState.masterBankEntries = mergeById(currentState.masterBankEntries, incomingState.masterBankEntries);
-  nextState.archives = normalizeArchiveSnapshots(mergeByKey(currentState.archives, incomingState.archives, (archive) =>
-    archive.id || [archive.actor, archive.closedAt, archive.closedBy].join(":")
-  ));
+  nextState.archives = mergeArchiveSnapshots(currentState.archives, incomingState.archives);
   nextState.orders = removeOrdersAlreadyArchived(nextState.orders, nextState.archives);
   nextState.chatConversations = mergeChatConversations(currentState.chatConversations, incomingState.chatConversations)
     .filter((chat) => !deletedChatIds.has(chat?.id))
@@ -1542,13 +1562,18 @@ function sessionCanAccessCreditReminder(session, receivable) {
 
 function stripRestrictedCreditReminders(state, session) {
   if (!state || typeof state !== "object") return state;
+  const visibleReceivable = (receivable) => {
+    if (sessionCanAccessCreditReminder(session, receivable)) return receivable;
+    const { creditReminder, ...visible } = receivable;
+    return visible;
+  };
   return {
     ...state,
-    receivables: (state.receivables || []).map((receivable) => {
-      if (sessionCanAccessCreditReminder(session, receivable)) return receivable;
-      const { creditReminder, ...visibleReceivable } = receivable;
-      return visibleReceivable;
-    }),
+    receivables: (state.receivables || []).map(visibleReceivable),
+    archives: (state.archives || []).map((archive) => ({
+      ...archive,
+      receivables: (archive.receivables || []).map(visibleReceivable),
+    })),
   };
 }
 
@@ -1587,6 +1612,9 @@ function sanitizeIncomingWorkspaceState(state, session, db) {
       const { creditReminder, ...allowedReceivable } = receivable;
       return allowedReceivable;
     });
+  }
+  if (session?.membership?.role !== "Master") {
+    sanitized.archives = structuredClone(persistedState.archives || []);
   }
   const storedFiles = new Map((db?.files || [])
     .filter((file) => file?.workspaceId === session?.workspace?.id && file?.status === "active")

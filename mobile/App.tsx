@@ -1202,7 +1202,7 @@ function ArchiveScreen({
         />
       </Panel>
 
-      <Panel title="Collected receivables" badge={String(archivedReceivables.length)}>
+      <Panel title="Collected receivables" badge={String(archivedReceivables.length)} badgeTone="good">
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={receivablesExpanded ? "Collapse collected receivables" : "Expand collected receivables"}
@@ -1237,6 +1237,7 @@ function ArchiveScreen({
                       return (
                         <View key={`${archive.id || archive.closedAt}-${receivable.id}`} style={styles.archiveDetailRow}>
                           <Text style={styles.archiveDetailTitle}>{receivable.brokerOrderNumber || receivable.orderId}</Text>
+                          {receivable.creditReminder ? <Text style={styles.archiveDetailMeta}>Credit Reminder: {receivable.creditReminder}</Text> : null}
                           <Text style={styles.archiveDetailMeta}>{receivable.borrower}{lastPayment?.paidAt ? ` - Collected ${archiveClosedLabel(lastPayment.paidAt)}` : ""}</Text>
                           <Text style={styles.archiveDetailAmount}>Principal {compactAmount(receivable.currency, majorFromMinor(receivable.principalMinor, receivable.currency))}</Text>
                           <Text style={styles.archiveDetailMeta}>Collected {compactAmount(receivable.currency, majorFromMinor(paidMinor, receivable.currency))}</Text>

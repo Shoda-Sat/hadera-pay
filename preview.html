@@ -1240,6 +1240,11 @@
       color: #ffffff;
     }
 
+    .closed-receivables-heading td {
+      background: var(--good-soft);
+      color: var(--good);
+    }
+
     .timeline {
       display: grid;
       grid-template-columns: repeat(6, minmax(110px, 1fr));
@@ -1401,6 +1406,126 @@
       display: grid;
       gap: 3px;
       margin-top: 4px;
+    }
+
+    .receivable-collection {
+      display: grid;
+      gap: 7px;
+    }
+
+    .receivable-collection .state-pill {
+      justify-self: start;
+    }
+
+    .receivable-compact-cell {
+      padding: 0;
+    }
+
+    .receivable-reference-status {
+      display: none;
+      margin-top: 5px;
+    }
+
+    .receivable-compact-detail {
+      padding: 11px 10px;
+    }
+
+    .receivable-compact-detail summary {
+      cursor: pointer;
+      display: grid;
+      gap: 5px;
+      list-style: none;
+    }
+
+    .receivable-compact-detail summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .receivable-compact-line {
+      align-items: center;
+      display: flex;
+      gap: 10px;
+      justify-content: space-between;
+      min-width: 0;
+    }
+
+    .receivable-compact-reference {
+      color: var(--ink);
+      font-size: 14px;
+      overflow-wrap: anywhere;
+    }
+
+    .receivable-compact-reminder {
+      color: var(--muted);
+      font-size: 12px;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .receivable-compact-toggle {
+      color: var(--accent);
+      flex: 0 0 auto;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .receivable-compact-detail .show-less-text {
+      display: none;
+    }
+
+    .receivable-compact-detail[open] .show-more-text {
+      display: none;
+    }
+
+    .receivable-compact-detail[open] .show-less-text {
+      display: inline;
+    }
+
+    .receivable-expanded-grid {
+      border-top: 1px solid var(--line);
+      display: grid;
+      gap: 10px 18px;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      margin-top: 10px;
+      padding-top: 10px;
+    }
+
+    .receivable-expanded-item {
+      display: grid;
+      gap: 3px;
+      min-width: 0;
+    }
+
+    .receivable-expanded-item b {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .receivable-expanded-item span {
+      overflow-wrap: anywhere;
+    }
+
+    .receivable-expanded-item.wide {
+      grid-column: 1 / -1;
+    }
+
+    @media (max-width: 720px) {
+      .receivable-reference-status {
+        display: inline-flex;
+      }
+
+      .receivable-compact-detail summary,
+      .receivable-compact-detail .receivable-expanded-grid {
+        left: 0;
+        position: sticky;
+        width: calc(100vw - 70px);
+      }
+
+      .receivable-expanded-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
     }
 
     .order-number-line {
@@ -10374,8 +10499,9 @@
       };
       return Array.from(recordsByActor.values()).flatMap((actorRecords) => {
         const closedBalances = actorRecords.filter((record) => record.type === "Closed Balance");
-        const transactions = actorRecords.filter((record) => record.type !== "Closed Balance");
-        if (!closedBalances.length) return transactions;
+        const closedReceivables = actorRecords.filter((record) => record.type === "Closed Receivable");
+        const transactions = actorRecords.filter((record) => !["Closed Balance", "Closed Receivable"].includes(record.type));
+        if (!closedBalances.length) return [...transactions, ...closedReceivables];
         const currentCloseTime = Math.max(...closedBalances.map(closeTime));
         const previousCloses = closedBalances
           .filter((record) => closeTime(record) < currentCloseTime)
@@ -10385,7 +10511,7 @@
           .filter((record) => closeTime(record) === currentCloseTime)
           .sort(closeSort)
           .map((record) => ({ ...record, exportType: "Current Close" }));
-        return [...previousCloses, ...transactions, ...currentClose];
+        return [...previousCloses, ...transactions, ...closedReceivables, ...currentClose];
       });
     }
 
@@ -10690,6 +10816,15 @@
         : activeReceivables.filter((item) => item.borrower === actor?.name || item.borrowerActorId === actor?.id);
     }
 
+    function receivableIsCollectedForBalanceClose(receivable, actor) {
+      const principalMinor = Number(receivable?.principalMinor || 0);
+      return !receivable?.archivedAt &&
+        !receivableIsVoided(receivable) &&
+        (receivable?.borrower === actor?.name || receivable?.borrowerActorId === actor?.id) &&
+        principalMinor > 0 &&
+        receivablePaidMinor(receivable) >= principalMinor;
+    }
+
     function actorCanSeeCreditReminder(receivable, actor = selectedActor()) {
       if (!actor) return false;
       if (signedInAsMaster()) return true;
@@ -10716,7 +10851,9 @@
         const isVoided = receivableIsVoided(item);
         const paidMinor = receivablePaidMinor(item);
         const balanceMinor = Math.max(0, Number(item.principalMinor || 0) - paidMinor);
+        const isCollected = !isVoided && balanceMinor === 0;
         const canCollect = !isVoided && balanceMinor > 0 && (actor?.role === "Master" || item.borrower === actor?.name || item.borrowerActorId === actor?.id);
+        const orderNumber = item.brokerOrderNumber || item.orderId || item.id;
         const paymentHistory = (item.payments || [])
           .map((payment) => `${displayDateOnly(payment.paidAt)} ${money(item.currency, payment.amountMinor)}`)
           .join(" / ");
@@ -10732,10 +10869,54 @@
         ].filter(Boolean).join(" - ");
         const creditReminder = actorCanSeeCreditReminder(item, actor) ? item.creditReminder || "" : "";
         const draftValue = receivablePaymentDrafts.get(item.id) ?? "";
+        if (isCollected) {
+          const expandedItems = [
+            ["Receivable ID", item.id],
+            ["Date", displayDateOnly(item.createdAt)],
+            ["Borrower", item.borrower],
+            ["Sender", item.senderName],
+            ["Receiver", item.receiverName],
+            ["Receiver city", item.receiverCity],
+            ["Phone", item.phoneNumber],
+            ["Account", item.accountNumber],
+            ["Remarks", item.remarks],
+            ["Credit Reminder", creditReminder],
+            ["Principal", money(item.currency, item.principalMinor || 0)],
+            ["Collected", money(item.currency, paidMinor)],
+            ["Balance", money(item.currency, balanceMinor)],
+            ["Payments", paymentHistory]
+          ].filter(([, value]) => Boolean(value));
+          return `
+            <tr data-search-target="${escapeHtml(receivableSearchTargetKey(item))}" tabindex="-1">
+              <td colspan="9" class="receivable-compact-cell">
+                <details class="receivable-compact-detail">
+                  <summary>
+                    <span class="receivable-compact-line">
+                      <strong class="receivable-compact-reference">${escapeHtml(orderNumber)}</strong>
+                      <span class="state-pill good">Collected</span>
+                    </span>
+                    <span class="receivable-compact-line">
+                      <span class="receivable-compact-reminder">Credit Reminder: ${escapeHtml(creditReminder || "No credit reminder")}</span>
+                      <span class="receivable-compact-toggle"><span class="show-more-text">Show more</span><span class="show-less-text">Show less</span></span>
+                    </span>
+                  </summary>
+                  <span class="receivable-expanded-grid">
+                    ${expandedItems.map(([label, value]) => `
+                      <span class="receivable-expanded-item ${label === "Remarks" || label === "Payments" ? "wide" : ""}">
+                        <b>${escapeHtml(label)}</b>
+                        <span>${escapeHtml(value)}</span>
+                      </span>
+                    `).join("")}
+                  </span>
+                </details>
+              </td>
+            </tr>
+          `;
+        }
         return `
           <tr class="${isVoided ? "void-row" : ""}" data-search-target="${escapeHtml(receivableSearchTargetKey(item))}" tabindex="-1">
             <td>${escapeHtml(displayDateOnly(item.createdAt))}</td>
-            <td><strong>${escapeHtml(item.id)}</strong></td>
+            <td><strong>${escapeHtml(orderNumber)}</strong>${orderNumber !== item.id ? `<small class="order-number-secondary">${escapeHtml(item.id)}</small>` : ""}<span class="state-pill ${isVoided ? "danger" : "warn"} receivable-reference-status">${isVoided ? "Voided" : "Open"}</span></td>
             <td>${escapeHtml(item.borrower)}</td>
             <td>${escapeHtml(details || "Credit order")}</td>
             <td>${escapeHtml(creditReminder)}</td>
@@ -10744,11 +10925,14 @@
             <td><strong>${money(item.currency, balanceMinor)}</strong></td>
             <td>
               ${canCollect ? `
-                <div class="setting-inline">
-                  <input class="receivable-payment" data-id="${item.id}" inputmode="decimal" placeholder="Amount" value="${escapeHtml(draftValue)}">
-                  <button class="btn primary collect-receivable" data-id="${item.id}" type="button">Pay</button>
+                <div class="receivable-collection">
+                  <span class="state-pill warn">Open</span>
+                  <div class="setting-inline">
+                    <input class="receivable-payment" data-id="${item.id}" inputmode="decimal" placeholder="Amount" value="${escapeHtml(draftValue)}">
+                    <button class="btn primary collect-receivable" data-id="${item.id}" type="button">Pay</button>
+                  </div>
                 </div>
-              ` : `<span class="state-pill ${isVoided ? "danger" : balanceMinor === 0 ? "good" : "warn"}">${isVoided ? "Voided" : balanceMinor === 0 ? "Paid" : "Open"}</span>`}
+              ` : `<span class="state-pill ${isVoided ? "danger" : "warn"}">${isVoided ? "Voided" : "Open"}</span>`}
             </td>
           </tr>
         `;
@@ -11212,6 +11396,7 @@
         item.phoneNumber ? `Phone: ${item.phoneNumber}` : "",
         item.accountNumber ? `Account: ${item.accountNumber}` : "",
         item.remarks ? `Remarks: ${item.remarks}` : "",
+        item.creditReminder ? `Credit Reminder: ${item.creditReminder}` : "",
         `Principal: ${money(item.currency, item.principalMinor || 0)}`,
         `Collected: ${money(item.currency, paidMinor)}`,
         `Balance: ${money(item.currency, balanceMinor)}`,
@@ -11225,7 +11410,7 @@
       const balanceMinor = Math.max(0, Number(item.principalMinor || 0) - paidMinor);
       const details = receivableDetailsForSearch(item, viewer);
       const amount = `Principal ${money(item.currency, item.principalMinor || 0)} / Balance ${money(item.currency, balanceMinor)}`;
-      const status = receivableIsVoided(item) ? "Voided" : balanceMinor === 0 ? "Paid" : "Open";
+      const status = receivableIsVoided(item) ? "Voided" : balanceMinor === 0 ? "Collected" : "Open";
       return {
         searchGroupKey: item.orderId ? `order:${item.orderId}` : item.id ? `receivable:${item.id}` : "",
         searchKind: "receivable",
@@ -11239,7 +11424,7 @@
         type: "Receivable",
         date: item.createdAt || item.updatedAt || "",
         time: new Date(item.createdAt || item.updatedAt || 0).getTime() || 0,
-        reference: item.id || item.orderId || "",
+        reference: item.brokerOrderNumber || item.orderId || item.id || "",
         actors: item.borrower || "",
         amount,
         status,
@@ -11257,6 +11442,7 @@
           item.phoneNumber,
           item.accountNumber,
           item.remarks,
+          item.creditReminder,
           status,
           details,
           amount,
@@ -11454,10 +11640,10 @@
             });
             return {
               ...result,
-              type: "Archived Receivable",
+              type: "Closed Receivable",
               date: receivable.archivedAt || archive.closedAt || result.date,
               time: new Date(receivable.archivedAt || archive.closedAt || result.date || 0).getTime() || 0,
-              status: "Locked"
+              status: "Collected"
             };
           });
           const transferRows = (archive.transfers || []).map((transfer) =>
@@ -11487,7 +11673,7 @@
       const value = String(status || "").toLowerCase();
       if (value.includes("void") || value.includes("cancel") || value.includes("reject")) return "danger";
       if (value.includes("pending") || value.includes("assigned") || value.includes("return") || value.includes("open")) return "warn";
-      if (value.includes("paid") || value.includes("approved") || value.includes("posted")) return "good";
+      if (value.includes("paid") || value.includes("collected") || value.includes("approved") || value.includes("posted")) return "good";
       if (value.includes("locked")) return "danger";
       return "";
     }
@@ -12449,14 +12635,19 @@
         const voided = receivableIsVoided(receivable) || orderRecordIsVoided(linkedOrder);
         const direction = receivable.borrower ? `Borrower: ${receivable.borrower}` : "";
         const details = [
+          receivable.senderName ? `Sender: ${receivable.senderName}` : "",
           receivable.receiverName ? `Receiver: ${receivable.receiverName}` : "",
           receivable.receiverCity ? `Receiver City: ${receivable.receiverCity}` : "",
+          receivable.phoneNumber ? `Phone: ${receivable.phoneNumber}` : "",
+          receivable.accountNumber ? `Account: ${receivable.accountNumber}` : "",
+          receivable.remarks ? `Remarks: ${receivable.remarks}` : "",
+          receivable.creditReminder ? `Credit Reminder: ${receivable.creditReminder}` : "",
           `Collected: ${money(currency, receivablePaidMinor(receivable))}`,
           voided ? "Excluded from all calculations" : ""
         ].filter(Boolean).join(" - ");
         addRow({
           date,
-          type: "Receivable",
+          type: "Closed Receivable",
           reference: receivable.brokerOrderNumber || receivable.orderId || receivable.id,
           journal,
           searchTarget: receivableSearchTargetKey(receivable),
@@ -12465,7 +12656,7 @@
           currency,
           amountMinor,
           voided,
-          status: voided ? "Voided - Excluded" : "Locked"
+          status: voided ? "Voided - Excluded" : "Collected"
         }, [
           receivable.id,
           receivable.orderId,
@@ -12477,6 +12668,7 @@
           receivable.accountNumber,
           receivable.phoneNumber,
           receivable.remarks,
+          receivable.creditReminder,
           journal,
           direction,
           details
@@ -12665,11 +12857,14 @@
                 <td colspan="8"><strong>${escapeHtml(archiveMonthLabel(archiveMonthKey(archive.closedAt)))} closed statement</strong> - ${escapeHtml(displayDate(archive.closedAt))} - ${escapeHtml(archive.id || "")}</td>
               </tr>
             `);
-            records.forEach((record) => {
+            const closedReceivables = records.filter((record) => record.type === "Closed Receivable");
+            const statementTransactions = records.filter((record) => record.type !== "Closed Receivable");
+            const renderRecord = (record) => {
               const highlighted = record.voided || record.reversed;
               const description = record.type === "Ledger"
                 ? record.details
                 : [record.direction, record.details].filter(Boolean).join(" - ");
+              const statusTone = highlighted ? "danger" : record.type === "Closed Receivable" ? "good" : "";
               actorRows.push(`
                 <tr class="${highlighted ? "void-row" : ""}" data-search-target="${escapeHtml(record.searchTarget || "")}" tabindex="-1">
                   <td>${escapeHtml(displayDate(record.date))}</td>
@@ -12679,10 +12874,19 @@
                   <td>${escapeHtml(description)}</td>
                   <td>${lockedAmount(record.currency, record.amountMinor)}</td>
                   <td>${escapeHtml(record.paidOut || "")}</td>
-                  <td><span class="state-pill ${highlighted ? "danger" : ""}">${escapeHtml(record.status || "Locked")}</span></td>
+                  <td><span class="state-pill ${statusTone}">${escapeHtml(record.status || "Locked")}</span></td>
                 </tr>
               `);
-            });
+            };
+            statementTransactions.forEach(renderRecord);
+            if (closedReceivables.length) {
+              actorRows.push(`
+                <tr class="closed-receivables-heading">
+                  <td colspan="8"><strong>Closed Receivables</strong> - collected orders archived when this balance closed</td>
+                </tr>
+              `);
+              closedReceivables.forEach(renderRecord);
+            }
           });
         return actorRows.length > 1 ? actorRows : [];
       });
@@ -13235,6 +13439,7 @@
         accountNumber: receivable.accountNumber || "",
         phoneNumber: receivable.phoneNumber || "",
         remarks: receivable.remarks || "",
+        creditReminder: receivable.creditReminder || "",
         createdAt: receivable.createdAt || "",
         updatedAt: closedAt,
         createdBy: receivable.createdBy || "",
@@ -13461,13 +13666,7 @@
         (transfer.from === actor.name || transfer.to === actor.name) &&
         !transferArchivedForActor(transfer, actor)
       );
-      const collectedReceivables = state.receivables.filter((receivable) =>
-        !receivable.archivedAt &&
-        !receivableIsVoided(receivable) &&
-        (receivable.borrower === actor.name || receivable.borrowerActorId === actor.id) &&
-        Number(receivable.principalMinor || 0) > 0 &&
-        receivablePaidMinor(receivable) >= Number(receivable.principalMinor || 0)
-      );
+      const collectedReceivables = state.receivables.filter((receivable) => receivableIsCollectedForBalanceClose(receivable, actor));
       const incomeRows = incomeStatementRows(actorLines);
       const incomeProfitMinor = incomeRows.reduce((sum, row) => sum + row.profitMinor, 0);
       const closedAt = new Date().toISOString();
@@ -16295,8 +16494,15 @@
 
     document.getElementById("closeBalanceButton").addEventListener("click", () => {
       if (selectedActor()?.role !== "Master") return;
-      closeCurrentBalanceForActor(state.selectedLedgerActor);
-      renderAll();
+      const actorName = state.selectedLedgerActor;
+      if (!actorName) return;
+      confirmAction(
+        `Warning: close ${actorName}'s ledger balance? Completed transactions and collected receivables will move to Report, and a new balance period will begin. This action cannot be undone.`,
+        () => {
+          if (!closeCurrentBalanceForActor(actorName)) return;
+          renderAll();
+        }
+      );
     });
 
     const subscriptionMutationSelector = [

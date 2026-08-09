@@ -173,9 +173,9 @@ function ToggleChoice({ label, checked, onPress, disabled = false }: { label: st
 }
 
 function tone(value: string): "neutral" | "good" | "warn" | "danger" {
-  if (["Paid", "Approved"].includes(value)) return "good";
+  if (["Paid", "Collected", "Approved"].includes(value)) return "good";
   if (["Voided", "Cancelled", "Rejected"].includes(value)) return "danger";
-  if (["Assigned", "Pending Forward", "Pending Approval", "Pending Acceptance", "Void Requested", "Returned"].includes(value)) return "warn";
+  if (["Open", "Assigned", "Pending Forward", "Pending Approval", "Pending Acceptance", "Void Requested", "Returned"].includes(value)) return "warn";
   return "neutral";
 }
 
@@ -1442,8 +1442,8 @@ export function SearchScreen({ session, state, onNavigate }: CommonProps) {
     const balanceMinor = Math.max(0, item.principalMinor - paidMinor);
     const principal = compactAmount(item.currency, majorFromMinor(item.principalMinor, item.currency));
     const balance = compactAmount(item.currency, majorFromMinor(balanceMinor, item.currency));
-    const status = type.startsWith("Archived") ? "Locked" : item.voided ? "Voided" : balanceMinor ? "Open" : "Paid";
-    const details = [item.senderName ? `Sender: ${item.senderName}` : "", item.receiverName ? `Receiver: ${item.receiverName}` : "", item.receiverCity ? `Receiver City: ${item.receiverCity}` : "", item.phoneNumber ? `Phone: ${item.phoneNumber}` : "", item.accountNumber ? `Account: ${item.accountNumber}` : "", item.remarks ? `Remarks: ${item.remarks}` : "", `Principal: ${principal}`, `Balance: ${balance}`].filter(Boolean).join(" - ");
+    const status = receivableIsVoided(item) ? "Voided" : type.startsWith("Archived") || balanceMinor === 0 ? "Collected" : "Open";
+    const details = [item.senderName ? `Sender: ${item.senderName}` : "", item.receiverName ? `Receiver: ${item.receiverName}` : "", item.receiverCity ? `Receiver City: ${item.receiverCity}` : "", item.phoneNumber ? `Phone: ${item.phoneNumber}` : "", item.accountNumber ? `Account: ${item.accountNumber}` : "", item.remarks ? `Remarks: ${item.remarks}` : "", item.creditReminder ? `Credit Reminder: ${item.creditReminder}` : "", `Principal: ${principal}`, `Balance: ${balance}`].filter(Boolean).join(" - ");
     const reference = item.brokerOrderNumber || item.orderId || item.id;
     rawResults.push({ key: `${type}:${item.id}`, groupKey: item.orderId ? `order:${item.orderId}` : `receivable:${item.id}`, kind: "receivable", type, reference, actor: item.borrower, participants: uniqueSearchNames([item.borrower, "Master"]), amount: `Principal ${principal} / Balance ${balance}`, status, details, time: new Date(item.createdAt || item.updatedAt || archivedAt || 0).getTime() || 0, screen: type.startsWith("Archived") ? "archive" : "receivables", searchText: [reference, item.id, item.borrower, status, details].join(" ").toLocaleLowerCase() });
   };
@@ -1489,6 +1489,7 @@ export function SearchScreen({ session, state, onNavigate }: CommonProps) {
 export function ReceivablesScreen({ session, state, offline, onState }: CommonProps) {
   const [amounts, setAmounts] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState("");
+  const [expandedCollected, setExpandedCollected] = useState<string[]>([]);
   const records = visibleReceivablesForSession(state.receivables, session);
   const totals = receivableTotalsByCurrency(records);
   const collect = async (id: string) => {
@@ -1516,17 +1517,58 @@ export function ReceivablesScreen({ session, state, offline, onState }: CommonPr
         const balance = receivableBalance(item);
         const collected = receivableCollectedMinor(item);
         const voided = receivableIsVoided(item);
-        const showReminder = !isMasterView(session) && (item.borrowerActorId === session.actorId || item.borrower === session.actorName) && Boolean(item.creditReminder);
-        return (
-          <Panel key={item.id} title={item.brokerOrderNumber || item.orderId} badge={voided ? "Voided" : balance ? "Open" : "Collected"}>
+        const isCollected = !voided && balance === 0;
+        const isExpanded = expandedCollected.includes(item.id);
+        const showReminder = Boolean(item.creditReminder);
+        const paymentHistory = (item.payments || [])
+          .map((payment) => `${formatDateTime(payment.paidAt)} ${compactAmount(item.currency, majorFromMinor(payment.amountMinor, item.currency))}${payment.receivedBy ? ` by ${payment.receivedBy}` : ""}`)
+          .join(" / ");
+        const details = (
+          <View style={styles.detailBlock}>
+            <SummaryRow label="Receivable ID" value={item.id} />
+            {item.orderId && item.orderId !== item.brokerOrderNumber ? <SummaryRow label="Order ID" value={item.orderId} /> : null}
+            {item.agentOrderNumber ? <SummaryRow label="Payer order number" value={item.agentOrderNumber} /> : null}
             <SummaryRow label="Borrower" value={item.borrower} />
             {item.senderName ? <SummaryRow label="Sender" value={item.senderName} /> : null}
             {item.receiverName ? <SummaryRow label="Receiver" value={item.receiverName} /> : null}
             {item.receiverCity ? <SummaryRow label="Receiver city" value={item.receiverCity} /> : null}
+            {item.phoneNumber ? <SummaryRow label="Phone" value={item.phoneNumber} /> : null}
+            {item.accountNumber ? <SummaryRow label="Account" value={item.accountNumber} /> : null}
+            {item.remarks ? <SummaryRow label="Remarks" value={item.remarks} /> : null}
             {showReminder ? <SummaryRow label="Credit Reminder" value={item.creditReminder || ""} /> : null}
+            <SummaryRow label="Created" value={formatDateTime(item.createdAt)} />
             <SummaryRow label="Principal" value={compactAmount(item.currency, majorFromMinor(item.principalMinor, item.currency))} />
             <SummaryRow label="Collected" value={compactAmount(item.currency, majorFromMinor(collected, item.currency))} />
             <SummaryRow label="Balance" value={compactAmount(item.currency, majorFromMinor(balance, item.currency))} strong />
+            {paymentHistory ? <SummaryRow label="Payments" value={paymentHistory} /> : null}
+          </View>
+        );
+        return (
+          <Panel
+            key={item.id}
+            title={item.brokerOrderNumber || item.orderId || item.id}
+            badge={voided ? "Voided" : balance ? "Open" : "Collected"}
+            badgeTone={voided ? "voided" : balance ? "warn" : "good"}
+          >
+            {isCollected ? (
+              <>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={isExpanded ? "Hide collected order details" : "Show collected order details"}
+                  onPress={() => setExpandedCollected((current) => isExpanded ? current.filter((id) => id !== item.id) : [...current, item.id])}
+                  style={styles.receivableCompactRow}
+                >
+                  <Text style={styles.receivableReminder} numberOfLines={1}>
+                    Credit Reminder: {showReminder ? item.creditReminder : "No credit reminder"}
+                  </Text>
+                  <View style={styles.receivableCompactToggle}>
+                    <Text style={styles.linkText}>{isExpanded ? "Show less" : "Show more"}</Text>
+                    {isExpanded ? <ChevronUp size={17} color={colors.accent} /> : <ChevronDown size={17} color={colors.accent} />}
+                  </View>
+                </Pressable>
+                {isExpanded ? details : null}
+              </>
+            ) : details}
             {balance > 0 && !voided ? (
               <View style={styles.actionBlock}>
                 <Field label="Collection amount" value={amounts[item.id] || ""} onChangeText={(value) => setAmounts((current) => ({ ...current, [item.id]: value }))} keyboardType="decimal-pad" />
@@ -3052,6 +3094,9 @@ const styles = StyleSheet.create({
   linkText: { color: colors.accent, fontWeight: "900" },
   detailBlock: { gap: 0 },
   receivableTotalGroup: { gap: spacing.xs, paddingBottom: spacing.sm, borderBottomWidth: 1, borderBottomColor: colors.line },
+  receivableCompactRow: { minHeight: 38, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: spacing.md },
+  receivableReminder: { color: colors.muted, fontSize: 12, fontWeight: "800", flex: 1 },
+  receivableCompactToggle: { flexDirection: "row", alignItems: "center", gap: spacing.xs, flexShrink: 0 },
   actionBlock: { gap: spacing.md, borderTopWidth: 1, borderTopColor: colors.line, paddingTop: spacing.md },
   forwardTransferBlock: { gap: spacing.md, borderTopWidth: 1, borderTopColor: colors.line, paddingTop: spacing.md },
   rowButtons: { flexDirection: "row", flexWrap: "wrap", gap: spacing.sm },
