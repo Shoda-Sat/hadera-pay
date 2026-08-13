@@ -3678,6 +3678,26 @@
                 </div>
               </div>
             </div>
+            <div class="panel span-12 settings-category" data-master-settings>
+              <div class="panel-header">
+                <div class="settings-heading">
+                  <h2>Closed Report Repair</h2>
+                  <small>Restore paid-order details that are missing from an Actor's existing closed Report. Ledger balances and closed totals are never recalculated.</small>
+                </div>
+                <span id="orderArchiveRepairStatus" class="state-pill">Ready to check</span>
+              </div>
+              <div class="panel-body">
+                <div class="form-grid">
+                  <div class="field">
+                    <label for="orderArchiveRepairActor">Actor report</label>
+                    <select id="orderArchiveRepairActor"></select>
+                  </div>
+                </div>
+                <div class="actions">
+                  <button class="btn primary" id="orderArchiveRepairButton" type="button">Check Missing Orders</button>
+                </div>
+              </div>
+            </div>
             <div class="panel span-12 settings-category" data-settings-panel="actorAccess" data-master-settings>
             <div class="panel-header">
               <div class="settings-heading">
@@ -3872,6 +3892,7 @@
   <script>
     let storageKey = "haderapay.local.state.v1";
     let currentAuth = null;
+    const clientReleaseId = "order-participant-archive-v1";
     let currentLoginStartedAt = 0;
     let remoteStateReady = false;
     let saveTimer = null;
@@ -5016,6 +5037,11 @@
       if (!currentAuth || !remoteStateReady) return;
       refreshAccountDeviceWarning();
       if (actorPermissionSavePending > 0 || settingsRateInputIsFocused()) return;
+      const version = await api("/api/app-state/version").catch(() => null);
+      if (version?.clientReleaseId && version.clientReleaseId !== clientReleaseId) {
+        window.location.reload();
+        return;
+      }
       const remote = await api("/api/app-state").catch(() => null);
       if (actorPermissionSavePending > 0) return;
       if (!mergeSharedState(remote?.state)) return;
@@ -5446,6 +5472,9 @@
       r2StorageStatus: document.getElementById("r2StorageStatus"),
       r2RefreshButton: document.getElementById("r2RefreshButton"),
       r2MigrateButton: document.getElementById("r2MigrateButton"),
+      orderArchiveRepairStatus: document.getElementById("orderArchiveRepairStatus"),
+      orderArchiveRepairActor: document.getElementById("orderArchiveRepairActor"),
+      orderArchiveRepairButton: document.getElementById("orderArchiveRepairButton"),
       subscriptionRows: document.getElementById("subscriptionRows"),
       subscriptionError: document.getElementById("subscriptionError"),
       inviteRows: document.getElementById("inviteRows"),
@@ -8236,6 +8265,26 @@
       els.actorResetButton.disabled = actors.length === 0;
     }
 
+    function renderOrderArchiveRepairOptions() {
+      if (!els.orderArchiveRepairActor || !els.orderArchiveRepairButton) return;
+      const actors = state.actors.filter((actor) =>
+        actor.role !== "Master" && state.archives.some((archive) =>
+          archive.actorId === actor.id || (!archive.actorId && archive.actor === actor.name)
+        )
+      );
+      const previousValue = els.orderArchiveRepairActor.value;
+      if (document.activeElement !== els.orderArchiveRepairActor) {
+        els.orderArchiveRepairActor.innerHTML = actors.length
+          ? actors.map((actor) => `<option value="${escapeHtml(actor.id)}">${escapeHtml(actor.name)} - ${escapeHtml(actor.role)}</option>`).join("")
+          : '<option value="">No closed Actor reports</option>';
+        els.orderArchiveRepairActor.value = actors.some((actor) => actor.id === previousValue)
+          ? previousValue
+          : actors[0]?.id || "";
+      }
+      els.orderArchiveRepairActor.disabled = actors.length === 0;
+      els.orderArchiveRepairButton.disabled = actors.length === 0;
+    }
+
     function renameActor(actorId, nextName) {
       const actor = state.actors.find((item) => item.id === actorId);
       const name = nextName.trim();
@@ -10085,7 +10134,7 @@
       );
       return Array.from(orderJournals)
         .map((journal) => {
-          const order = state.orders.find((item) => item.journal === journal);
+          const order = orderForLedgerLine({ source: "ORDER_PAYMENT", journal });
           if (!order) return null;
           if (order.state === "Voided" || order.voidJournal) return null;
           const journalLines = state.ledger.filter((line) => line.journal === journal && line.source === "ORDER_PAYMENT");
@@ -12369,12 +12418,11 @@
       if (archive.actor !== order.agent) return source;
       const archivedActor = state.actors.find((item) => item.id === archive.actorId || item.name === archive.actor);
       const actorRole = archive.actorRole || archivedActor?.role || "";
-      const actorCurrency = archive.actorCurrency || archivedActor?.currency || order.payerCurrency || "";
       const payerAmountMinor = Number(order.payerAmountMinor || 0);
-      if (actorRole === "Agent" && actorCurrency === "USD") {
-        if (order.payerCurrency === "USD" && payerAmountMinor > 0) return { currency: "USD", amountMinor: payerAmountMinor };
-        if ((order.payoutCurrency || source.currency) === "USD") {
-          return { currency: "USD", amountMinor: Number(order.payoutAmountMinor || order.sourceAmountMinor || 0) };
+      if (["Agent", "Special Broker"].includes(actorRole)) {
+        if (order.payerCurrency && payerAmountMinor > 0) return { currency: order.payerCurrency, amountMinor: payerAmountMinor };
+        if (order.payoutCurrency && Number(order.payoutAmountMinor || 0) > 0) {
+          return { currency: order.payoutCurrency, amountMinor: Number(order.payoutAmountMinor) };
         }
       }
       if (actorRole === "Special Agent") {
@@ -13380,11 +13428,12 @@
           ? payingActorStatement(order)
           : null;
       return {
-        id: order.id,
-        internalOrderId: order.id,
+        id: order.id || order.internalOrderId,
+        internalOrderId: order.internalOrderId || order.id,
         brokerOrderNumber: brokerOrderNumberForOrder(order),
         brokerOrderNumberCycle: Number(order.brokerOrderNumberCycle || 0),
         brokerActorId: order.brokerActorId || "",
+        agentActorId: order.agentActorId || "",
         agentOrderNumber: agentOrderNumberForOrder(order, order.agent),
         agentOrderActor: order.agentOrderActor || order.agent || "",
         agentOrderNumbers: order.agentOrderNumbers && typeof order.agentOrderNumbers === "object" ? { ...order.agentOrderNumbers } : {},
@@ -13402,10 +13451,31 @@
         sourceAmountMinor: Number(order.sourceAmountMinor || 0),
         payoutCurrency: order.payoutCurrency || order.sourceCurrency || "USD",
         payoutAmountMinor: Number(order.payoutAmountMinor || order.sourceAmountMinor || 0),
+        rate: Number(order.rate || 0),
+        commissionPercent: Number(order.commissionPercent || 0),
+        commissionMinor: Number(order.commissionMinor || 0),
+        orderCommissionLiability: normalizedOrderCommissionLiability(order),
+        grossMinor: Number(order.grossMinor || 0),
+        amount: order.amount || "",
+        moneyUnitVersion: order.moneyUnitVersion,
+        forwardedPayoutDivider: order.forwardedPayoutDivider,
+        forwardedPayoutPercent: order.forwardedPayoutPercent,
+        manualSpecialPayoutDivider: order.manualSpecialPayoutDivider,
+        manualSpecialPayoutPercent: order.manualSpecialPayoutPercent,
+        manualMasterRateDivider: order.manualMasterRateDivider,
+        manualMasterRatePercent: order.manualMasterRatePercent,
         payerCurrency: payerStatement?.currency || "",
         payerAmountMinor: Number(payerStatement?.amountMinor || 0),
         incomeBaseCurrency: order.incomeBaseCurrency || "USD",
         incomeBaseAmountMinor: Number(order.incomeBaseAmountMinor || 0),
+        incomeCollectedCurrency: order.incomeCollectedCurrency || order.sourceCurrency || "USD",
+        incomeCollectedOriginalMinor: Number(order.incomeCollectedOriginalMinor || 0),
+        incomeCollectedEurMinor: Number(order.incomeCollectedEurMinor || 0),
+        incomeCollectedUsdMinor: Number(order.incomeCollectedUsdMinor || 0),
+        incomeProfitMinor: Number.isFinite(Number(order.incomeProfitMinor)) ? Number(order.incomeProfitMinor) : undefined,
+        incomeSnapshotAt: order.incomeSnapshotAt || "",
+        incomeMasterRateSnapshot: order.incomeMasterRateSnapshot ? { ...order.incomeMasterRateSnapshot } : undefined,
+        incomeUsdAgentRateSnapshot: order.incomeUsdAgentRateSnapshot ? { ...order.incomeUsdAgentRateSnapshot } : undefined,
         state: order.state,
         fundingType: order.fundingType || "cash",
         journal: order.journal || "",
@@ -13640,6 +13710,58 @@
       return true;
     }
 
+    function orderArchiveIdentityValues(order) {
+      return Array.from(new Set([
+        order?.id,
+        order?.internalOrderId,
+        order?.journal
+      ].map((value) => String(value || "").trim()).filter(Boolean)));
+    }
+
+    function ordersReferToSameRecord(left, right) {
+      const rightValues = new Set(orderArchiveIdentityValues(right));
+      return orderArchiveIdentityValues(left).some((value) => rightValues.has(value));
+    }
+
+    function orderArchivedForActor(order, actor) {
+      if (!order || !actor) return false;
+      return state.archives.some((archive) => {
+        const belongsToActor = actor.id && archive.actorId
+          ? archive.actorId === actor.id
+          : archive.actor === actor.name;
+        return belongsToActor && (archive.orders || []).some((snapshot) => ordersReferToSameRecord(snapshot, order));
+      });
+    }
+
+    function orderParticipantMatchesActor(order, actor, role) {
+      const participantActorId = role === "broker" ? order?.brokerActorId : order?.agentActorId;
+      const participantName = role === "broker" ? order?.broker : order?.agent;
+      return actor?.id && participantActorId
+        ? actor.id === participantActorId
+        : actor?.name === participantName;
+    }
+
+    function completedOrdersForActorClose(actor, actorLines) {
+      const candidates = [
+        ...state.orders,
+        ...actorLines
+          .filter((line) => line.source === "ORDER_PAYMENT")
+          .map((line) => orderForLedgerLine(line))
+          .filter(Boolean)
+      ];
+      const unique = [];
+      candidates.forEach((order) => {
+        if (orderArchiveIdentityValues(order).length && !unique.some((candidate) => ordersReferToSameRecord(candidate, order))) {
+          unique.push(order);
+        }
+      });
+      return unique.filter((order) =>
+        (order.state === "Paid" || order.state === "Voided") &&
+        (orderParticipantMatchesActor(order, actor, "broker") || orderParticipantMatchesActor(order, actor, "agent")) &&
+        !orderArchivedForActor(order, actor)
+      );
+    }
+
     function closeCurrentBalanceForActor(actorName) {
       const actor = activeActors().find((item) => item.name === actorName && item.role !== "Master");
       if (!actor) return false;
@@ -13657,10 +13779,7 @@
         (line.source === "PREVIOUS_CLOSE" && line.account === "MASTER_PREVIOUS_CLOSE" && line.details === previousCloseDetails);
       const actorLines = activeLedgerLines(state.ledger).filter((line) => closesWithActor(line));
       const openTransactionLines = actorLines.filter((line) => line.source !== "PREVIOUS_CLOSE");
-      const archivedOrders = state.orders.filter((order) =>
-        (order.state === "Paid" || order.state === "Voided") &&
-        (order.broker === actor.name || order.agent === actor.name)
-      );
+      const archivedOrders = completedOrdersForActorClose(actor, actorLines);
       const archivedTransfers = state.transfers.filter((transfer) =>
         ["Approved", "Reversed"].includes(transfer.state) &&
         (transfer.from === actor.name || transfer.to === actor.name) &&
@@ -15106,6 +15225,98 @@
     els.r2RefreshButton?.addEventListener("click", refreshR2StorageStatus);
     els.r2MigrateButton?.addEventListener("click", migrateExistingAttachments);
 
+    function setOrderArchiveRepairStatus(message, tone = "") {
+      if (!els.orderArchiveRepairStatus) return;
+      els.orderArchiveRepairStatus.textContent = message;
+      els.orderArchiveRepairStatus.className = `state-pill ${tone}`.trim();
+    }
+
+    async function reloadWorkspaceAfterOrderArchiveRepair() {
+      const remote = await api("/api/app-state");
+      const nextState = remote.state || {};
+      replaceState({
+        ...structuredClone(defaultState),
+        ...nextState,
+        actors: normalizeActors(Array.isArray(nextState.actors) ? nextState.actors : structuredClone(defaultState.actors)),
+        receivables: Array.isArray(nextState.receivables) ? nextState.receivables : [],
+        transfers: normalizeTransfers(Array.isArray(nextState.transfers) ? nextState.transfers : []),
+        masterBankEntries: normalizeMasterBankEntries(nextState.masterBankEntries),
+      });
+      ensureSessionActor();
+      try { localStorage.setItem(storageKey, JSON.stringify(state)); } catch {}
+      renderAll();
+    }
+
+    async function checkOrderArchiveRepair() {
+      if (!signedInAsMaster() || !els.orderArchiveRepairActor?.value || els.orderArchiveRepairButton.disabled) return;
+      const actorId = els.orderArchiveRepairActor.value;
+      const actor = state.actors.find((item) => item.id === actorId);
+      if (!actor) return;
+      els.orderArchiveRepairButton.disabled = true;
+      els.orderArchiveRepairButton.textContent = "Checking...";
+      setOrderArchiveRepairStatus("Checking report...");
+      try {
+        const plan = await api("/api/app-state/repair-order-archives/plan", {
+          method: "POST",
+          body: { actorId: actor.id, actorName: actor.name },
+        });
+        if (plan.skippedCount > 0 || plan.orphanCount > 0) {
+          setOrderArchiveRepairStatus("Incomplete history - stopped", "danger");
+          notifyEvent("Report repair stopped", "Some historical ledger evidence could not be matched safely to a complete order and closed Report. Nothing was changed.");
+          return;
+        }
+        if (plan.candidateCount === 0) {
+          setOrderArchiveRepairStatus("No missing orders", "good");
+          notifyEvent("Report checked", `${actor.name}'s closed Report has no restorable missing paid orders.`);
+          return;
+        }
+        if (!plan.privateBackupReady || !plan.canApply) {
+          setOrderArchiveRepairStatus("Private backup unavailable", "danger");
+          notifyEvent("Report repair stopped", "A private encrypted backup could not be guaranteed. Nothing was changed.");
+          return;
+        }
+        setOrderArchiveRepairStatus(`${plan.candidateCount} ready to restore`, "warn");
+        confirmAction(
+          `Restore ${plan.candidateCount} missing paid-order records to ${actor.name}'s existing closed Report? This changes Report details only—not ledger balances or closed totals—and creates private local and encrypted offsite backups first.`,
+          async () => {
+            clearTimeout(saveTimer);
+            els.orderArchiveRepairButton.disabled = true;
+            els.orderArchiveRepairButton.textContent = "Backing up and restoring...";
+            setOrderArchiveRepairStatus("Creating backup...");
+            try {
+              const result = await api("/api/app-state/repair-order-archives/apply", {
+                method: "POST",
+                body: {
+                  actorId: plan.actorId,
+                  actorName: plan.actor,
+                  expectedCount: plan.candidateCount,
+                  expectedRevision: plan.revision,
+                  planDigest: plan.planDigest,
+                },
+              });
+              await reloadWorkspaceAfterOrderArchiveRepair();
+              setOrderArchiveRepairStatus(`${result.restoredCount} restored`, "good");
+              notifyEvent("Closed Report restored", `${result.restoredCount} paid-order record${result.restoredCount === 1 ? "" : "s"} restored for ${result.actor}. Ledger balances and closed totals were unchanged.`);
+            } catch (error) {
+              setOrderArchiveRepairStatus("Restore stopped", "danger");
+              notifyEvent("Report repair stopped", error.message || "Nothing was changed.");
+            } finally {
+              els.orderArchiveRepairButton.disabled = false;
+              els.orderArchiveRepairButton.textContent = "Check Missing Orders";
+            }
+          }
+        );
+      } catch (error) {
+        setOrderArchiveRepairStatus("Check failed", "danger");
+        notifyEvent("Report check failed", error.message || "The report could not be checked.");
+      } finally {
+        els.orderArchiveRepairButton.disabled = false;
+        els.orderArchiveRepairButton.textContent = "Check Missing Orders";
+      }
+    }
+
+    els.orderArchiveRepairButton?.addEventListener("click", checkOrderArchiveRepair);
+
     document.getElementById("settings")?.addEventListener("click", (event) => {
       const settingsToggle = event.target.closest("[data-settings-toggle]");
       if (!settingsToggle) return;
@@ -16509,7 +16720,7 @@
       "#assignButton", "#voidButton", "#settleButton", "#closeMasterTransactionsButton", "#closeBalanceButton",
       "#exportLedgerExcelButton", "#exportLedgerPdfButton", "#exportMasterBankStatementButton",
       "#exportArchiveExcelButton", "#exportArchivePdfButton",
-      "#saveSenderCustomer", "#saveReceiverCustomer", "#chatPhotoButton", "#chatRecordButton", "#r2MigrateButton",
+      "#saveSenderCustomer", "#saveReceiverCustomer", "#chatPhotoButton", "#chatRecordButton", "#r2MigrateButton", "#orderArchiveRepairButton",
       ".forward-order", ".master-return-order", ".cancel-order", ".attach-proof", ".pay-order",
       ".collect-receivable", ".request-void-order", ".approve-void-order", ".reject-void-order",
       ".return-order", ".edit-returned-order", ".edit-transfer", ".reverse-transfer",
@@ -16552,6 +16763,7 @@
       renderProfiles();
       renderActors();
       renderActorResetOptions();
+      renderOrderArchiveRepairOptions();
       renderPermissionSettings();
       renderVisibilityPermissions();
       renderAccountTimeoutSettings();

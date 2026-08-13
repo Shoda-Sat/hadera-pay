@@ -3,6 +3,8 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
+import { backfillClosedParticipantOrderSnapshots } from "./src/archiveParticipantBackfill.mjs";
 import {
   DeleteObjectCommand,
   GetObjectCommand,
@@ -124,8 +126,9 @@ const blankDb = () => ({
 async function readPersistedDb() {
   try {
     return { ...blankDb(), ...JSON.parse(await readFile(dbPath, "utf8")) };
-  } catch {
-    return null;
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw new Error(`The HaderaPay database could not be read safely: ${error instanceof Error ? error.message : "unknown error"}`);
   }
 }
 
@@ -163,13 +166,25 @@ function mergeSessionsById(existingItems = [], incomingItems = []) {
 
 function mergeAppStates(existingStates = {}, incomingStates = {}) {
   return Object.fromEntries(
-    Array.from(new Set([...Object.keys(existingStates || {}), ...Object.keys(incomingStates || {})])).map((workspaceId) => [
-      workspaceId,
-      {
-        ...(existingStates?.[workspaceId] || {}),
-        ...(incomingStates?.[workspaceId] || {}),
-      },
-    ])
+    Array.from(new Set([...Object.keys(existingStates || {}), ...Object.keys(incomingStates || {})])).map((workspaceId) => {
+      const existingState = existingStates?.[workspaceId] || {};
+      const incomingState = incomingStates?.[workspaceId] || {};
+      const existingRevision = String(existingState._syncRevision || "");
+      const incomingRevision = String(incomingState._syncRevision || "");
+      const revisionTime = (value) => Number.parseInt(String(value || "").split("-", 1)[0], 36) || 0;
+      const latestRevision = revisionTime(existingRevision) > revisionTime(incomingRevision)
+        ? existingRevision
+        : incomingRevision || existingRevision;
+      return [
+        workspaceId,
+        {
+          ...existingState,
+          ...incomingState,
+          archives: mergeArchiveSnapshots(existingState.archives, incomingState.archives),
+          ...(latestRevision ? { _syncRevision: latestRevision } : {}),
+        },
+      ];
+    })
   );
 }
 
@@ -203,18 +218,26 @@ async function loadDb() {
   }
 }
 
+async function writePersistedDbAtomic(db) {
+  await mkdir(dataDir, { recursive: true });
+  const tempPath = `${dbPath}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tempPath, JSON.stringify(db, null, 2));
+  await rename(tempPath, dbPath);
+}
+
+function enqueueDbWrite(operation) {
+  const queued = saveQueue.then(operation, operation);
+  saveQueue = queued.then(() => undefined, () => undefined);
+  return queued;
+}
+
 async function saveDb(db, options = {}) {
-  const write = async () => {
-    await mkdir(dataDir, { recursive: true });
+  await enqueueDbWrite(async () => {
     const nextDb = options.replace === true
       ? { ...blankDb(), ...db }
       : mergeDatabase(await readPersistedDb(), db);
-    const tempPath = `${dbPath}.${process.pid}.${Date.now()}.tmp`;
-    await writeFile(tempPath, JSON.stringify(nextDb, null, 2));
-    await rename(tempPath, dbPath);
-  };
-  saveQueue = saveQueue.then(write, write);
-  await saveQueue;
+    await writePersistedDbAtomic(nextDb);
+  });
 }
 
 function id(prefix) {
@@ -1577,6 +1600,175 @@ function stripRestrictedCreditReminders(state, session) {
   };
 }
 
+function orderArchiveRepairTarget(state, input = {}) {
+  const requestedActorId = String(input.actorId || "").trim();
+  const requestedActorName = String(input.actorName || "").trim();
+  const actors = Array.isArray(state?.actors) ? state.actors : [];
+  const actor = requestedActorId
+    ? actors.find((item) => String(item?.id || "") === requestedActorId)
+    : actors.find((item) => String(item?.name || "").toLocaleLowerCase() === requestedActorName.toLocaleLowerCase());
+  if (!actor || actor.role === "Master") throw httpError(400, "Choose a valid Actor report to repair.");
+  return { actorId: String(actor.id || ""), actorName: String(actor.name || "") };
+}
+
+function archiveMatchesRepairTarget(archive, target) {
+  const archiveActorId = String(archive?.actorId || "").trim();
+  if (target.actorId && archiveActorId) return archiveActorId === target.actorId;
+  return Boolean(target.actorName && String(archive?.actor || "").trim().toLocaleLowerCase() === target.actorName.toLocaleLowerCase());
+}
+
+function orderArchiveRepairInvariantState(state) {
+  return {
+    ...state,
+    archives: (Array.isArray(state?.archives) ? state.archives : []).map((archive) => {
+      const { orders, ...withoutOrders } = archive;
+      return withoutOrders;
+    }),
+  };
+}
+
+function orderArchiveRepairPlan(state, target, revision = "") {
+  const result = backfillClosedParticipantOrderSnapshots(state, target);
+  const repaired = result.repaired.slice().sort((left, right) =>
+    [left.archiveId, left.orderId, left.journal].join(":").localeCompare([right.archiveId, right.orderId, right.journal].join(":"))
+  );
+  const planDigest = crypto.createHash("sha256").update(JSON.stringify({
+    revision,
+    target,
+    repaired,
+    skippedCount: result.skippedCount,
+    orphanCount: result.orphanCount,
+    evidenceCount: result.evidenceCount,
+  })).digest("hex");
+  return {
+    result,
+    revision,
+    target,
+    planDigest,
+    candidateCount: result.repairedCount,
+    skippedCount: result.skippedCount,
+    orphanCount: result.orphanCount,
+    existingCount: result.existingCount,
+    evidenceCount: result.evidenceCount,
+  };
+}
+
+function validateOrderArchiveRepair(beforeState, plan) {
+  if (plan.skippedCount !== 0) throw httpError(409, "The report repair found ambiguous historical records and stopped without changing data.");
+  if (plan.orphanCount !== 0) throw httpError(409, "The report repair found historical ledger evidence without a complete matching order and stopped without changing data.");
+  if (!isDeepStrictEqual(
+    orderArchiveRepairInvariantState(beforeState),
+    orderArchiveRepairInvariantState(plan.result.state)
+  )) {
+    throw httpError(500, "The report repair safety check detected an accounting change and stopped.");
+  }
+  const beforeArchives = Array.isArray(beforeState?.archives) ? beforeState.archives : [];
+  const afterArchives = Array.isArray(plan.result.state?.archives) ? plan.result.state.archives : [];
+  const beforeOrderCount = beforeArchives.reduce((total, archive) => total + (archive.orders || []).length, 0);
+  const afterOrderCount = afterArchives.reduce((total, archive) => total + (archive.orders || []).length, 0);
+  if (afterOrderCount - beforeOrderCount !== plan.candidateCount) {
+    throw httpError(500, "The report repair count check failed and stopped.");
+  }
+  for (let index = 0; index < Math.max(beforeArchives.length, afterArchives.length); index += 1) {
+    if (archiveMatchesRepairTarget(beforeArchives[index], plan.target)) continue;
+    if (!isDeepStrictEqual(beforeArchives[index]?.orders || [], afterArchives[index]?.orders || [])) {
+      throw httpError(500, "The report repair attempted to change another Actor's report and stopped.");
+    }
+  }
+  const afterPlan = backfillClosedParticipantOrderSnapshots(plan.result.state, plan.target);
+  if (afterPlan.repairedCount !== 0 || afterPlan.skippedCount !== 0 || afterPlan.orphanCount !== 0) {
+    throw httpError(500, "The report repair could not prove an idempotent result and stopped.");
+  }
+}
+
+async function createOrderArchiveRepairBackup(rawDatabase, { workspaceId, revision, planDigest }) {
+  if (!r2Client) throw httpError(503, "Private backup storage is unavailable, so no report data was changed.");
+  const createdAt = new Date().toISOString();
+  const repairId = `order-archive-${Date.now().toString(36)}-${crypto.randomBytes(6).toString("hex")}`;
+  const sourceSha256 = crypto.createHash("sha256").update(rawDatabase).digest("hex");
+  const backupDirectory = path.join(dataDir, "backups");
+  const localBackupName = `auth-db.before-${repairId}.${sourceSha256.slice(0, 12)}.json`;
+  await mkdir(backupDirectory, { recursive: true });
+  await writeFile(path.join(backupDirectory, localBackupName), rawDatabase, { flag: "wx", mode: 0o600 });
+
+  const salt = crypto.randomBytes(16);
+  const iv = crypto.randomBytes(12);
+  const key = crypto.scryptSync(ownerPassword, salt, 32);
+  const additionalData = Buffer.from(JSON.stringify({ version: 1, repairId, workspaceId, revision, planDigest }));
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  cipher.setAAD(additionalData);
+  const ciphertext = Buffer.concat([cipher.update(rawDatabase), cipher.final()]);
+  const payload = JSON.stringify({
+    version: 1,
+    algorithm: "aes-256-gcm+scrypt",
+    createdAt,
+    repairId,
+    sourceSha256,
+    salt: salt.toString("base64"),
+    iv: iv.toString("base64"),
+    authTag: cipher.getAuthTag().toString("base64"),
+    additionalData: additionalData.toString("base64"),
+    ciphertext: ciphertext.toString("base64"),
+  });
+  const workspaceSegment = String(workspaceId || "workspace").replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 100) || "workspace";
+  const objectKey = `private-backups/database/${workspaceSegment}/${repairId}.json.enc`;
+  await r2Client.send(new PutObjectCommand({
+    Bucket: r2BucketName,
+    Key: objectKey,
+    Body: payload,
+    ContentType: "application/json",
+    Metadata: { repairid: repairId, sourcesha256: sourceSha256 },
+  }));
+  const storedObject = await r2Client.send(new GetObjectCommand({ Bucket: r2BucketName, Key: objectKey }));
+  const storedPayload = Buffer.from(await storedObject.Body.transformToByteArray());
+  if (!storedPayload.equals(Buffer.from(payload))) {
+    throw httpError(503, "The encrypted private backup could not be verified, so no report data was changed.");
+  }
+  return { repairId, createdAt, sourceSha256, localBackupName, objectKey };
+}
+
+async function applyOrderArchiveRepair(session, input = {}) {
+  return enqueueDbWrite(async () => {
+    const rawDatabase = await readFile(dbPath);
+    const latestDb = { ...blankDb(), ...JSON.parse(rawDatabase.toString("utf8")) };
+    const workspaceId = session.workspace.id;
+    const currentState = latestDb.appStates?.[workspaceId] || {};
+    const target = orderArchiveRepairTarget(currentState, input);
+    const revision = workspaceStateRevision(latestDb, workspaceId);
+    const plan = orderArchiveRepairPlan(currentState, target, revision);
+    const expectedCount = Number(input.expectedCount);
+    if (!Number.isSafeInteger(expectedCount) || expectedCount <= 0) throw httpError(400, "Check the report before applying a repair.");
+    if (String(input.expectedRevision || "") !== revision || String(input.planDigest || "") !== plan.planDigest || expectedCount !== plan.candidateCount) {
+      throw httpError(409, "The workspace changed after the repair check. Check the report again before restoring it.");
+    }
+    validateOrderArchiveRepair(currentState, plan);
+    const backup = await createOrderArchiveRepairBackup(rawDatabase, {
+      workspaceId,
+      revision,
+      planDigest: plan.planDigest,
+    });
+    const nextState = plan.result.state;
+    latestDb.appStates ||= {};
+    latestDb.appStates[workspaceId] = nextState;
+    const nextRevision = markWorkspaceStateChanged(latestDb, workspaceId, nextState);
+    await writePersistedDbAtomic(latestDb);
+    return {
+      ok: true,
+      restoredCount: plan.candidateCount,
+      skippedCount: plan.skippedCount,
+      orphanCount: plan.orphanCount,
+      actor: target.actorName,
+      revision: nextRevision,
+      backup: {
+        repairId: backup.repairId,
+        createdAt: backup.createdAt,
+        sourceSha256: backup.sourceSha256,
+        offsite: true,
+      },
+    };
+  });
+}
+
 function sanitizeIncomingWorkspaceState(state, session, db) {
   if (!state || typeof state !== "object") return {};
   const persistedState = db.appStates[session.workspace.id] || {};
@@ -2541,7 +2733,37 @@ async function handleApi(request, response, url) {
   }
 
   if (url.pathname === "/api/app-state/version" && method === "GET") {
-    sendJson(response, 200, { revision: workspaceStateRevision(db, session.workspace.id) });
+    sendJson(response, 200, { revision: workspaceStateRevision(db, session.workspace.id), clientReleaseId: "order-participant-archive-v1" });
+    return;
+  }
+
+  if (url.pathname === "/api/app-state/repair-order-archives/plan" && method === "POST") {
+    if (session.membership.role !== "Master") return sendJson(response, 403, { error: "Only Master can repair closed Actor reports." });
+    const body = await readJson(request);
+    const currentState = db.appStates[session.workspace.id] || {};
+    const target = orderArchiveRepairTarget(currentState, body);
+    const plan = orderArchiveRepairPlan(currentState, target, workspaceStateRevision(db, session.workspace.id));
+    sendJson(response, 200, {
+      actor: target.actorName,
+      actorId: target.actorId,
+      candidateCount: plan.candidateCount,
+      skippedCount: plan.skippedCount,
+      orphanCount: plan.orphanCount,
+      existingCount: plan.existingCount,
+      evidenceCount: plan.evidenceCount,
+      planDigest: plan.planDigest,
+      revision: plan.revision,
+      privateBackupReady: r2Configured,
+      canApply: plan.candidateCount > 0 && plan.skippedCount === 0 && plan.orphanCount === 0 && r2Configured,
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/app-state/repair-order-archives/apply" && method === "POST") {
+    if (session.membership.role !== "Master") return sendJson(response, 403, { error: "Only Master can repair closed Actor reports." });
+    const body = await readJson(request);
+    const result = await applyOrderArchiveRepair(session, body);
+    sendJson(response, 200, result);
     return;
   }
 
@@ -2656,7 +2878,7 @@ async function handleApi(request, response, url) {
       nextState.actors = (nextState.actors || []).filter((actor) => actor?.role === "Master");
     }
     const revision = markWorkspaceStateChanged(db, session.workspace.id, nextState);
-    await saveDb(db, { replace: scope === "wipe" });
+    await saveDb(db, { replace: true });
     sendJson(response, 200, { ok: true, state: stripRestrictedCreditReminders(nextState, session), revision });
     return;
   }
@@ -2689,8 +2911,20 @@ const server = http.createServer(async (request, response) => {
     const pathname = decodeURIComponent(url.pathname);
     const relativePath = pathname === "/" ? "preview.html" : pathname.slice(1);
     const filePath = path.resolve(root, relativePath);
+    const rootRelativePath = path.relative(root, filePath);
+    const protectedDataPath = path.resolve(dataDir);
+    const protectedSourcePath = path.resolve(root, "server.mjs");
+    const protectedRelativePath = relativePath.split(/[\\/]+/).some((segment) => segment.startsWith("."));
 
-    if (!filePath.startsWith(root)) {
+    if (
+      rootRelativePath === ".." ||
+      rootRelativePath.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(rootRelativePath) ||
+      filePath === protectedDataPath ||
+      filePath.startsWith(`${protectedDataPath}${path.sep}`) ||
+      filePath === protectedSourcePath ||
+      protectedRelativePath
+    ) {
       response.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
       response.end("Forbidden");
       return;
