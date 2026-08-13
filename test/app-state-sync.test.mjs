@@ -741,7 +741,7 @@ test("workspace revision checks stay read-only and detect saved changes", async 
     const recoveredCollision = await requestJson(baseUrl, "/api/app-state", {
       cookie: masterLogin.cookie,
       method: "PUT",
-      body: { state: staleLamState },
+      body: { state: staleLamState, expectedRevision: savedGoitomState.data.revision },
     });
     const recoveredGoitomOrder = recoveredCollision.data.state.orders.find((order) => order.brokerOrderNumber === "GOI001");
     const recoveredLamOrder = recoveredCollision.data.state.orders.find((order) => order.brokerOrderNumber === "LAM007");

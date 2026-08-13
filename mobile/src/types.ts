@@ -437,6 +437,7 @@ export interface ArchiveRecord {
 }
 
 export interface WorkspaceState {
+  _syncRevision?: string;
   actors: ActorRecord[];
   orders: OrderRecord[];
   receivables: ReceivableRecord[];
@@ -449,6 +450,7 @@ export interface WorkspaceState {
   chatConversations: ChatConversationRecord[];
   deletedActorIds?: string[];
   deletedChatIds?: string[];
+  deletedOrderIds?: string[];
   masterRateDivisorSettings?: Partial<Record<Currency, RateSetting>>;
   buyingRates?: {
     eurToUsd?: number;

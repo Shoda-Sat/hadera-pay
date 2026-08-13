@@ -374,10 +374,19 @@ function removeOrdersAlreadyReported(orders: OrderRecord[] | undefined, archives
 
 function normalizeState(state: Partial<WorkspaceState> | null | undefined): WorkspaceState {
   const archives = normalizeArchiveSnapshots(state?.archives);
+  const deletedOrderIds = Array.from(new Set(
+    (Array.isArray(state?.deletedOrderIds) ? state.deletedOrderIds : [])
+      .map((orderId) => String(orderId || "").trim())
+      .filter(Boolean)
+  ));
+  const deletedOrderIdSet = new Set(deletedOrderIds);
   const normalized = {
     ...(state || {}),
     actors: Array.isArray(state?.actors) ? state.actors : [],
-    orders: removeOrdersAlreadyReported(state?.orders, archives),
+    orders: removeOrdersAlreadyReported(
+      (Array.isArray(state?.orders) ? state.orders : []).filter((order) => !deletedOrderIdSet.has(order.id)),
+      archives
+    ),
     receivables: Array.isArray(state?.receivables) ? state.receivables : [],
     savedCustomers: Array.isArray(state?.savedCustomers) ? state.savedCustomers : [],
     transfers: Array.isArray(state?.transfers) ? state.transfers : [],
@@ -385,7 +394,8 @@ function normalizeState(state: Partial<WorkspaceState> | null | undefined): Work
     masterBankEntries: Array.isArray(state?.masterBankEntries) ? state.masterBankEntries : [],
     archives,
     settlements: Array.isArray(state?.settlements) ? state.settlements : [],
-    chatConversations: Array.isArray(state?.chatConversations) ? state.chatConversations : []
+    chatConversations: Array.isArray(state?.chatConversations) ? state.chatConversations : [],
+    deletedOrderIds
   } as WorkspaceState;
   ensureActorLedgerNumbers(normalized);
   return normalized;
@@ -586,7 +596,10 @@ export async function saveWorkspaceState(state: WorkspaceState): Promise<Workspa
   if (state.offlineSnapshot) throw new Error("Reconnect to the internet before making financial changes.");
   const result = await api<{ ok: boolean; state: WorkspaceState; revision?: string }>("/api/app-state", {
     method: "PUT",
-    body: { state: { ...state, offlineSnapshot: undefined, lastSyncedAt: undefined } }
+    body: {
+      state: { ...state, offlineSnapshot: undefined, lastSyncedAt: undefined },
+      expectedRevision: activeWorkspaceRevision
+    }
   });
   const savedState = {
     ...normalizeState(result.state || state),
@@ -676,6 +689,27 @@ function nextOrderNumberFromOrders(orders: OrderRecord[]): number {
     const match = String(order?.id || "").match(/^ORD-(\d+)(?:-|$)/);
     return match ? Math.max(next, Number(match[1]) + 1) : next;
   }, 1);
+}
+
+export type CancelledOrderClosePolicy = "include" | "omit";
+
+export async function closeActorBalance(
+  actorId: string,
+  cancelledOrderPolicy: CancelledOrderClosePolicy,
+  expectedRevision: string | null = activeWorkspaceRevision
+): Promise<WorkspaceState> {
+  if (!actorId) throw new Error("Choose an actor before closing the balance.");
+  const result = await api<{ state: WorkspaceState; revision?: string }>("/api/app-state/close-balance", {
+    method: "POST",
+    body: { actorId, cancelledOrderPolicy, expectedRevision }
+  });
+  const state = {
+    ...normalizeState(result.state),
+    offlineSnapshot: false,
+    lastSyncedAt: new Date().toISOString()
+  };
+  await rememberWorkspaceSnapshot(state, result.revision);
+  return state;
 }
 
 function nextReceivableNumberFromReceivables(receivables: ReceivableRecord[]): number {

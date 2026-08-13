@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { backfillClosedParticipantOrderSnapshots } from "./src/archiveParticipantBackfill.mjs";
+import { closeActorBalance } from "./src/closeActorBalance.mjs";
 import {
   DeleteObjectCommand,
   GetObjectCommand,
@@ -171,17 +172,25 @@ function mergeAppStates(existingStates = {}, incomingStates = {}) {
       const incomingState = incomingStates?.[workspaceId] || {};
       const existingRevision = String(existingState._syncRevision || "");
       const incomingRevision = String(incomingState._syncRevision || "");
-      const revisionTime = (value) => Number.parseInt(String(value || "").split("-", 1)[0], 36) || 0;
-      const latestRevision = revisionTime(existingRevision) > revisionTime(incomingRevision)
-        ? existingRevision
-        : incomingRevision || existingRevision;
+      const archives = mergeArchiveSnapshots(existingState.archives, incomingState.archives);
+      const deletedOrderIds = Array.from(new Set([
+        ...(Array.isArray(existingState.deletedOrderIds) ? existingState.deletedOrderIds : []),
+        ...(Array.isArray(incomingState.deletedOrderIds) ? incomingState.deletedOrderIds : []),
+      ].filter(Boolean).map(String)));
+      const orders = removeOrdersAlreadyArchived(
+        mergeOrders(existingState.orders, incomingState.orders),
+        archives,
+        deletedOrderIds
+      );
       return [
         workspaceId,
         {
           ...existingState,
           ...incomingState,
-          archives: mergeArchiveSnapshots(existingState.archives, incomingState.archives),
-          ...(latestRevision ? { _syncRevision: latestRevision } : {}),
+          orders,
+          archives,
+          deletedOrderIds,
+          ...(incomingRevision || existingRevision ? { _syncRevision: incomingRevision || existingRevision } : {}),
         },
       ];
     })
@@ -199,7 +208,7 @@ function mergeDatabase(existingDb, incomingDb) {
     memberships: mergeRecordsById(existingDb.memberships, incomingDb.memberships),
     invites: mergeRecordsById(existingDb.invites, incomingDb.invites),
     sessions: mergeSessionsById(existingDb.sessions, incomingDb.sessions),
-    appStates: mergeAppStates(existingDb.appStates, incomingDb.appStates),
+    appStates: { ...(existingDb.appStates || {}) },
     files: mergeRecordsById(existingDb.files, incomingDb.files),
     loginAttempts: { ...(incomingDb.loginAttempts || {}) },
   };
@@ -233,10 +242,38 @@ function enqueueDbWrite(operation) {
 
 async function saveDb(db, options = {}) {
   await enqueueDbWrite(async () => {
+    const persistedDb = await readPersistedDb();
+    for (const [workspaceId, expectedRevision] of Object.entries(options.expectedAppStateRevisions || {})) {
+      if (workspaceStateRevision(persistedDb || blankDb(), workspaceId) !== String(expectedRevision || "0")) {
+        throw httpError(409, "The workspace changed before this action finished. Refresh and try again.");
+      }
+    }
     const nextDb = options.replace === true
-      ? { ...blankDb(), ...db }
-      : mergeDatabase(await readPersistedDb(), db);
+      ? {
+          ...blankDb(),
+          ...db,
+          appStates: { ...(persistedDb?.appStates || {}) },
+        }
+      : mergeDatabase(persistedDb, db);
+    for (const [workspaceId, nextState] of Object.entries(options.appStateUpdates || {})) {
+      if (nextState === null) delete nextDb.appStates[workspaceId];
+      else nextDb.appStates[workspaceId] = nextState;
+    }
     await writePersistedDbAtomic(nextDb);
+  });
+}
+
+async function mutateLatestWorkspaceState(workspaceId, expectedRevision, mutate) {
+  return enqueueDbWrite(async () => {
+    const latestDb = await readPersistedDb();
+    if (!latestDb) throw httpError(503, "The workspace database is unavailable.");
+    const actualRevision = workspaceStateRevision(latestDb, workspaceId);
+    if (String(expectedRevision || "") !== actualRevision) {
+      throw httpError(409, "The workspace changed before this action finished. Refresh and try again.");
+    }
+    const result = await mutate(latestDb, latestDb.appStates?.[workspaceId] || {});
+    await writePersistedDbAtomic(latestDb);
+    return result;
   });
 }
 
@@ -253,6 +290,13 @@ function markWorkspaceStateChanged(db, workspaceId, state = db.appStates?.[works
   state._syncRevision = revision;
   db.appStates[workspaceId] = state;
   return revision;
+}
+
+function workspaceStateSaveOptions(db, workspaceId, expectedRevision) {
+  return {
+    expectedAppStateRevisions: { [workspaceId]: String(expectedRevision || "0") },
+    appStateUpdates: { [workspaceId]: db.appStates?.[workspaceId] || {} },
+  };
 }
 
 function httpError(statusCode, message) {
@@ -411,6 +455,7 @@ async function uploadLegacyAttachment(db, session, input) {
 }
 
 async function migrateLegacyAttachments(db, session, limit) {
+  const expectedRevision = workspaceStateRevision(db, session.workspace.id);
   const state = db.appStates[session.workspace.id] || {};
   let attempted = 0;
   let migrated = 0;
@@ -471,7 +516,7 @@ async function migrateLegacyAttachments(db, session, limit) {
   const revision = migrated > 0
     ? markWorkspaceStateChanged(db, session.workspace.id, state)
     : workspaceStateRevision(db, session.workspace.id);
-  if (migrated > 0) await saveDb(db);
+  if (migrated > 0) await saveDb(db, workspaceStateSaveOptions(db, session.workspace.id, expectedRevision));
   return { attempted, migrated, failed, remaining: legacyAttachmentCount(state), state, revision };
 }
 
@@ -1078,6 +1123,10 @@ function mergeOrders(existingItems = [], incomingItems = []) {
     if (item.voidedAt && !next.voidedAt) next.voidedAt = item.voidedAt;
     if (previous.voidedBy && !next.voidedBy) next.voidedBy = previous.voidedBy;
     if (item.voidedBy && !next.voidedBy) next.voidedBy = item.voidedBy;
+    if (previous.cancelledAt && !next.cancelledAt) next.cancelledAt = previous.cancelledAt;
+    if (item.cancelledAt && !next.cancelledAt) next.cancelledAt = item.cancelledAt;
+    if (previous.cancelledBy && !next.cancelledBy) next.cancelledBy = previous.cancelledBy;
+    if (item.cancelledBy && !next.cancelledBy) next.cancelledBy = item.cancelledBy;
     const latestVoidRequest = Math.max(new Date(next.voidRequestedAt || 0).getTime(), 0);
     const latestVoidReject = Math.max(new Date(next.voidRejectedAt || 0).getTime(), 0);
     const requestIsCurrent = latestVoidRequest > latestVoidReject || (latestVoidRequest === 0 && latestVoidReject === 0);
@@ -1094,6 +1143,12 @@ function mergeOrders(existingItems = [], incomingItems = []) {
       next.state = "Void Requested";
       next.voidRequested = true;
     } else {
+      next.voidRequested = false;
+    }
+    if (previous.state === "Cancelled" || item.state === "Cancelled" || next.cancelledAt) {
+      next.state = "Cancelled";
+      next.agent = "Cancelled";
+      next.agentActorId = "";
       next.voidRequested = false;
     }
     if (previous.state === "Voided" || item.state === "Voided" || next.voidJournal) {
@@ -1455,8 +1510,9 @@ function mergeArchiveSnapshots(existingArchives = [], incomingArchives = []) {
   return normalizeArchiveSnapshots(archives);
 }
 
-function removeOrdersAlreadyArchived(orders = [], archives = []) {
+function removeOrdersAlreadyArchived(orders = [], archives = [], deletedOrderIds = []) {
   const archivedOrderTimes = new Map();
+  const deletedIds = new Set((Array.isArray(deletedOrderIds) ? deletedOrderIds : []).filter(Boolean).map(String));
   normalizeArchiveSnapshots(archives).forEach((archive) => {
     const closedAt = new Date(archive.closedAt || 0).getTime();
     archive.orders.forEach((order) => {
@@ -1467,6 +1523,7 @@ function removeOrdersAlreadyArchived(orders = [], archives = []) {
   });
   return (Array.isArray(orders) ? orders : [])
     .filter((order) => {
+      if (deletedIds.has(String(order?.id || ""))) return false;
       const archivedAt = archivedOrderTimes.get(String(order?.id || ""));
       if (archivedAt === undefined) return true;
       const createdAt = new Date(order?.createdAt || order?.sentAt || 0).getTime();
@@ -1512,6 +1569,7 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   const activeActorIds = new Set(membershipActors.map((actor) => actor.id));
   const deletedActorIds = new Set([...(currentState.deletedActorIds || []), ...(incomingState.deletedActorIds || [])]);
   const deletedChatIds = new Set([...(currentState.deletedChatIds || []), ...(incomingState.deletedChatIds || [])]);
+  const deletedOrderIds = new Set([...(currentState.deletedOrderIds || []), ...(incomingState.deletedOrderIds || [])].filter(Boolean).map(String));
   const actorResetTombstones = mergeActorResetTombstones(currentState.actorResetTombstones, incomingState.actorResetTombstones);
   const chatHistoryResetTime = Math.max(
     new Date(currentState.chatHistoryResetAt || 0).getTime() || 0,
@@ -1529,7 +1587,8 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   );
   nextState.masterBankEntries = mergeById(currentState.masterBankEntries, incomingState.masterBankEntries);
   nextState.archives = mergeArchiveSnapshots(currentState.archives, incomingState.archives);
-  nextState.orders = removeOrdersAlreadyArchived(nextState.orders, nextState.archives);
+  nextState.deletedOrderIds = Array.from(deletedOrderIds);
+  nextState.orders = removeOrdersAlreadyArchived(nextState.orders, nextState.archives, nextState.deletedOrderIds);
   nextState.chatConversations = mergeChatConversations(currentState.chatConversations, incomingState.chatConversations)
     .filter((chat) => !deletedChatIds.has(chat?.id))
     .map((chat) => ({
@@ -1769,6 +1828,39 @@ async function applyOrderArchiveRepair(session, input = {}) {
   });
 }
 
+async function applyActorBalanceClose(session, input = {}) {
+  const workspaceId = session.workspace.id;
+  return mutateLatestWorkspaceState(workspaceId, input.expectedRevision, async (latestDb, currentState) => {
+    const cancelledOrderPolicy = String(input.cancelledOrderPolicy || "");
+    if (!new Set(["include", "omit"]).has(cancelledOrderPolicy)) {
+      throw httpError(400, "Choose whether cancelled orders should be kept in Report or removed without Report.");
+    }
+    const result = closeActorBalance(currentState, {
+      actorId: String(input.actorId || "").trim(),
+      actorName: String(input.actorName || "").trim(),
+      cancelledOrderPolicy,
+      closedAt: new Date().toISOString(),
+      archiveId: `ARC-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`,
+    });
+    if (!result.closed) {
+      throw httpError(409, result.error || "There are no completed transactions, collected receivables, or cancelled orders to close for this Actor.");
+    }
+    latestDb.appStates ||= {};
+    latestDb.appStates[workspaceId] = result.state;
+    const revision = markWorkspaceStateChanged(latestDb, workspaceId, result.state);
+    return {
+      ok: true,
+      state: stripRestrictedCreditReminders(result.state, session),
+      revision,
+      actor: result.actorName,
+      archiveId: result.archiveId,
+      cancelledOrderCount: result.cancelledOrderCount,
+      includedCancelledOrderCount: result.includedCancelledOrderCount,
+      omittedCancelledOrderCount: result.omittedCancelledOrderCount,
+    };
+  });
+}
+
 function sanitizeIncomingWorkspaceState(state, session, db) {
   if (!state || typeof state !== "object") return {};
   const persistedState = db.appStates[session.workspace.id] || {};
@@ -1785,6 +1877,11 @@ function sanitizeIncomingWorkspaceState(state, session, db) {
     ? Number(rawFixedPercent)
     : Number.NaN;
   delete sanitized._syncRevision;
+  if (session?.membership?.role !== "Master") {
+    sanitized.deletedOrderIds = Array.isArray(persistedState.deletedOrderIds)
+      ? [...persistedState.deletedOrderIds]
+      : [];
+  }
   if (session?.membership?.role !== "Master") delete sanitized.chatHistoryResetAt;
   if (Array.isArray(state.actors) && session?.membership?.role !== "Master") {
     sanitized.actors = state.actors.map((actor) => {
@@ -1920,6 +2017,7 @@ function resetWorkspaceState(db, workspaceId, scope = "data") {
     ledger: [],
     masterBankEntries: [],
     archives: [],
+    deletedOrderIds: [],
     actorResetTombstones: normalizeActorResetTombstones(),
     chatConversations: scope === "wipe"
       ? []
@@ -2120,10 +2218,11 @@ async function handleApi(request, response, url) {
 
     db.users.push(user);
     db.memberships.push(membership);
+    const expectedWorkspaceRevision = workspaceStateRevision(db, workspace.id);
     markWorkspaceStateChanged(db, workspace.id);
     clearLoginAttempts(db, email);
     const session = createSession(db, user.id, workspace.id, requestDeviceId(request));
-    await saveDb(db);
+    await saveDb(db, workspaceStateSaveOptions(db, workspace.id, expectedWorkspaceRevision));
     setSessionCookie(response, session);
     sendJson(response, 200, { session: publicSession(db, session.id) });
     return;
@@ -2629,6 +2728,9 @@ async function handleApi(request, response, url) {
     ]);
     const relatedUsers = db.users.filter((user) => relatedUserIds.has(user.id));
     const relatedFiles = (db.files || []).filter((file) => workspaceIds.includes(file.workspaceId));
+    const expectedWorkspaceRevisions = Object.fromEntries(
+      workspaceIds.map((workspaceId) => [workspaceId, workspaceStateRevision(db, workspaceId)])
+    );
 
     if (relatedFiles.some((file) => file.key) && !r2Client) {
       return sendJson(response, 503, { error: "Private file storage must be available before this Master can be removed." });
@@ -2650,7 +2752,11 @@ async function handleApi(request, response, url) {
     db.files = (db.files || []).filter((file) => !workspaceIds.includes(file.workspaceId));
     workspaceIds.forEach((workspaceId) => delete db.appStates[workspaceId]);
     relatedUsers.forEach((user) => clearLoginAttempts(db, user.email));
-    await saveDb(db, { replace: true });
+    await saveDb(db, {
+      replace: true,
+      expectedAppStateRevisions: expectedWorkspaceRevisions,
+      appStateUpdates: Object.fromEntries(workspaceIds.map((workspaceId) => [workspaceId, null])),
+    });
     sendJson(response, 200, {
       ok: true,
       removed: {
@@ -2733,7 +2839,15 @@ async function handleApi(request, response, url) {
   }
 
   if (url.pathname === "/api/app-state/version" && method === "GET") {
-    sendJson(response, 200, { revision: workspaceStateRevision(db, session.workspace.id), clientReleaseId: "order-participant-archive-v1" });
+    sendJson(response, 200, { revision: workspaceStateRevision(db, session.workspace.id), clientReleaseId: "cancelled-order-close-v1" });
+    return;
+  }
+
+  if (url.pathname === "/api/app-state/close-balance" && method === "POST") {
+    if (session.membership.role !== "Master") return sendJson(response, 403, { error: "Only Master can close an Actor balance." });
+    const body = await readJson(request);
+    const result = await applyActorBalanceClose(session, body);
+    sendJson(response, 200, result);
     return;
   }
 
@@ -2805,6 +2919,7 @@ async function handleApi(request, response, url) {
     db.sessions = db.sessions.filter((item) =>
       item.workspaceId !== session.workspace.id || !removedActorUserIds.includes(item.userId)
     );
+    const expectedRevision = workspaceStateRevision(db, session.workspace.id);
     const currentState = db.appStates[session.workspace.id] || {};
     const nextState = { ...currentState };
     nextState.deletedActorIds = Array.from(new Set([...(currentState.deletedActorIds || []), actorId]));
@@ -2815,7 +2930,7 @@ async function handleApi(request, response, url) {
     if (nextState.expandedFixedRateActorId === actorId) nextState.expandedFixedRateActorId = "";
     if (nextState.expandedSpecialDividerActorId === actorId) nextState.expandedSpecialDividerActorId = "";
     const revision = markWorkspaceStateChanged(db, session.workspace.id, nextState);
-    await saveDb(db, { replace: true });
+    await saveDb(db, { replace: true, ...workspaceStateSaveOptions(db, session.workspace.id, expectedRevision) });
     sendJson(response, 200, { ok: true, state: stripRestrictedCreditReminders(nextState, session), revision });
     return;
   }
@@ -2824,6 +2939,7 @@ async function handleApi(request, response, url) {
     if (session.membership.role !== "Master") return sendJson(response, 403, { error: "Only Master can reset Actor data." });
     const body = await readJson(request);
     const actorId = String(body.actorId || "");
+    const expectedRevision = workspaceStateRevision(db, session.workspace.id);
     const currentState = db.appStates[session.workspace.id] || {};
     const actors = mergeById(workspaceActors(db, session.workspace.id), currentState.actors || []);
     const actor = actors.find((item) => item?.id === actorId && item?.role !== "Master");
@@ -2832,7 +2948,7 @@ async function handleApi(request, response, url) {
     nextState.actors = actors;
     const counts = resetSpecificActorData(nextState, actor);
     const revision = markWorkspaceStateChanged(db, session.workspace.id, nextState);
-    await saveDb(db, { replace: true });
+    await saveDb(db, { replace: true, ...workspaceStateSaveOptions(db, session.workspace.id, expectedRevision) });
     sendJson(response, 200, {
       ok: true,
       actor: { id: actor.id, name: actor.name },
@@ -2847,6 +2963,7 @@ async function handleApi(request, response, url) {
     if (session.membership.role !== "Master") return sendJson(response, 403, { error: "Only Master can reset workspace data." });
     const body = await readJson(request);
     const scope = body.scope === "wipe" ? "wipe" : "data";
+    const expectedRevision = workspaceStateRevision(db, session.workspace.id);
     let removedActorIds = [];
     let removedActorNames = [];
     if (scope === "wipe") {
@@ -2878,22 +2995,28 @@ async function handleApi(request, response, url) {
       nextState.actors = (nextState.actors || []).filter((actor) => actor?.role === "Master");
     }
     const revision = markWorkspaceStateChanged(db, session.workspace.id, nextState);
-    await saveDb(db, { replace: true });
+    await saveDb(db, { replace: true, ...workspaceStateSaveOptions(db, session.workspace.id, expectedRevision) });
     sendJson(response, 200, { ok: true, state: stripRestrictedCreditReminders(nextState, session), revision });
     return;
   }
 
   if (url.pathname === "/api/app-state" && method === "PUT") {
     const body = await readJson(request);
-    const incomingState = sanitizeIncomingWorkspaceState(body.state || {}, session, db);
-    const nextState = mergeWorkspaceState(db, session.workspace.id, incomingState);
-    const revision = markWorkspaceStateChanged(db, session.workspace.id, nextState);
-    await saveDb(db);
-    sendJson(response, 200, {
-      ok: true,
-      state: stripRestrictedCreditReminders(nextState, session),
-      revision,
-    });
+    const result = await mutateLatestWorkspaceState(
+      session.workspace.id,
+      body.expectedRevision ?? body.state?._syncRevision,
+      async (latestDb) => {
+        const incomingState = sanitizeIncomingWorkspaceState(body.state || {}, session, latestDb);
+        const nextState = mergeWorkspaceState(latestDb, session.workspace.id, incomingState);
+        const revision = markWorkspaceStateChanged(latestDb, session.workspace.id, nextState);
+        return {
+          ok: true,
+          state: stripRestrictedCreditReminders(nextState, session),
+          revision,
+        };
+      }
+    );
+    sendJson(response, 200, result);
     return;
   }
 

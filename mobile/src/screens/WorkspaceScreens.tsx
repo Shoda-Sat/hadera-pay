@@ -43,6 +43,7 @@ import {
 import {
   allowedIdleTimeoutSeconds,
   changePassword,
+  closeActorBalance,
   createOwnerMaster,
   createInvite,
   extendOwnerSubscription,
@@ -203,6 +204,18 @@ function orderNumber(order: OrderRecord, session: UserSession): string {
   return order.brokerOrderNumber || order.id;
 }
 
+function orderBrokerMatchesActor(order: OrderRecord, actorId: string, actorName: string): boolean {
+  return order.brokerActorId
+    ? order.brokerActorId === actorId
+    : order.broker === actorName;
+}
+
+function archiveMatchesSessionActor(archive: WorkspaceState["archives"][number], session: UserSession): boolean {
+  return archive.actorId
+    ? archive.actorId === session.actorId
+    : archive.actor === session.actorName;
+}
+
 function CopyOrderDetailsButton({ order, session, viewer }: { order: OrderRecord; session: UserSession; viewer: ActorRecord | undefined }) {
   if (!viewerCanCopyOrderDetails(order, session, viewer)) return null;
   const copyDetails = async () => {
@@ -241,7 +254,7 @@ function orderPercentValue(value: unknown, allowNegative = false): number | null
 }
 
 function orderPercentDisplayForViewer(order: OrderRecord, session: UserSession): OrderPercentDisplay | null {
-  const isBroker = Boolean(session.actorId && order.brokerActorId === session.actorId) || order.broker === session.actorName;
+  const isBroker = orderBrokerMatchesActor(order, session.actorId, session.actorName);
   if (isMasterView(session) || isBroker) {
     const percent = orderPercentValue(order.commissionPercent, true);
     const label = normalizedOrderCommissionLiability(order) === "Master" ? "Master-liable commission" : "Order commission";
@@ -433,7 +446,7 @@ const pendingActorOrderStates = new Set<OrderRecord["state"]>(["Pending Forward"
 function relatedOrders(session: UserSession, state: WorkspaceState): OrderRecord[] {
   return state.orders.filter((order) =>
     isMasterView(session) ||
-    order.broker === session.actorName ||
+    orderBrokerMatchesActor(order, session.actorId, session.actorName) ||
     order.agent === session.actorName ||
     order.agentActorId === session.actorId
   );
@@ -441,7 +454,7 @@ function relatedOrders(session: UserSession, state: WorkspaceState): OrderRecord
 
 function visibleOrders(session: UserSession, state: WorkspaceState): OrderRecord[] {
   return relatedOrders(session, state)
-    .filter((order) => isMasterView(session) || (order.state !== "Voided" && order.locked !== true && (order.state !== "Cancelled" || order.broker === session.actorName)))
+    .filter((order) => isMasterView(session) || (order.state !== "Voided" && order.locked !== true && (order.state !== "Cancelled" || orderBrokerMatchesActor(order, session.actorId, session.actorName))))
     .slice()
     .sort(orderSortForSession(session));
 }
@@ -529,14 +542,14 @@ function ordersForProfile(session: UserSession, state: WorkspaceState, actor: Ac
   const relatedOrders = actor.role === "Master"
     ? state.orders
     : state.orders.filter((order) =>
-        order.broker === actor.name ||
+        (order.brokerActorId ? order.brokerActorId === actor.id : order.broker === actor.name) ||
         order.agent === actor.name ||
         Boolean(order.agentActorId && order.agentActorId === actor.id)
       );
   const orderbookOrders = actor.role === "Master"
     ? relatedOrders
     : relatedOrders.filter((order) => {
-        const isBroker = order.broker === actor.name;
+        const isBroker = orderBrokerMatchesActor(order, actor.id, actor.name);
         if (order.state === "Cancelled") return isBroker;
         return order.state !== "Voided" && order.locked !== true;
       });
@@ -711,10 +724,10 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
   };
 
   const confirmCancel = (order: OrderRecord) => {
-    const returnedBrokerCancellation = order.state === "Returned" && order.broker === session.actorName;
+    const returnedBrokerCancellation = order.state === "Returned" && orderBrokerMatchesActor(order, session.actorId, session.actorName);
     const message = returnedBrokerCancellation
-      ? `${orderNumber(order, session)} will remain in your Orders list as Cancelled.`
-      : `${orderNumber(order, session)} will not be forwarded, and the sender will see it as Cancelled.`;
+      ? `${orderNumber(order, session)} will be marked Cancelled. When Master closes your balance, Master can keep it in Report or remove it without a report record.`
+      : `${orderNumber(order, session)} will not be forwarded. The broker will see it as Cancelled until Master closes that balance.`;
     Alert.alert(returnedBrokerCancellation ? "Cancel returned order?" : "Cancel order?", message, [
       { text: "Keep order", style: "cancel" },
       { text: "Cancel order", style: "destructive", onPress: () => run(`cancel-${order.id}`, () => cancelOrder(order.id, session.actorName)) }
@@ -777,7 +790,7 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
         const isPayer = order.agent === session.actorName || order.agentActorId === session.actorId;
         const percentDisplay = orderPercentDisplayForViewer(order, session);
         const actorCanSeeReturnReason = order.state === "Returned" && Boolean(order.returnedReason) &&
-          (isMasterView(session) || order.brokerActorId === session.actorId || order.broker === session.actorName);
+          (isMasterView(session) || orderBrokerMatchesActor(order, session.actorId, session.actorName));
         const payerOptions = activeActors(state).filter((actor) => actor.name !== order.broker && actorCanPayoutCurrency(actor, order.payoutCurrency));
         const stateLabel = isMasterView(session) && order.state === "Assigned" ? `Assigned to ${order.agent}` : order.state;
         return (
@@ -873,7 +886,7 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
               </View>
             ) : null}
             {isPayer && order.state === "Paid" ? <Button label="Request Void" variant="danger" disabled={offline} onPress={() => confirmVoidRequest(order)} /> : null}
-            {["Broker", "Special Broker"].includes(session.actorRole) && order.state === "Returned" && order.broker === session.actorName ? (
+            {["Broker", "Special Broker"].includes(session.actorRole) && order.state === "Returned" && orderBrokerMatchesActor(order, session.actorId, session.actorName) ? (
               <View style={styles.rowButtons}>
                 <Button label="Modify" icon={<Pencil size={17} color={colors.ink} />} variant="secondary" disabled={offline || busy !== ""} onPress={() => onEditReturnedOrder(order)} style={styles.flexButton} />
                 <Button label="Cancel" variant="danger" disabled={offline || busy !== ""} loading={busy === `cancel-${order.id}`} onPress={() => confirmCancel(order)} style={styles.flexButton} />
@@ -1348,7 +1361,7 @@ export function SearchScreen({ session, state, onNavigate }: CommonProps) {
 
   const addOrder = (order: OrderRecord, type = "Order", status: string = order.state, archivedAt = "") => {
     const isPayer = order.agent === session.actorName || order.agentActorId === session.actorId;
-    const isBroker = order.broker === session.actorName;
+    const isBroker = orderBrokerMatchesActor(order, session.actorId, session.actorName);
     const visibility = viewerActor?.orderVisibilityPermissions || {};
     const canSeeSource = isMasterView(session) || isBroker || !isPayer || (visibility.sourceCurrency !== false && visibility.baseAmount !== false);
     const canSeeRate = isMasterView(session) || isBroker || !isPayer || visibility.rate !== false;
@@ -1356,10 +1369,14 @@ export function SearchScreen({ session, state, onNavigate }: CommonProps) {
     const percentDisplay = canSeeCommission ? orderPercentDisplayForViewer(order, session) : null;
     const sourceAmount = compactAmount(order.sourceCurrency, majorFromMinor(order.sourceAmountMinor, order.sourceCurrency));
     const payoutAmount = compactAmount(order.payoutCurrency, majorFromMinor(order.payoutAmountMinor, order.payoutCurrency));
-    const voided = orderRecordIsVoided(order);
-    const resultStatus = voided ? "Voided - Excluded" : status;
+    const archived = type.startsWith("Archived");
+    const cancelled = order.state === "Cancelled";
+    const voided = !cancelled && orderRecordIsVoided(order);
+    const resultStatus = cancelled && archived ? "Cancelled - Excluded" : voided ? "Voided - Excluded" : status;
     const details = [
-      voided ? "Excluded from all calculations" : "",
+      voided || cancelled ? "Excluded from all calculations" : "",
+      cancelled && order.cancelledBy ? `Cancelled by: ${order.cancelledBy}` : "",
+      cancelled && order.cancelledAt ? `Cancelled: ${formatDateTime(order.cancelledAt)}` : "",
       order.senderName ? `Sender: ${order.senderName}` : "",
       order.receiverName ? `Receiver: ${order.receiverName}` : "",
       order.receiverCity ? `Receiver City: ${order.receiverCity}` : "",
@@ -1367,7 +1384,7 @@ export function SearchScreen({ session, state, onNavigate }: CommonProps) {
       order.accountNumber ? `Account: ${order.accountNumber}` : "",
       order.remarks ? `Remarks: ${order.remarks}` : "",
       isMasterView(session) && order.broker ? `Ordering Actor: ${order.broker}` : "",
-      order.agent && order.agent !== "Unassigned" ? `Payer: ${order.agent}` : "",
+      order.agent && !["Unassigned", "Cancelled"].includes(order.agent) ? `Payer: ${order.agent}` : "",
       canSeeSource ? `Source Amount: ${sourceAmount}` : "",
       `Payout Amount: ${payoutAmount}`,
       canSeeRate && order.rate ? `Rate: ${order.rate}` : "",
@@ -1377,7 +1394,7 @@ export function SearchScreen({ session, state, onNavigate }: CommonProps) {
       order.voidJournal ? `Void Journal: ${order.voidJournal}` : ""
     ].filter(Boolean).join(" - ");
     const reference = orderNumber(order, session);
-    const participants = uniqueSearchNames([order.broker, order.agent !== "Unassigned" ? order.agent : "", "Master"]);
+    const participants = uniqueSearchNames([order.broker, !["Unassigned", "Cancelled"].includes(order.agent) ? order.agent : "", "Master"]);
     const searchableParticipants = isMasterView(session) ? participants : uniqueSearchNames([session.actorName, "Master"]);
     rawResults.push({
       key: `${type}:${order.id}`,
@@ -1390,7 +1407,7 @@ export function SearchScreen({ session, state, onNavigate }: CommonProps) {
       amount: canSeeSource ? `${sourceAmount} to ${payoutAmount}` : payoutAmount,
       status: resultStatus,
       details,
-      time: new Date(order.paidAt || order.sentAt || order.createdAt || archivedAt || 0).getTime() || 0,
+      time: new Date(order.cancelledAt || order.voidedAt || order.paidAt || order.sentAt || order.createdAt || archivedAt || 0).getTime() || 0,
       screen: type.startsWith("Archived") ? "archive" : "orders",
       destinationAvailable: type.startsWith("Archived") || visibleOrderDestinationIds.has(order.id),
       searchText: [reference, order.id, order.brokerOrderNumber, order.agentOrderNumber, Object.values(order.agentOrderNumbers || {}), resultStatus, searchableParticipants, details].flat().join(" ").toLocaleLowerCase()
@@ -1448,11 +1465,11 @@ export function SearchScreen({ session, state, onNavigate }: CommonProps) {
     rawResults.push({ key: `${type}:${item.id}`, groupKey: item.orderId ? `order:${item.orderId}` : `receivable:${item.id}`, kind: "receivable", type, reference, actor: item.borrower, participants: uniqueSearchNames([item.borrower, "Master"]), amount: `Principal ${principal} / Balance ${balance}`, status, details, time: new Date(item.createdAt || item.updatedAt || archivedAt || 0).getTime() || 0, screen: type.startsWith("Archived") ? "archive" : "receivables", searchText: [reference, item.id, item.borrower, status, details].join(" ").toLocaleLowerCase() });
   };
 
-  (isMasterView(session) ? state.orders : state.orders.filter((order) => order.broker === session.actorName || order.agent === session.actorName || order.agentActorId === session.actorId)).forEach((order) => addOrder(order));
+  (isMasterView(session) ? state.orders : state.orders.filter((order) => orderBrokerMatchesActor(order, session.actorId, session.actorName) || order.agent === session.actorName || order.agentActorId === session.actorId)).forEach((order) => addOrder(order));
   (isMasterView(session) ? state.transfers : state.transfers.filter((transfer) => transfer.from === session.actorName || transfer.to === session.actorName)).forEach((transfer) => addTransfer(transfer));
   state.ledger.filter((line) => line.archived !== true && (isMasterView(session) || ledgerParticipant(String(line.account || "")) === session.actorName)).forEach((line) => addLedger(line, line.source === "JOURNAL" ? "Journal" : line.source === "WITHDRAWAL" ? "Withdrawal" : "Ledger"));
   state.receivables.filter((item) => isMasterView(session) || item.borrower === session.actorName).forEach((item) => addReceivable(item));
-  state.archives.filter((archive) => isMasterView(session) || archive.actor === session.actorName).forEach((archive) => {
+  state.archives.filter((archive) => isMasterView(session) || archiveMatchesSessionActor(archive, session)).forEach((archive) => {
     (archive.orders || []).forEach((order) => addOrder(order, "Archived Order", "Locked", archive.closedAt));
     (archive.transfers || []).forEach((transfer) => addTransfer(transfer, "Archived Transfer", archive.closedAt));
     (archive.ledger || []).forEach((line) => addLedger(line, "Archived Ledger", archive.closedAt));
@@ -2156,7 +2173,7 @@ function ledgerDetailsForDisplay(state: WorkspaceState, line: WorkspaceState["le
   return names.length ? ["Order_Payment", ...names].join(" - ") : line.details || "Order_Payment";
 }
 
-export function LedgerScreen({ session, state, onState }: CommonProps) {
+export function LedgerScreen({ session, state, offline, onState, onRefresh }: CommonProps) {
   const actorChoices = useMemo(() => activeActors(state).filter((actor) => actor.role !== "Master"), [state]);
   const [actorId, setActorId] = useState(isMasterView(session) ? actorChoices[0]?.id || "" : session.actorId);
   const [incomeExpanded, setIncomeExpanded] = useState(false);
@@ -2165,6 +2182,7 @@ export function LedgerScreen({ session, state, onState }: CommonProps) {
   const [bankAmount, setBankAmount] = useState("");
   const [bankReason, setBankReason] = useState("");
   const [bankBusy, setBankBusy] = useState(false);
+  const [closeBusy, setCloseBusy] = useState(false);
   const [transactionSort, setTransactionSort] = useState<"Date" | "Order / Transfer No.">("Date");
   const selected = isMasterView(session) ? actorChoices.find((actor) => actor.id === actorId) : actorForSession(session, state);
   const actorName = selected?.name || session.actorName;
@@ -2225,7 +2243,48 @@ export function LedgerScreen({ session, state, onState }: CommonProps) {
     const moneyOut = currencyRows.filter((entry) => entry.direction === "Debit").reduce((sum, entry) => sum + entry.amountMinor, 0);
     return { currency, moneyIn, moneyOut, net: moneyIn - moneyOut };
   }).filter((item) => item.moneyIn || item.moneyOut), [bankRows]);
+  const cancelledOrdersForClose = useMemo(() => selected
+    ? state.orders.filter((order) => order.state === "Cancelled" && orderBrokerMatchesActor(order, selected.id, selected.name))
+    : [], [selected, state.orders]);
   const signedBankAmount = (currency: Currency, minor: number) => `${minor >= 0 ? "+" : "-"}${compactAmount(currency, majorFromMinor(Math.abs(minor), currency))}`;
+  const closeWithPolicy = async (actor: ActorRecord, cancelledOrderPolicy: "include" | "omit", expectedRevision: string | null) => {
+    setCloseBusy(true);
+    try {
+      const next = await closeActorBalance(actor.id, cancelledOrderPolicy, expectedRevision);
+      onState(next);
+      void Promise.resolve(onRefresh()).catch(() => undefined);
+      Alert.alert("Balance closed", `${actor.name}'s completed balance period is now in Report.`);
+    } catch (error) {
+      if (errorMessage(error).includes("workspace changed")) {
+        await Promise.resolve(onRefresh()).catch(() => undefined);
+      }
+      Alert.alert("Close balance", errorMessage(error));
+    } finally {
+      setCloseBusy(false);
+    }
+  };
+  const confirmCloseBalance = () => {
+    if (!selected || closeBusy || offline || session.subscriptionReadOnly) return;
+    const title = `Close ${selected.name}'s balance?`;
+    const warning = "Completed transactions and collected receivables will move to Report, and a new balance period will begin. This action cannot be undone.";
+    const closePromptRevision = state._syncRevision || null;
+    if (cancelledOrdersForClose.length) {
+      Alert.alert(
+        title,
+        `${warning}\n\n${cancelledOrdersForClose.length} cancelled order${cancelledOrdersForClose.length === 1 ? "" : "s"} must be handled.`,
+        [
+          { text: "Cancel", style: "cancel" },
+          { text: "Keep in Report & Close", onPress: () => void closeWithPolicy(selected, "include", closePromptRevision) },
+          { text: "Remove without Report & Close", style: "destructive", onPress: () => void closeWithPolicy(selected, "omit", closePromptRevision) }
+        ]
+      );
+      return;
+    }
+    Alert.alert(title, warning, [
+      { text: "Cancel", style: "cancel" },
+      { text: "Close Balance", style: "destructive", onPress: () => void closeWithPolicy(selected, "include", closePromptRevision) }
+    ]);
+  };
   const fundBank = async () => {
     if (state.offlineSnapshot) return Alert.alert("Offline", "Reconnect before funding the Master Bank Account.");
     setBankBusy(true);
@@ -2277,6 +2336,15 @@ export function LedgerScreen({ session, state, onState }: CommonProps) {
           return <SummaryRow key={item.currency} label={item.currency} value={position.amount} valueTone={position.tone} strong />;
         })}
       </Panel>
+      {isMasterView(session) && selected ? (
+        <Button
+          label="Close Balance"
+          variant="danger"
+          loading={closeBusy}
+          disabled={offline || session.subscriptionReadOnly === true}
+          onPress={confirmCloseBalance}
+        />
+      ) : null}
       <SelectRow label="Sort transactions by" options={["Date", "Order / Transfer No."]} value={transactionSort} onChange={setTransactionSort} />
       <ScrollView horizontal showsHorizontalScrollIndicator>
         <View style={styles.ledgerTable}>

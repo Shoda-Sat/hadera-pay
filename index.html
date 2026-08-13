@@ -3892,9 +3892,11 @@
   <script>
     let storageKey = "haderapay.local.state.v1";
     let currentAuth = null;
-    const clientReleaseId = "order-participant-archive-v1";
+    const clientReleaseId = "cancelled-order-close-v1";
     let currentLoginStartedAt = 0;
     let remoteStateReady = false;
+    let remoteStateRevision = "0";
+    let remoteSaveChain = Promise.resolve();
     let saveTimer = null;
     let suppressRemoteSave = false;
     let remoteRefreshTimer = null;
@@ -4096,6 +4098,7 @@
       chatReplyTo: "",
       chatConversations: [],
       deletedChatIds: [],
+      deletedOrderIds: [],
       chatHistoryResetAt: "",
       actorResetTombstones: normalizeActorResetTombstones(),
       actors: [
@@ -4126,7 +4129,7 @@
           ...structuredClone(defaultState),
           ...saved,
           actors: normalizeActors(Array.isArray(saved.actors) ? saved.actors : structuredClone(defaultState.actors)),
-          orders: removeOrdersAlreadyArchived(saved.orders, archives),
+          orders: removeOrdersAlreadyArchived(saved.orders, archives, saved.deletedOrderIds),
           savedCustomers: normalizeSavedCustomers(saved.savedCustomers),
           receivables: Array.isArray(saved.receivables) ? saved.receivables : [],
           transfers: normalizeTransfers(Array.isArray(saved.transfers) ? saved.transfers : []),
@@ -4139,6 +4142,7 @@
           archives,
           chatConversations: Array.isArray(saved.chatConversations) ? saved.chatConversations : [],
           deletedChatIds: Array.isArray(saved.deletedChatIds) ? saved.deletedChatIds : [],
+          deletedOrderIds: Array.isArray(saved.deletedOrderIds) ? saved.deletedOrderIds : [],
           actorResetTombstones: normalizeActorResetTombstones(saved.actorResetTombstones)
         };
       } catch {
@@ -4341,8 +4345,9 @@
       return normalized;
     }
 
-    function removeOrdersAlreadyArchived(orders = [], archives = []) {
+    function removeOrdersAlreadyArchived(orders = [], archives = [], deletedOrderIds = []) {
       const archivedOrderTimes = new Map();
+      const deletedIds = new Set((Array.isArray(deletedOrderIds) ? deletedOrderIds : []).filter(Boolean).map(String));
       normalizeArchiveSnapshots(archives).forEach((archive) => {
         const closedAt = new Date(archive.closedAt || 0).getTime();
         archive.orders.forEach((order) => {
@@ -4353,6 +4358,7 @@
       });
       return (Array.isArray(orders) ? orders : [])
         .filter((order) => {
+          if (deletedIds.has(String(order?.id || ""))) return false;
           const archivedAt = archivedOrderTimes.get(String(order?.id || ""));
           if (archivedAt === undefined) return true;
           const createdAt = new Date(order?.createdAt || order?.sentAt || 0).getTime();
@@ -4538,8 +4544,34 @@
       if (!currentAuth || !remoteStateReady || suppressRemoteSave) return;
       clearTimeout(saveTimer);
       saveTimer = setTimeout(() => {
-        api("/api/app-state", { method: "PUT", body: { state } }).catch(() => {});
+        queueRemoteStateSave().catch(handleRemoteSaveError);
       }, 250);
+    }
+
+    function handleRemoteSaveError(error) {
+      if (error?.status === 409) {
+        notifyEvent("Workspace refreshed", "Another change was saved first. Refreshing now; please repeat your last action.");
+        setTimeout(() => window.location.reload(), 500);
+      }
+    }
+
+    function queueRemoteStateSave() {
+      const write = remoteSaveChain.then(async () => {
+        const result = await api("/api/app-state", {
+          method: "PUT",
+          body: { state, expectedRevision: remoteStateRevision }
+        });
+        remoteStateRevision = String(result.revision || result.state?._syncRevision || remoteStateRevision || "0");
+        if (result.state) mergeSharedState(result.state);
+        try {
+          localStorage.setItem(storageKey, JSON.stringify(state));
+        } catch {
+          // Keep the authoritative remote save even if local storage is full.
+        }
+        return result;
+      });
+      remoteSaveChain = write.catch(() => {});
+      return write;
     }
 
     function clientDeviceId() {
@@ -4585,7 +4617,9 @@
         if (response.status === 402 && currentAuth) {
           setTimeout(() => endAuthSession({ notify: false }), 0);
         }
-        throw new Error(message || "Request failed.");
+        const error = new Error(message || "Request failed.");
+        error.status = response.status;
+        throw error;
       }
       return data;
     }
@@ -4686,8 +4720,9 @@
       const archives = normalizeArchiveSnapshots(nextState?.archives);
       const preparedState = {
         ...nextState,
-        orders: removeOrdersAlreadyArchived(nextState?.orders, archives),
+        orders: removeOrdersAlreadyArchived(nextState?.orders, archives, nextState?.deletedOrderIds),
         archives,
+        deletedOrderIds: Array.isArray(nextState?.deletedOrderIds) ? nextState.deletedOrderIds : [],
         savedCustomers: normalizeSavedCustomers(nextState?.savedCustomers),
         settingsPanels: normalizeSettingsPanels(nextState?.settingsPanels, nextState),
         actorResetTombstones: normalizeActorResetTombstones(nextState?.actorResetTombstones)
@@ -4719,6 +4754,7 @@
         new Date(item.paidOutAt || 0).getTime(),
         new Date(item.rejectedAt || 0).getTime(),
         new Date(item.returnedAt || 0).getTime(),
+        new Date(item.cancelledAt || 0).getTime(),
         new Date(item.sentAt || 0).getTime(),
         new Date(item.createdAt || 0).getTime(),
         0
@@ -4768,6 +4804,10 @@
         if (item.voidedAt && !next.voidedAt) next.voidedAt = item.voidedAt;
         if (previous.voidedBy && !next.voidedBy) next.voidedBy = previous.voidedBy;
         if (item.voidedBy && !next.voidedBy) next.voidedBy = item.voidedBy;
+        if (previous.cancelledAt && !next.cancelledAt) next.cancelledAt = previous.cancelledAt;
+        if (item.cancelledAt && !next.cancelledAt) next.cancelledAt = item.cancelledAt;
+        if (previous.cancelledBy && !next.cancelledBy) next.cancelledBy = previous.cancelledBy;
+        if (item.cancelledBy && !next.cancelledBy) next.cancelledBy = item.cancelledBy;
         const latestVoidRequest = Math.max(new Date(next.voidRequestedAt || 0).getTime(), 0);
         const latestVoidReject = Math.max(new Date(next.voidRejectedAt || 0).getTime(), 0);
         const requestIsCurrent = latestVoidRequest > latestVoidReject || (latestVoidRequest === 0 && latestVoidReject === 0);
@@ -4784,6 +4824,12 @@
           next.state = "Void Requested";
           next.voidRequested = true;
         } else {
+          next.voidRequested = false;
+        }
+        if (previous.state === "Cancelled" || item.state === "Cancelled" || next.cancelledAt) {
+          next.state = "Cancelled";
+          next.agent = "Cancelled";
+          next.agentActorId = "";
           next.voidRequested = false;
         }
         if (previous.state === "Voided" || item.state === "Voided" || next.voidJournal) {
@@ -4990,7 +5036,8 @@
       state.masterBankEntries = normalizeMasterBankEntries(mergeById(state.masterBankEntries, remoteState.masterBankEntries || []));
       state.settlements = Array.isArray(remoteState.settlements) ? remoteState.settlements : state.settlements;
       state.archives = normalizeArchiveSnapshots(mergeById(state.archives, remoteState.archives || []));
-      state.orders = removeOrdersAlreadyArchived(state.orders, state.archives);
+      state.deletedOrderIds = Array.from(new Set([...(state.deletedOrderIds || []), ...(remoteState.deletedOrderIds || [])].filter(Boolean).map(String)));
+      state.orders = removeOrdersAlreadyArchived(state.orders, state.archives, state.deletedOrderIds);
       state.chatConversations = mergeChatConversations(state.chatConversations, remoteState.chatConversations || [])
         .filter((chat) => !deletedChatIds.has(chat.id))
         .map((chat) => ({
@@ -5045,6 +5092,7 @@
       const remote = await api("/api/app-state").catch(() => null);
       if (actorPermissionSavePending > 0) return;
       if (!mergeSharedState(remote?.state)) return;
+      remoteStateRevision = String(remote?.revision || remote?.state?._syncRevision || remoteStateRevision || "0");
       suppressRemoteSave = true;
       try {
         renderAll();
@@ -5258,11 +5306,20 @@
     }
 
     async function saveStateNow() {
-      if (subscriptionIsReadOnly()) return;
+      if (subscriptionIsReadOnly()) return false;
       saveState();
-      if (!currentAuth || !remoteStateReady || suppressRemoteSave) return;
+      if (!currentAuth || !remoteStateReady || suppressRemoteSave) return false;
       clearTimeout(saveTimer);
-      await api("/api/app-state", { method: "PUT", body: { state } }).catch(() => {});
+      try {
+        await queueRemoteStateSave();
+        return true;
+      } catch (error) {
+        handleRemoteSaveError(error);
+        if (error?.status !== 409) {
+          notifyEvent("Save unavailable", error?.message || "The latest changes could not be saved.");
+        }
+        return false;
+      }
     }
 
     function ensureSessionActor() {
@@ -5290,6 +5347,7 @@
       remoteStateReady = false;
       storageKey = authStorageKey(session);
       const remote = await api("/api/app-state").catch(() => ({ state: null }));
+      remoteStateRevision = String(remote.revision || remote.state?._syncRevision || "0");
       const nextState = remote.state || loadState();
       replaceState({
         ...structuredClone(defaultState),
@@ -6219,6 +6277,10 @@
 
     function orderRecordIsVoided(order) {
       return order?.state === "Voided" || Boolean(order?.voidedAt || order?.voidJournal);
+    }
+
+    function orderRecordIsCancelled(order) {
+      return order?.state === "Cancelled" || Boolean(order?.cancelledAt);
     }
 
     function transferRecordIsReversed(transfer) {
@@ -8856,6 +8918,7 @@
       state.ledger = [];
       state.masterBankEntries = [];
       state.archives = [];
+      state.deletedOrderIds = [];
       state.actorResetTombstones = normalizeActorResetTombstones();
       state.journalCounter = 0;
       state.manualJournalCounter = 0;
@@ -10453,7 +10516,7 @@
 
       let y = drawPageHeading();
       rows.forEach((row) => {
-        const voided = row.__highlighted === true || row.__voided === true || /^(Voided|Reversed)/.test(String(row.Status || ""));
+        const voided = row.__highlighted === true || row.__voided === true || /^(Voided|Reversed|Cancelled)/.test(String(row.Status || ""));
         const cellLines = headers.map((header, index) => wrapCell(row[header], widths[index]));
         const rowLineCount = Math.max(...cellLines.map((lines) => lines.length), 1);
         let lineOffset = 0;
@@ -10596,7 +10659,8 @@
       const buildRow = (record) => {
         const voided = record.voided === true || String(record.status || "").startsWith("Voided");
         const reversed = record.reversed === true || String(record.status || "").startsWith("Reversed");
-        const excludedFromCalculations = voided || reversed;
+        const cancelled = record.cancelled === true || String(record.status || "").startsWith("Cancelled");
+        const excludedFromCalculations = voided || reversed || cancelled;
         const exportedAmountMinor = pdfMode && Number.isFinite(Number(record.signedAmountMinor))
           ? Number(record.signedAmountMinor)
           : Number(record.amountMinor || 0);
@@ -11663,7 +11727,9 @@
       const receivableResults = visibleReceivablesFor(actor).map((item) => receivableSearchResult(item));
       const archiveResults = (viewerIsMaster
         ? state.archives
-        : state.archives.filter((archive) => archive.actor === actor.name))
+        : state.archives.filter((archive) => archive.actorId && actor.id
+          ? archive.actorId === actor.id
+          : archive.actor === actor.name))
         .flatMap((archive) => {
           const balances = archive.balances && typeof archive.balances === "object"
             ? archive.balances
@@ -11676,7 +11742,7 @@
               archivedOrderForSearch(order, archive),
               actor,
               "Archived Order",
-              orderRecordIsVoided(order) ? "Voided - Excluded" : "Locked"
+              orderRecordIsCancelled(order) ? "Cancelled - Excluded" : orderRecordIsVoided(order) ? "Voided - Excluded" : "Locked"
             )
           );
           const receivableRows = (archive.receivables || []).map((receivable) => {
@@ -12609,9 +12675,12 @@
         }, ["Closed Balance", currency, direction, position, formatMinor(netMinor, currency)]);
       });
       (archive.orders || []).forEach((order) => {
-        const date = order.sentAt || order.createdAt || order.postedAt || archive.closedAt;
+        const cancelled = orderRecordIsCancelled(order);
+        const date = cancelled
+          ? order.cancelledAt || order.updatedAt || order.sentAt || order.createdAt || archive.closedAt
+          : order.sentAt || order.createdAt || order.postedAt || archive.closedAt;
         const amount = archivedOrderAmount(archive, order);
-        const voided = orderRecordIsVoided(order) || order.excludedFromCalculations === true;
+        const voided = !cancelled && (orderRecordIsVoided(order) || order.excludedFromCalculations === true);
         const archivedActor = state.actors.find((item) => item.id === archive.actorId || item.name === archive.actor);
         const archivedActorRole = archive.actorRole || archivedActor?.role || "";
         const paidOut = order.agent === archive.actor && actorHasSpecialPayout(archivedActorRole)
@@ -12631,12 +12700,15 @@
           order.accountNumber ? `Account: ${order.accountNumber}` : "",
           order.remarks ? `Remarks: ${order.remarks}` : "",
           order.paidAt ? `Paid ${displayDate(order.paidAt)}` : "",
+          order.cancelledBy ? `Cancelled by ${order.cancelledBy}` : "",
+          order.cancelledAt ? `Cancelled ${displayDate(order.cancelledAt)}` : "",
+          cancelled ? "Original amount shown for reference only" : "",
           order.voidedAt ? `Voided ${displayDate(order.voidedAt)}` : "",
-          voided ? "Excluded from all calculations" : ""
+          cancelled || voided ? "Excluded from all calculations" : ""
         ].filter(Boolean).join(" - ");
         addRow({
           date,
-          type: "Order",
+          type: cancelled ? "Cancelled Order" : "Order",
           reference,
           journal,
           searchTarget: orderSearchTargetKey(order),
@@ -12644,7 +12716,8 @@
           details,
           paidOut,
           voided,
-          status: voided ? "Voided - Excluded" : "Locked",
+          cancelled,
+          status: cancelled ? "Cancelled - Excluded" : voided ? "Voided - Excluded" : "Locked",
           ...amount
         }, [
           order.id,
@@ -12823,7 +12896,9 @@
     function filteredArchiveStatements(actor, filters) {
       const visible = actor?.role === "Master"
         ? state.archives
-        : state.archives.filter((archive) => archive.actor === actor?.name);
+        : state.archives.filter((archive) => archive.actorId && actor?.id
+          ? archive.actorId === actor.id
+          : archive.actor === actor?.name);
       return visible.filter((archive) =>
         (filters.actor === "All actors" || archive.actor === filters.actor) &&
         (!filters.month || archiveMonthKey(archive.closedAt) === filters.month)
@@ -12866,7 +12941,9 @@
       els.archiveActorFilter.disabled = actor?.role !== "Master";
       const actorVisibleArchives = actor?.role === "Master"
         ? state.archives
-        : state.archives.filter((archive) => archive.actor === actor?.name);
+        : state.archives.filter((archive) => archive.actorId && actor?.id
+          ? archive.actorId === actor.id
+          : archive.actor === actor?.name);
       const actorFilteredArchives = els.archiveActorFilter.value === "All actors"
         ? actorVisibleArchives
         : actorVisibleArchives.filter((archive) => archive.actor === els.archiveActorFilter.value);
@@ -12908,7 +12985,7 @@
             const closedReceivables = records.filter((record) => record.type === "Closed Receivable");
             const statementTransactions = records.filter((record) => record.type !== "Closed Receivable");
             const renderRecord = (record) => {
-              const highlighted = record.voided || record.reversed;
+              const highlighted = record.voided || record.reversed || record.cancelled;
               const description = record.type === "Ledger"
                 ? record.details
                 : [record.direction, record.details].filter(Boolean).join(" - ");
@@ -13480,12 +13557,15 @@
         fundingType: order.fundingType || "cash",
         journal: order.journal || "",
         voidJournal: order.voidJournal || "",
-        excludedFromCalculations: orderRecordIsVoided(order),
+        excludedFromCalculations: orderRecordIsVoided(order) || orderRecordIsCancelled(order),
         locked: true,
         createdAt: order.createdAt || "",
         sentAt: order.sentAt || "",
         paidAt: order.paidAt || "",
         voidedAt: order.voidedAt || "",
+        cancelledBy: order.cancelledBy || "",
+        cancelledAt: order.cancelledAt || "",
+        updatedAt: order.updatedAt || "",
         archivedAt: closedAt
       };
     }
@@ -14380,6 +14460,9 @@
     function closeConfirmation() {
       pendingConfirmation = null;
       els.confirmShade.classList.remove("open");
+      els.confirmYes.textContent = "Yes";
+      els.confirmNo.textContent = "No";
+      els.confirmCancel.textContent = "Cancel";
     }
 
     function closePasswordReset() {
@@ -14396,9 +14479,12 @@
       document.getElementById("currentPassword").focus();
     }
 
-    function confirmAction(message, onYes, onNo = () => {}) {
+    function confirmAction(message, onYes, onNo = () => {}, labels = {}) {
       pendingConfirmation = { onYes, onNo };
       els.confirmMessage.textContent = message;
+      els.confirmYes.textContent = labels.yes || "Yes";
+      els.confirmNo.textContent = labels.no || "No";
+      els.confirmCancel.textContent = labels.cancel || "Cancel";
       els.confirmShade.classList.add("open");
     }
 
@@ -16377,7 +16463,7 @@
         if (!order || (!masterCanCancel && !brokerCanCancel)) return;
         const orderNumber = orderDisplayNumber(order, actor);
         const confirmation = brokerCanCancel
-          ? `Cancel returned order ${orderNumber}? It will remain in your Orders list as Cancelled.`
+          ? `Cancel returned order ${orderNumber}? It will remain in Orders as Cancelled until Master closes the Broker's balance.`
           : `Cancel order ${orderNumber}? This order will not be forwarded and the sender will see it as Cancelled.`;
         confirmAction(confirmation, () => {
           const currentOrder = state.orders.find((item) => item.id === order.id);
@@ -16703,16 +16789,50 @@
       });
     });
 
-    document.getElementById("closeBalanceButton").addEventListener("click", () => {
+    document.getElementById("closeBalanceButton").addEventListener("click", async () => {
       if (selectedActor()?.role !== "Master") return;
+      if (!await saveStateNow()) return;
+      const closePromptRevision = remoteStateRevision;
       const actorName = state.selectedLedgerActor;
       if (!actorName) return;
-      confirmAction(
-        `Warning: close ${actorName}'s ledger balance? Completed transactions and collected receivables will move to Report, and a new balance period will begin. This action cannot be undone.`,
-        () => {
-          if (!closeCurrentBalanceForActor(actorName)) return;
+      const actor = activeActors().find((item) => item.name === actorName && item.role !== "Master");
+      if (!actor) return;
+      const cancelledOrders = state.orders.filter((order) => order.state === "Cancelled" && orderParticipantMatchesActor(order, actor, "broker"));
+      const closeWithPolicy = async (cancelledOrderPolicy) => {
+        try {
+          const result = await api("/api/app-state/close-balance", {
+            method: "POST",
+            body: { actorId: actor.id, actorName: actor.name, cancelledOrderPolicy, expectedRevision: closePromptRevision }
+          });
+          remoteStateRevision = String(result.revision || result.state?._syncRevision || remoteStateRevision || "0");
+          replaceState(result.state);
           renderAll();
+          const cancelledCount = Number(result.cancelledOrderCount || 0);
+          const cancelledMessage = cancelledCount
+            ? ` ${cancelledCount} cancelled order${cancelledCount === 1 ? "" : "s"} ${cancelledCount === 1 ? "was" : "were"} ${cancelledOrderPolicy === "include" ? "kept in Report" : "removed without Report"}.`
+            : "";
+          notifyEvent(
+            "Balance closed",
+            `${actor.name}'s balance was closed.${cancelledMessage}`
+          );
+        } catch (error) {
+          if (error?.status === 409) await refreshSharedState();
+          notifyEvent("Close unavailable", error.message || "The balance could not be closed.");
         }
+      };
+      const baseWarning = `Warning: close ${actorName}'s ledger balance? Completed transactions and collected receivables will move to Report, and a new balance period will begin.`;
+      if (cancelledOrders.length) {
+        confirmAction(
+          `${baseWarning} ${cancelledOrders.length} cancelled order${cancelledOrders.length === 1 ? "" : "s"} will be removed from Orderbook either way. Choose whether to keep ${cancelledOrders.length === 1 ? "it" : "them"} in Report. This action cannot be undone.`,
+          () => closeWithPolicy("include"),
+          () => closeWithPolicy("omit"),
+          { yes: "Keep in Report & Close", no: "Remove without Report & Close" }
+        );
+        return;
+      }
+      confirmAction(
+        `${baseWarning} This action cannot be undone.`,
+        () => closeWithPolicy("include")
       );
     });
 

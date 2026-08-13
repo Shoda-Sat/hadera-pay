@@ -21,6 +21,7 @@ export interface ReportPdfRow {
   currencyAmounts: Partial<Record<Currency, string>>;
   status: string;
   voided: boolean;
+  cancelled: boolean;
   reversed: boolean;
 }
 
@@ -115,14 +116,15 @@ function orderRow(
   const paidOut = ["Special Agent", "Special Broker"].includes(archiveActorRole(archive, actors))
     ? moneyLabel(payoutCurrency, payoutAmountMinor)
     : "";
-  const voided = order.state === "Voided" || Boolean(
+  const cancelled = order.state === "Cancelled";
+  const voided = !cancelled && (order.state === "Voided" || Boolean(
     order.voidedAt || order.voidJournal || order.excludedFromCalculations
-  );
+  ));
   return {
-    date: formatDate(order.sentAt || order.createdAt || archive.closedAt),
+    date: formatDate(order.cancelledAt || order.voidedAt || order.paidAt || order.sentAt || order.createdAt || archive.closedAt),
     statement: statementLabel(archive),
     actor: archive.actor || viewer.actorName,
-    type: "Order",
+    type: cancelled ? "Cancelled Order" : "Order",
     reference: reportOrderNumber(order, viewer),
     direction: `${order.broker || ""} -> ${order.agent || ""}`,
     details: [
@@ -131,13 +133,18 @@ function orderRow(
       order.receiverCity ? `Receiver City: ${order.receiverCity}` : "",
       order.remarks ? `Remarks: ${order.remarks}` : "",
       order.paidAt ? `Paid ${formatDateTime(order.paidAt)}` : "",
+      cancelled && order.cancelledBy ? `Cancelled by: ${order.cancelledBy}` : "",
+      cancelled && order.cancelledAt ? `Cancelled: ${formatDateTime(order.cancelledAt)}` : "",
+      cancelled ? "Original amount shown for reference only" : "",
       voided ? "Excluded from all calculations" : "",
+      cancelled ? "Excluded from all calculations" : "",
     ].filter(Boolean).join(" - "),
     amount: moneyLabel(amount.currency, amount.amountMinor),
-    paidOut,
+    paidOut: cancelled ? "" : paidOut,
     currencyAmounts: { [amount.currency]: formattedMinor(amount.currency, amount.amountMinor) },
-    status: voided ? "Voided - Excluded" : "Locked",
+    status: cancelled ? "Cancelled - Excluded" : voided ? "Voided - Excluded" : "Locked",
     voided,
+    cancelled,
     reversed: false,
   };
 }
@@ -189,6 +196,7 @@ function transferRow(
     currencyAmounts,
     status: reversed ? "Reversed - Netted to zero" : "Locked",
     voided: false,
+    cancelled: false,
     reversed,
   };
 }
@@ -224,6 +232,7 @@ function archiveRows(archive: ArchiveRecord, actors: ActorRecord[], viewer: User
       currencyAmounts: { [currency]: formattedMinor(currency, Number(receivable.principalMinor || 0)) },
       status: voided ? "Voided - Excluded" : "Locked",
       voided,
+      cancelled: false,
       reversed: false,
     });
   });
@@ -268,6 +277,7 @@ function archiveRows(archive: ArchiveRecord, actors: ActorRecord[], viewer: User
       currencyAmounts: { [currency]: formattedMinor(currency, Number(line.amountMinor || 0)) },
       status: voided ? "Voided - Excluded" : "Locked",
       voided,
+      cancelled: false,
       reversed: false,
     });
   });
@@ -289,6 +299,7 @@ function archiveRows(archive: ArchiveRecord, actors: ActorRecord[], viewer: User
       currencyAmounts: { [currency]: formattedMinor(currency, netMinor) },
       status: "Locked",
       voided: false,
+      cancelled: false,
       reversed: false,
     });
   });
@@ -324,7 +335,7 @@ export function buildArchiveReportPdfHtml(
     rows.some((row) => row.currencyAmounts[currency] !== undefined)
   );
   const body = rows.map((row) => `
-    <tr class="${row.voided || row.reversed ? "void-row" : ""}">
+    <tr class="${row.voided || row.cancelled || row.reversed ? "void-row" : ""}">
       <td>${escapeHtml(row.date)}</td>
       <td>${escapeHtml(row.statement)}</td>
       <td>${escapeHtml(row.actor)}</td>
@@ -334,7 +345,7 @@ export function buildArchiveReportPdfHtml(
       <td class="details">${escapeHtml(row.details)}</td>
       <td>${escapeHtml(row.amount)}</td>
       ${rows.some((item) => item.paidOut) ? `<td>${escapeHtml(row.paidOut)}</td>` : ""}
-      ${presentCurrencies.map((currency) => `<td>${escapeHtml(row.voided || row.reversed ? "" : row.currencyAmounts[currency] || "")}</td>`).join("")}
+      ${presentCurrencies.map((currency) => `<td>${escapeHtml(row.voided || row.cancelled || row.reversed ? "" : row.currencyAmounts[currency] || "")}</td>`).join("")}
       <td>${escapeHtml(row.status)}</td>
     </tr>
   `).join("");

@@ -40,7 +40,7 @@ test("closed Report repair is guarded, backed up, and Master-only", async () => 
   assert.match(index, /expectedCount: plan\.candidateCount/);
   assert.match(index, /expectedRevision: plan\.revision/);
   assert.match(index, /planDigest: plan\.planDigest/);
-  assert.match(server, /const scope = body\.scope === "wipe" \? "wipe" : "data";[\s\S]*?await saveDb\(db, \{ replace: true \}\)/);
+  assert.match(server, /const scope = body\.scope === "wipe" \? "wipe" : "data";[\s\S]*?workspaceStateSaveOptions\(db, session\.workspace\.id, expectedRevision\)/);
 });
 
 test("an unreadable existing database is never treated as an empty database", async () => {

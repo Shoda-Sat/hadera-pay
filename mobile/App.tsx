@@ -149,12 +149,18 @@ function actorForSession(session: UserSession, workspaceState: WorkspaceState | 
     workspaceState?.actors.find((actor) => actor.name === session.actorName);
 }
 
+function orderBrokerMatchesSession(order: OrderRecord, session: UserSession): boolean {
+  return order.brokerActorId
+    ? order.brokerActorId === session.actorId
+    : order.broker === session.actorName;
+}
+
 function visibleOrdersFor(session: UserSession, workspaceState: WorkspaceState | null): OrderRecord[] {
   const orders = workspaceState?.orders || [];
   const visible = session.actorRole === "Master"
     ? orders
     : orders.filter((order) =>
-        order.broker === session.actorName ||
+        orderBrokerMatchesSession(order, session) ||
         order.agent === session.actorName ||
         order.agentActorId === session.actorId
       );
@@ -242,7 +248,9 @@ function reportPdfFontBase64(): Promise<string> {
 
 function visibleArchivesFor(session: UserSession, workspaceState: WorkspaceState | null): ArchiveRecord[] {
   return (workspaceState?.archives || [])
-    .filter((archive) => session.actorRole === "Master" || archive.actor === session.actorName)
+    .filter((archive) => session.actorRole === "Master" || (archive.actorId
+      ? archive.actorId === session.actorId
+      : archive.actor === session.actorName))
     .slice()
     .sort((a, b) => new Date(b.closedAt || 0).getTime() - new Date(a.closedAt || 0).getTime());
 }
@@ -992,7 +1000,7 @@ function HomeScreen({
           <View key={order.id} style={styles.orderRow}>
             <View style={{ flex: 1 }}>
               <Text style={styles.orderId}>{orderNumber(order, session)}</Text>
-              <Text style={styles.mutedText}>{order.broker === session.actorName ? order.receiverName : order.broker}</Text>
+              <Text style={styles.mutedText}>{orderBrokerMatchesSession(order, session) ? order.receiverName : order.broker}</Text>
             </View>
             <View style={styles.orderRight}>
               <Text style={styles.orderAmount}>{compactAmount(order.payoutCurrency, majorFromMinor(order.payoutAmountMinor, order.payoutCurrency))}</Text>
@@ -1269,7 +1277,7 @@ function ArchiveScreen({
           .filter((row) => row.netMinor !== 0);
         const referenceCompare = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
         const orders = (archive.orders || []).slice().sort((a, b) => transactionSort === "Date"
-          ? new Date(b.paidAt || b.sentAt || b.createdAt || 0).getTime() - new Date(a.paidAt || a.sentAt || a.createdAt || 0).getTime()
+          ? new Date(b.cancelledAt || b.voidedAt || b.paidAt || b.sentAt || b.createdAt || 0).getTime() - new Date(a.cancelledAt || a.voidedAt || a.paidAt || a.sentAt || a.createdAt || 0).getTime()
           : referenceCompare(orderNumber(a, session), orderNumber(b, session)));
         const transfers = (archive.transfers || []).slice().sort((a, b) => transactionSort === "Date"
           ? new Date(b.reversedAt || b.paidOutAt || b.approvedAt || b.sentAt || b.createdAt || 0).getTime() - new Date(a.reversedAt || a.paidOutAt || a.approvedAt || a.sentAt || a.createdAt || 0).getTime()
@@ -1349,14 +1357,19 @@ function ArchiveScreen({
             {expanded ? (
               <View style={styles.archiveDetails}>
                 {displayedOrders.map((order) => {
-                  const voided = orderRecordIsVoided(order);
-                  return <View key={`order-${statementId}-${order.id}`} style={[styles.archiveDetailRow, voided && styles.reportVoidRow]}>
+                  const cancelled = order.state === "Cancelled";
+                  const voided = !cancelled && orderRecordIsVoided(order);
+                  const excluded = cancelled || voided;
+                  return <View key={`order-${statementId}-${order.id}`} style={[styles.archiveDetailRow, excluded && styles.reportVoidRow]}>
                     <Text style={styles.archiveDetailTitle}>Order {orderNumber(order, session)}</Text>
                     {voided ? <Text style={styles.reportVoidText}>Voided - Excluded from all calculations</Text> : null}
+                    {cancelled ? <Text style={styles.reportVoidText}>Cancelled - Excluded</Text> : null}
+                    {cancelled && order.cancelledBy ? <Text style={styles.archiveDetailMeta}>Cancelled by: {order.cancelledBy}</Text> : null}
+                    {cancelled && order.cancelledAt ? <Text style={styles.archiveDetailMeta}>Cancelled: {formatDateTime(order.cancelledAt)}</Text> : null}
                     <Text style={styles.archiveDetailMeta}>{order.receiverName || order.accountNumber || order.phoneNumber || "No receiver details"}</Text>
                     {order.receiverCity ? <Text style={styles.archiveDetailMeta}>Receiver City: {order.receiverCity}</Text> : null}
                     <Text style={styles.archiveDetailAmount}>
-                      {compactAmount(order.sourceCurrency, majorFromMinor(order.sourceAmountMinor, order.sourceCurrency))} to {compactAmount(order.payoutCurrency, majorFromMinor(order.payoutAmountMinor, order.payoutCurrency))}
+                      {cancelled ? "Original amount (informational): " : ""}{compactAmount(order.sourceCurrency, majorFromMinor(order.sourceAmountMinor, order.sourceCurrency))} to {compactAmount(order.payoutCurrency, majorFromMinor(order.payoutAmountMinor, order.payoutCurrency))}
                     </Text>
                   </View>;
                 })}
