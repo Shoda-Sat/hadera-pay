@@ -197,7 +197,7 @@ test("a paid shared order closes once for each participant while a cancellation 
   assert.equal(brokerClose.closed, true);
   assert.equal(brokerClose.state.archives[0].incomeProfitMinor, 321, "The frozen order profit must be used exactly.");
   assert.deepEqual(new Set(brokerClose.state.archives[0].orders.map((order) => order.id)), new Set(["ORD-PAID", "ORD-CANCELLED"]));
-  assert.deepEqual(brokerClose.state.orders, []);
+  assert.deepEqual(brokerClose.state.orders.map((order) => order.id), ["ORD-PAID"], "The shared paid order remains live for Walta until Walta closes.");
   assert.equal(brokerClose.state.archives[0].balances.EUR, 10_000);
   assert.equal(brokerClose.state.ledger.find((line) => line.account === "PPP ACTOR_CLEARING" && line.source === "ORDER_PAYMENT").archived, true);
   assert.equal(brokerClose.state.ledger.find((line) => line.account === "Walta ACTOR_CLEARING" && line.source === "ORDER_PAYMENT").archived, undefined);
@@ -225,6 +225,166 @@ test("a paid shared order closes once for each participant while a cancellation 
   });
   assert.equal(repeat.closed, false);
   assert.equal(repeat.state.archives.length, payerClose.state.archives.length);
+});
+
+test("the second participant closes a journal-matched archived order after its hidden ID was remapped", () => {
+  const state = baseState();
+  state.archives = [{
+    id: "ARC-PPP-FIRST",
+    actor: "PPP",
+    actorId: "ACT-PPP",
+    actorRole: "Broker",
+    closedAt,
+    balances: { EUR: 10_000 },
+    incomeProfitMinor: 321,
+    orders: [paidOrder({
+      id: "ORD-OLD-HIDDEN-ID",
+      internalOrderId: "ORD-OLD-HIDDEN-ID",
+      actor: "PPP",
+      locked: true,
+      archivedAt: closedAt,
+    })],
+    ledger: [],
+    transfers: [],
+    receivables: [],
+  }];
+  state.ledger = paidLedger().map((line) => ({
+    ...line,
+    orderId: line.account === "PPP ACTOR_CLEARING" ? "ORD-OLD-HIDDEN-ID" : "ORD-NEW-HIDDEN-ID",
+    ...(line.account === "PPP ACTOR_CLEARING" ? { archived: true, closedAt } : {}),
+  }));
+
+  const result = closeActorBalance(state, {
+    actorId: "ACT-WALTA",
+    cancelledOrderPolicy: "include",
+    closedAt: "2026-08-13T19:00:00.000Z",
+    archiveId: "ARC-WALTA-SECOND",
+  });
+
+  assert.equal(result.closed, true);
+  const payerArchive = result.state.archives.find((archive) => archive.id === "ARC-WALTA-SECOND");
+  assert.equal(payerArchive.orders.length, 1);
+  assert.equal(payerArchive.orders[0].journal, "JRN-1826");
+  assert.equal(payerArchive.orders[0].actor, "Walta");
+  assert.equal(payerArchive.orders[0].payerCurrency, "ETB");
+  assert.equal(payerArchive.orders[0].payerAmountMinor, 1_970_000);
+  assert.equal(payerArchive.balances.ETB, -1_970_000);
+});
+
+test("conflicting archived snapshots block the second participant close without touching accounting", () => {
+  const state = baseState();
+  const source = paidOrder({
+    id: "ORD-OLD-HIDDEN-ID",
+    internalOrderId: "ORD-OLD-HIDDEN-ID",
+    actor: "PPP",
+    locked: true,
+    archivedAt: closedAt,
+  });
+  state.archives = [
+    {
+      id: "ARC-PPP-FIRST",
+      actor: "PPP",
+      actorId: "ACT-PPP",
+      actorRole: "Broker",
+      closedAt,
+      balances: { EUR: 10_000 },
+      incomeProfitMinor: 321,
+      orders: [source],
+    },
+    {
+      id: "ARC-CONFLICT",
+      actor: "Other",
+      actorId: "ACT-OTHER",
+      actorRole: "Broker",
+      closedAt,
+      balances: {},
+      incomeProfitMinor: 0,
+      orders: [{ ...source, payoutAmountMinor: 9_999_999 }],
+    },
+  ];
+  state.ledger = paidLedger().map((line) => ({
+    ...line,
+    orderId: line.account === "PPP ACTOR_CLEARING" ? "ORD-OLD-HIDDEN-ID" : "ORD-NEW-HIDDEN-ID",
+    ...(line.account === "PPP ACTOR_CLEARING" ? { archived: true, closedAt } : {}),
+  }));
+  const before = structuredClone(state);
+
+  const result = closeActorBalance(state, {
+    actorId: "ACT-WALTA",
+    cancelledOrderPolicy: "include",
+    closedAt: "2026-08-13T19:00:00.000Z",
+    archiveId: "ARC-WALTA-BLOCKED",
+  });
+
+  assert.equal(result.closed, false);
+  assert.match(result.error, /JRN-1826.*conflicting archived records/i);
+  assert.deepEqual(result.state, before);
+  assert.deepEqual(state, before);
+});
+
+test("a recreated same-name Actor cannot inherit an old participant's payment balance", () => {
+  const state = baseState();
+  state.actors = state.actors.map((actor) =>
+    actor.id === "ACT-WALTA" ? { ...actor, id: "ACT-WALTA-NEW" } : actor
+  );
+  state.archives = [{
+    id: "ARC-PPP-FIRST",
+    actor: "PPP",
+    actorId: "ACT-PPP",
+    actorRole: "Broker",
+    closedAt,
+    balances: { EUR: 10_000 },
+    incomeProfitMinor: 321,
+    orders: [paidOrder({
+      agentActorId: "ACT-WALTA-OLD",
+      actor: "PPP",
+      locked: true,
+      archivedAt: closedAt,
+    })],
+  }];
+  state.ledger = paidLedger().map((line) => ({
+    ...line,
+    ...(line.account === "PPP ACTOR_CLEARING" ? { archived: true, closedAt } : {}),
+  }));
+  const before = structuredClone(state);
+
+  const result = closeActorBalance(state, {
+    actorId: "ACT-WALTA-NEW",
+    cancelledOrderPolicy: "include",
+    closedAt: "2026-08-13T19:00:00.000Z",
+    archiveId: "ARC-WALTA-NEW-BLOCKED",
+  });
+
+  assert.equal(result.closed, false);
+  assert.match(result.error, /JRN-1826.*Actor identity conflict/i);
+  assert.deepEqual(result.state, before);
+  assert.deepEqual(state, before);
+});
+
+test("an Actor payment without any recoverable order record blocks balance closure", () => {
+  const state = baseState();
+  state.ledger = [{
+    journal: "JRN-MISSING",
+    orderId: "ORD-MISSING",
+    source: "ORDER_PAYMENT",
+    account: "Walta ACTOR_CLEARING",
+    direction: "Credit",
+    currency: "ETB",
+    amountMinor: 500,
+  }];
+  const before = structuredClone(state);
+
+  const result = closeActorBalance(state, {
+    actorId: "ACT-WALTA",
+    cancelledOrderPolicy: "include",
+    closedAt: "2026-08-13T19:00:00.000Z",
+    archiveId: "ARC-WALTA-MISSING-BLOCKED",
+  });
+
+  assert.equal(result.closed, false);
+  assert.match(result.error, /JRN-MISSING.*no recoverable order record/i);
+  assert.deepEqual(result.state, before);
+  assert.deepEqual(state, before);
 });
 
 test("legacy USD paid orders calculate missing profit from ledger, commission, and USD Agent settings", () => {
@@ -399,7 +559,7 @@ test("shared paid orders also survive the reverse participant close order", () =
   });
   assert.equal(payerFirst.closed, true);
   assert.deepEqual(payerFirst.state.archives[0].orders.map((order) => order.id), ["ORD-PAID"]);
-  assert.deepEqual(payerFirst.state.orders.map((order) => order.id), ["ORD-CANCELLED"]);
+  assert.deepEqual(payerFirst.state.orders.map((order) => order.id), ["ORD-PAID", "ORD-CANCELLED"], "PPP must retain the paid order after Walta closes first.");
 
   const brokerSecond = closeActorBalance(payerFirst.state, {
     actorId: "ACT-PPP",
@@ -409,6 +569,7 @@ test("shared paid orders also survive the reverse participant close order", () =
   });
   assert.equal(brokerSecond.closed, true);
   assert.deepEqual(brokerSecond.state.archives[0].orders.map((order) => order.id), ["ORD-PAID"]);
+  assert.deepEqual(brokerSecond.state.orders, []);
   assert.deepEqual(brokerSecond.state.deletedOrderIds, ["ORD-CANCELLED"]);
   const paidReports = brokerSecond.state.archives.flatMap((archive) => archive.orders).filter((order) => order.id === "ORD-PAID");
   assert.equal(paidReports.length, 2);

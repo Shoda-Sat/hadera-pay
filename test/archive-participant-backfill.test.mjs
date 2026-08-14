@@ -155,6 +155,30 @@ test("backfills the payer's exact closed statement without changing accounting s
   assert.deepEqual(second.state, result.state);
 });
 
+test("backfills a closed participant by unique journal after a hidden order ID remap", () => {
+  const state = baseState();
+  state.archives[0].orders[0] = paidOrder({
+    id: "ORD-OLD-HIDDEN-ID",
+    internalOrderId: "ORD-OLD-HIDDEN-ID",
+  });
+  state.ledger = state.ledger.map((line) =>
+    line.account === "Walta ACTOR_CLEARING"
+      ? { ...line, orderId: "ORD-NEW-HIDDEN-ID" }
+      : line
+  );
+
+  const result = backfillClosedParticipantOrderSnapshots(state);
+
+  assert.equal(result.repairedCount, 1);
+  assert.equal(result.skippedCount, 0);
+  assert.equal(result.orphanCount, 0);
+  const payerArchive = result.state.archives.find((archive) => archive.id === "ARC-WALTA");
+  assert.equal(payerArchive.orders.length, 1);
+  assert.equal(payerArchive.orders[0].journal, "JRN-1826");
+  assert.equal(payerArchive.orders[0].payerCurrency, "ETB");
+  assert.equal(payerArchive.orders[0].payerAmountMinor, 1_970_000);
+});
+
 test("restores a broker snapshot after the payer closed first and removes payer-only amounts", () => {
   const state = baseState();
   const source = paidOrder({
@@ -252,6 +276,29 @@ test("skips ambiguous archive destinations and conflicting source snapshots", ()
   assert.equal(sourceResult.repairedCount, 0);
   assert.ok(sourceResult.skippedCount >= 1);
   assert.equal(sourceResult.state, conflictingSource);
+});
+
+test("conflicting stable participant IDs make a same-journal historical source ambiguous", () => {
+  const state = baseState();
+  state.archives[0].orders[0] = paidOrder({ agentActorId: "ACT-WALTA" });
+  state.archives.push({
+    id: "ARC-CONFLICTING-IDENTITY",
+    actor: "Other",
+    actorId: "ACT-OTHER",
+    closedAt: brokerClose,
+    orders: [paidOrder({ agentActorId: "ACT-WALTA-RECREATED" })],
+  });
+  const before = structuredClone(state);
+
+  const result = backfillClosedParticipantOrderSnapshots(state, {
+    actorId: "ACT-WALTA",
+    actorName: "Walta",
+  });
+
+  assert.equal(result.repairedCount, 0);
+  assert.ok(result.skippedCount >= 1);
+  assert.equal(result.state, state);
+  assert.deepEqual(result.state, before);
 });
 
 test("an optional Actor target cannot repair another participant's archive", () => {

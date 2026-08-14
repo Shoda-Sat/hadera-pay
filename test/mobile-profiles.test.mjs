@@ -24,6 +24,6 @@ test("Android Master Profiles provides profile and order search", async () => {
   assert.match(screens, /label="Search this profile's orders"/);
   assert.match(screens, /function ordersForProfile/);
   assert.match(screens, /order\.broker === actor\.name/);
-  assert.match(screens, /order\.agentActorId === actor\.id/);
+  assert.match(screens, /orderAgentMatchesActor\(order, actor\.id, actor\.name\)/);
   assert.match(screens, /orderNumber\(order, displaySession\)/);
 });

@@ -212,7 +212,7 @@ test("server and Android normalization preserve a shared order in both actor arc
   const mobileNormalization = sourceBetween(
     mobileClient,
     "function normalizeArchiveSnapshots",
-    "function removeOrdersAlreadyReported",
+    "function recoveredOrderMatches",
   );
   assert.match(mobileNormalization, /const actorKey = String\(archive\.actorId \|\| archive\.actor \|\| "Unknown Actor"\)/);
   assert.match(mobileNormalization, /const seen = seenByActor\.get\(actorKey\)/);

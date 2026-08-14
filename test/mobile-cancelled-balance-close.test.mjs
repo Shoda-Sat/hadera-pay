@@ -54,6 +54,12 @@ test("Android close API sends the chosen cancellation policy and honors deleted-
       nextActorLedgerSequence: () => 1,
     },
     "../utils/money": {},
+    "../utils/orderParticipantRetention": {
+      retainOrdersForUnclosedParticipants: (orders, _archives, _ledger, _actors, deletedOrderIds = []) => {
+        const deleted = new Set(deletedOrderIds);
+        return (orders || []).filter((order) => !deleted.has(order.id));
+      },
+    },
   });
   const requests = [];
   const previousFetch = globalThis.fetch;

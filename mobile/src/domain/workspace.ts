@@ -241,15 +241,28 @@ export function orderRecordIsVoided(order: OrderRecord | undefined): boolean {
 
 export function orderForLedgerLine(state: WorkspaceState, line: LedgerLine): OrderRecord | undefined {
   if (!String(line.source || "").startsWith("ORDER_")) return undefined;
-  const liveOrder = line.orderId
-    ? state.orders.find((order) => order.id === line.orderId)
-    : state.orders.find((order) => order.journal === line.journal || order.voidJournal === line.journal);
-  if (liveOrder) return liveOrder;
   const reportedOrders = state.archives.flatMap((archive) => archive.orders || []);
+  const candidateOrders = [...state.orders, ...reportedOrders];
+  const evidenceJournal = String(line.journal || "").trim();
+  if (evidenceJournal) {
+    const journalMatch = candidateOrders.find((order) =>
+      order.journal === evidenceJournal || order.voidJournal === evidenceJournal
+    );
+    if (journalMatch) return journalMatch;
+    return candidateOrders.find((order) =>
+      !order.journal && !order.voidJournal &&
+      Boolean(line.orderId) &&
+      (order.id === line.orderId || order.internalOrderId === line.orderId)
+    );
+  }
+  const liveOrder = line.orderId
+    ? state.orders.find((order) => order.id === line.orderId || order.internalOrderId === line.orderId)
+    : undefined;
+  if (liveOrder) return liveOrder;
   if (line.orderId) {
     return reportedOrders.find((order) => order.id === line.orderId || order.internalOrderId === line.orderId);
   }
-  return reportedOrders.find((order) => order.journal === line.journal || order.voidJournal === line.journal);
+  return undefined;
 }
 
 export function ledgerLineIsForVoidedOrder(state: WorkspaceState, line: LedgerLine): boolean {

@@ -121,6 +121,7 @@ import {
 import { actorLedgerReferenceForLine, ledgerAccountBelongsToActor, ledgerLineBelongsToActor } from "../domain/ledgerNumbering";
 import { useProgressiveLimit } from "../hooks/useProgressiveLimit";
 import { colors, radius, spacing } from "../theme";
+import { orderArchivedForActor } from "../utils/orderParticipantRetention";
 import type {
   ActorRecord,
   ActorRole,
@@ -197,7 +198,7 @@ function transferStatusTone(state: string): PillTone {
 }
 
 function orderNumber(order: OrderRecord, session: UserSession): string {
-  const payer = order.agent === session.actorName || order.agentActorId === session.actorId;
+  const payer = orderAgentMatchesActor(order, session.actorId, session.actorName);
   if (payer && ["Agent", "Special Agent", "Special Broker"].includes(session.actorRole)) {
     return order.agentOrderNumbers?.[session.actorName] || order.agentOrderNumber || order.brokerOrderNumber || order.id;
   }
@@ -208,6 +209,12 @@ function orderBrokerMatchesActor(order: OrderRecord, actorId: string, actorName:
   return order.brokerActorId
     ? order.brokerActorId === actorId
     : order.broker === actorName;
+}
+
+function orderAgentMatchesActor(order: OrderRecord, actorId: string, actorName: string): boolean {
+  return order.agentActorId
+    ? order.agentActorId === actorId
+    : order.agent === actorName;
 }
 
 function archiveMatchesSessionActor(archive: WorkspaceState["archives"][number], session: UserSession): boolean {
@@ -260,7 +267,7 @@ function orderPercentDisplayForViewer(order: OrderRecord, session: UserSession):
     const label = normalizedOrderCommissionLiability(order) === "Master" ? "Master-liable commission" : "Order commission";
     return percent === null ? null : { label, percent };
   }
-  const isPayer = Boolean(session.actorId && order.agentActorId === session.actorId) || order.agent === session.actorName;
+  const isPayer = orderAgentMatchesActor(order, session.actorId, session.actorName);
   if (!isPayer || !actorCanReceivePayouts(session.actorRole) || !Object.prototype.hasOwnProperty.call(order, "forwardedPayoutPercent")) return null;
   const percent = orderPercentValue(order.forwardedPayoutPercent);
   return percent === null ? null : { label: "Payer %", percent };
@@ -444,12 +451,14 @@ const actorOrderSortOptions: ActorOrderSort[] = ["Default", "No. Ascending", "No
 const pendingActorOrderStates = new Set<OrderRecord["state"]>(["Pending Forward", "Assigned", "Returned", "Void Requested"]);
 
 function relatedOrders(session: UserSession, state: WorkspaceState): OrderRecord[] {
-  return state.orders.filter((order) =>
+  const related = state.orders.filter((order) =>
     isMasterView(session) ||
     orderBrokerMatchesActor(order, session.actorId, session.actorName) ||
-    order.agent === session.actorName ||
-    order.agentActorId === session.actorId
+    orderAgentMatchesActor(order, session.actorId, session.actorName)
   );
+  return isMasterView(session)
+    ? related
+    : related.filter((order) => !orderArchivedForActor(order, session.actorId, session.actorName, state.archives));
 }
 
 function visibleOrders(session: UserSession, state: WorkspaceState): OrderRecord[] {
@@ -543,9 +552,8 @@ function ordersForProfile(session: UserSession, state: WorkspaceState, actor: Ac
     ? state.orders
     : state.orders.filter((order) =>
         (order.brokerActorId ? order.brokerActorId === actor.id : order.broker === actor.name) ||
-        order.agent === actor.name ||
-        Boolean(order.agentActorId && order.agentActorId === actor.id)
-      );
+        orderAgentMatchesActor(order, actor.id, actor.name)
+      ).filter((order) => !orderArchivedForActor(order, actor.id, actor.name, state.archives));
   const orderbookOrders = actor.role === "Master"
     ? relatedOrders
     : relatedOrders.filter((order) => {
@@ -787,7 +795,7 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
       ) : null}
       {orders.length ? displayedOrders.map((order) => {
         const isExpanded = expanded.includes(order.id);
-        const isPayer = order.agent === session.actorName || order.agentActorId === session.actorId;
+        const isPayer = orderAgentMatchesActor(order, session.actorId, session.actorName);
         const percentDisplay = orderPercentDisplayForViewer(order, session);
         const actorCanSeeReturnReason = order.state === "Returned" && Boolean(order.returnedReason) &&
           (isMasterView(session) || orderBrokerMatchesActor(order, session.actorId, session.actorName));
@@ -1360,7 +1368,7 @@ export function SearchScreen({ session, state, onNavigate }: CommonProps) {
   let singleIndex = 0;
 
   const addOrder = (order: OrderRecord, type = "Order", status: string = order.state, archivedAt = "") => {
-    const isPayer = order.agent === session.actorName || order.agentActorId === session.actorId;
+    const isPayer = orderAgentMatchesActor(order, session.actorId, session.actorName);
     const isBroker = orderBrokerMatchesActor(order, session.actorId, session.actorName);
     const visibility = viewerActor?.orderVisibilityPermissions || {};
     const canSeeSource = isMasterView(session) || isBroker || !isPayer || (visibility.sourceCurrency !== false && visibility.baseAmount !== false);
@@ -1465,7 +1473,12 @@ export function SearchScreen({ session, state, onNavigate }: CommonProps) {
     rawResults.push({ key: `${type}:${item.id}`, groupKey: item.orderId ? `order:${item.orderId}` : `receivable:${item.id}`, kind: "receivable", type, reference, actor: item.borrower, participants: uniqueSearchNames([item.borrower, "Master"]), amount: `Principal ${principal} / Balance ${balance}`, status, details, time: new Date(item.createdAt || item.updatedAt || archivedAt || 0).getTime() || 0, screen: type.startsWith("Archived") ? "archive" : "receivables", searchText: [reference, item.id, item.borrower, status, details].join(" ").toLocaleLowerCase() });
   };
 
-  (isMasterView(session) ? state.orders : state.orders.filter((order) => orderBrokerMatchesActor(order, session.actorId, session.actorName) || order.agent === session.actorName || order.agentActorId === session.actorId)).forEach((order) => addOrder(order));
+  (isMasterView(session)
+    ? state.orders
+    : state.orders.filter((order) =>
+        (orderBrokerMatchesActor(order, session.actorId, session.actorName) || orderAgentMatchesActor(order, session.actorId, session.actorName)) &&
+        !orderArchivedForActor(order, session.actorId, session.actorName, state.archives)
+      )).forEach((order) => addOrder(order));
   (isMasterView(session) ? state.transfers : state.transfers.filter((transfer) => transfer.from === session.actorName || transfer.to === session.actorName)).forEach((transfer) => addTransfer(transfer));
   state.ledger.filter((line) => line.archived !== true && (isMasterView(session) || ledgerParticipant(String(line.account || "")) === session.actorName)).forEach((line) => addLedger(line, line.source === "JOURNAL" ? "Journal" : line.source === "WITHDRAWAL" ? "Withdrawal" : "Ledger"));
   state.receivables.filter((item) => isMasterView(session) || item.borrower === session.actorName).forEach((item) => addReceivable(item));

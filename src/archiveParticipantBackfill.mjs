@@ -46,14 +46,18 @@ function orderMatchesEvidence(order, line) {
   const journals = orderJournals(order);
   const idMatches = Boolean(evidenceOrderId && ids.has(evidenceOrderId));
   const journalMatches = Boolean(evidenceJournal && journals.has(evidenceJournal));
-  if (evidenceOrderId && evidenceJournal && ids.size && journals.size) return idMatches && journalMatches;
-  return idMatches || journalMatches;
+  if (evidenceJournal && journals.size) return journalMatches;
+  return idMatches;
 }
 
 function snapshotCoreSignature(order) {
   return [
-    cleanText(order?.id || order?.internalOrderId),
+    cleanText(order?.id),
+    cleanText(order?.internalOrderId),
+    cleanText(order?.collisionSourceOrderId),
     cleanText(order?.journal),
+    cleanText(order?.brokerActorId),
+    cleanText(order?.agentActorId),
     normalizedName(order?.broker),
     normalizedName(order?.agent),
     cleanText(order?.sourceCurrency),

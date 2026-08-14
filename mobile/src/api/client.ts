@@ -20,6 +20,7 @@ import type {
 } from "../types";
 import { ensureActorLedgerNumbers, nextActorLedgerSequence } from "../domain/ledgerNumbering";
 import { calculateQuote, compactAmount, fixedOrderCommissionForActor, fixedOrderRateForActor, minorFromMajor, parseDecimalNumber } from "../utils/money";
+import { retainOrdersForUnclosedParticipants } from "../utils/orderParticipantRetention";
 
 declare const process: { env?: Record<string, string | undefined> } | undefined;
 
@@ -355,23 +356,6 @@ function normalizeArchiveSnapshots(value: ArchiveRecord[] | undefined): ArchiveR
   return archives;
 }
 
-function removeOrdersAlreadyReported(orders: OrderRecord[] | undefined, archives: ArchiveRecord[]): OrderRecord[] {
-  const reportedAt = new Map<string, number>();
-  archives.forEach((archive) => {
-    const closedAt = new Date(archive.closedAt || 0).getTime();
-    (archive.orders || []).forEach((order) => {
-      if (!order.id) return;
-      reportedAt.set(order.id, Math.max(reportedAt.get(order.id) || 0, Number.isFinite(closedAt) ? closedAt : 0));
-    });
-  });
-  return (Array.isArray(orders) ? orders : []).filter((order) => {
-    const closedAt = reportedAt.get(order.id);
-    if (closedAt === undefined) return true;
-    const createdAt = new Date(order.createdAt || order.sentAt || 0).getTime();
-    return Number.isFinite(createdAt) && createdAt > closedAt;
-  });
-}
-
 function recoveredOrderMatches(left: OrderRecord, right: OrderRecord): boolean {
   const leftActorId = String(left.brokerActorId || "").trim();
   const rightActorId = String(right.brokerActorId || "").trim();
@@ -412,9 +396,12 @@ function normalizeState(state: Partial<WorkspaceState> | null | undefined): Work
   const normalized = {
     ...(state || {}),
     actors: Array.isArray(state?.actors) ? state.actors : [],
-    orders: removeOrdersAlreadyReported(
+    orders: retainOrdersForUnclosedParticipants(
       removeRecoveredOrderAliases((Array.isArray(state?.orders) ? state.orders : []).filter((order) => !deletedOrderIdSet.has(order.id))),
-      archives
+      archives,
+      Array.isArray(state?.ledger) ? state.ledger : [],
+      Array.isArray(state?.actors) ? state.actors : [],
+      deletedOrderIds
     ),
     receivables: Array.isArray(state?.receivables) ? state.receivables : [],
     savedCustomers: Array.isArray(state?.savedCustomers) ? state.savedCustomers : [],

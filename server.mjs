@@ -9,6 +9,7 @@ import {
   backfillClosedParticipantOrderSnapshots,
 } from "./src/archiveParticipantBackfill.mjs";
 import { closeActorBalance } from "./src/closeActorBalance.mjs";
+import { retainOrdersForOpenParticipants } from "./src/orderParticipantRetention.mjs";
 import {
   findPendingOrderIntegrityIssues,
   nextBrokerOrderNumberForActor,
@@ -186,10 +187,13 @@ function mergeAppStates(existingStates = {}, incomingStates = {}) {
         ...(Array.isArray(existingState.deletedOrderIds) ? existingState.deletedOrderIds : []),
         ...(Array.isArray(incomingState.deletedOrderIds) ? incomingState.deletedOrderIds : []),
       ].filter(Boolean).map(String)));
+      const effectiveState = { ...existingState, ...incomingState };
       const orders = removeOrdersAlreadyArchived(
         mergeOrders(existingState.orders, incomingState.orders),
         archives,
-        deletedOrderIds
+        deletedOrderIds,
+        effectiveState.ledger,
+        effectiveState.actors
       );
       return [
         workspaceId,
@@ -363,15 +367,22 @@ function sessionCanUseChat(state, session, chatId) {
   return Boolean(chat && actorName && (chat.members || []).includes(actorName));
 }
 
+function orderParticipantMatchesIdentity(order, role, actorId, actorName) {
+  const participantActorId = String(role === "broker" ? order?.brokerActorId || "" : order?.agentActorId || "");
+  const participantName = String(role === "broker" ? order?.broker || "" : order?.agent || "");
+  if (participantActorId) return Boolean(actorId && participantActorId === actorId);
+  return Boolean(actorName && participantName === actorName);
+}
+
 function sessionCanUseOrder(state, session, orderId, { payment = false } = {}) {
   const order = (state?.orders || []).find((item) => item?.id === orderId);
   if (!order) return false;
   if (session?.membership?.role === "Master") return true;
   const actorId = String(session?.membership?.actorId || "");
   const actorName = String(session?.membership?.actorName || "");
-  const payerMatches = (actorId && order.agentActorId === actorId) || (actorName && order.agent === actorName);
+  const payerMatches = orderParticipantMatchesIdentity(order, "agent", actorId, actorName);
   if (payment) return order.state === "Assigned" && payerMatches;
-  return payerMatches || (actorName && order.broker === actorName);
+  return payerMatches || orderParticipantMatchesIdentity(order, "broker", actorId, actorName);
 }
 
 function validateAttachmentContext(db, session, purpose, contextId) {
@@ -979,11 +990,8 @@ function mergeActorResetTombstones(existing = {}, incoming = {}) {
 
 function orderBelongsToResetActor(order, actor) {
   if (!order || !actor) return false;
-  return Boolean(
-    (actor.id && (order.brokerActorId === actor.id || order.agentActorId === actor.id)) ||
-    order.broker === actor.name ||
-    order.agent === actor.name
-  );
+  return orderParticipantMatchesIdentity(order, "broker", String(actor.id || ""), String(actor.name || ""))
+    || orderParticipantMatchesIdentity(order, "agent", String(actor.id || ""), String(actor.name || ""));
 }
 
 function receivableBelongsToResetActor(receivable, actor) {
@@ -1540,25 +1548,14 @@ function mergeArchiveSnapshots(existingArchives = [], incomingArchives = []) {
   return normalizeArchiveSnapshots(archives);
 }
 
-function removeOrdersAlreadyArchived(orders = [], archives = [], deletedOrderIds = []) {
-  const archivedOrderTimes = new Map();
-  const deletedIds = new Set((Array.isArray(deletedOrderIds) ? deletedOrderIds : []).filter(Boolean).map(String));
-  normalizeArchiveSnapshots(archives).forEach((archive) => {
-    const closedAt = new Date(archive.closedAt || 0).getTime();
-    archive.orders.forEach((order) => {
-      const orderId = String(order?.id || "");
-      if (!orderId) return;
-      archivedOrderTimes.set(orderId, Math.max(archivedOrderTimes.get(orderId) || 0, Number.isFinite(closedAt) ? closedAt : 0));
-    });
-  });
-  return (Array.isArray(orders) ? orders : [])
-    .filter((order) => {
-      if (deletedIds.has(String(order?.id || ""))) return false;
-      const archivedAt = archivedOrderTimes.get(String(order?.id || ""));
-      if (archivedAt === undefined) return true;
-      const createdAt = new Date(order?.createdAt || order?.sentAt || 0).getTime();
-      return Number.isFinite(createdAt) && createdAt > archivedAt;
-    });
+function removeOrdersAlreadyArchived(orders = [], archives = [], deletedOrderIds = [], ledger = [], actors = []) {
+  return retainOrdersForOpenParticipants({
+    orders: Array.isArray(orders) ? orders : [],
+    archives: normalizeArchiveSnapshots(archives),
+    deletedOrderIds: Array.isArray(deletedOrderIds) ? deletedOrderIds : [],
+    ledger: Array.isArray(ledger) ? ledger : [],
+    actors: Array.isArray(actors) ? actors : [],
+  }).orders;
 }
 
 function mergeChatConversations(existingItems = [], incomingItems = []) {
@@ -1619,7 +1616,13 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   nextState.masterBankEntries = mergeById(currentState.masterBankEntries, incomingState.masterBankEntries);
   nextState.archives = mergeArchiveSnapshots(currentState.archives, incomingState.archives);
   nextState.deletedOrderIds = Array.from(deletedOrderIds);
-  nextState.orders = removeOrdersAlreadyArchived(nextState.orders, nextState.archives, nextState.deletedOrderIds);
+  nextState.orders = removeOrdersAlreadyArchived(
+    nextState.orders,
+    nextState.archives,
+    nextState.deletedOrderIds,
+    nextState.ledger,
+    nextState.actors
+  );
   nextState.chatConversations = mergeChatConversations(currentState.chatConversations, incomingState.chatConversations)
     .filter((chat) => !deletedChatIds.has(chat?.id))
     .map((chat) => ({
@@ -1880,6 +1883,7 @@ function ownerOrderArchiveRepairPlan(db) {
       const state = db.appStates?.[workspaceId] || {};
       const revision = workspaceStateRevision(db, workspaceId);
       const result = backfillAllClosedActorOrderSnapshots(state);
+      const participantRetention = retainOrdersForOpenParticipants(state);
       const evidenceDigest = orderArchiveRepairEvidenceDigest(state);
       const plannedAdditions = plannedOrderArchiveAdditions(state, result);
       const repaired = (result.repaired || []).slice().sort((left, right) =>
@@ -1925,6 +1929,8 @@ function ownerOrderArchiveRepairPlan(db) {
         blockedActorCount: Number(result.blockedActorCount || blockedActors.length || 0),
         closedActorCount: Number(result.closedActorCount || 0),
         unclosedActorCount: Number(result.unclosedActorCount || 0),
+        openParticipantRecoveryCount: Number(participantRetention.recoveredCount || 0),
+        openParticipantConflictCount: Number(participantRetention.skippedConflictCount || 0),
       };
     });
   const planDigest = crypto.createHash("sha256").update(canonicalJson({
@@ -1949,6 +1955,8 @@ function ownerOrderArchiveRepairPlan(db) {
     blockedActorCount: workspacePlans.reduce((total, plan) => total + plan.blockedActorCount, 0),
     closedActorCount: workspacePlans.reduce((total, plan) => total + plan.closedActorCount, 0),
     unclosedActorCount: workspacePlans.reduce((total, plan) => total + plan.unclosedActorCount, 0),
+    openParticipantRecoveryCount: workspacePlans.reduce((total, plan) => total + plan.openParticipantRecoveryCount, 0),
+    openParticipantConflictCount: workspacePlans.reduce((total, plan) => total + plan.openParticipantConflictCount, 0),
   };
 }
 
@@ -1961,6 +1969,8 @@ function publicOwnerOrderArchiveRepairPlan(plan) {
     blockedActorCount: plan.blockedActorCount,
     closedActorCount: plan.closedActorCount,
     unclosedActorCount: plan.unclosedActorCount,
+    openParticipantRecoveryCount: plan.openParticipantRecoveryCount,
+    openParticipantConflictCount: plan.openParticipantConflictCount,
     privateBackupReady: r2Configured,
     canApply: plan.candidateCount > 0 && r2Configured,
     workspaces: plan.workspacePlans.map((workspace) => ({
@@ -1975,6 +1985,8 @@ function publicOwnerOrderArchiveRepairPlan(plan) {
       })),
       closedActorCount: workspace.closedActorCount,
       unclosedActorCount: workspace.unclosedActorCount,
+      openParticipantRecoveryCount: workspace.openParticipantRecoveryCount,
+      openParticipantConflictCount: workspace.openParticipantConflictCount,
     })),
   };
 }
@@ -3238,7 +3250,7 @@ async function handleApi(request, response, url) {
   }
 
   if (url.pathname === "/api/app-state/version" && method === "GET") {
-    sendJson(response, 200, { revision: workspaceStateRevision(db, session.workspace.id), clientReleaseId: "non-disruptive-workspace-sync-v1" });
+    sendJson(response, 200, { revision: workspaceStateRevision(db, session.workspace.id), clientReleaseId: "participant-order-retention-v1" });
     return;
   }
 

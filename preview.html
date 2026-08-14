@@ -3923,7 +3923,7 @@
   <script>
     let storageKey = "haderapay.local.state.v1";
     let currentAuth = null;
-    const clientReleaseId = "non-disruptive-workspace-sync-v1";
+    const clientReleaseId = "participant-order-retention-v1";
     let currentLoginStartedAt = 0;
     let remoteStateReady = false;
     let remoteStateRevision = "0";
@@ -4162,7 +4162,7 @@
           ...structuredClone(defaultState),
           ...saved,
           actors: normalizeActors(Array.isArray(saved.actors) ? saved.actors : structuredClone(defaultState.actors)),
-          orders: removeOrdersAlreadyArchived(saved.orders, archives, saved.deletedOrderIds),
+          orders: removeOrdersAlreadyArchived(saved.orders, archives, saved.deletedOrderIds, saved.ledger, saved.actors),
           savedCustomers: normalizeSavedCustomers(saved.savedCustomers),
           receivables: Array.isArray(saved.receivables) ? saved.receivables : [],
           transfers: normalizeTransfers(Array.isArray(saved.transfers) ? saved.transfers : []),
@@ -4378,25 +4378,88 @@
       return normalized;
     }
 
-    function removeOrdersAlreadyArchived(orders = [], archives = [], deletedOrderIds = []) {
-      const archivedOrderTimes = new Map();
-      const deletedIds = new Set((Array.isArray(deletedOrderIds) ? deletedOrderIds : []).filter(Boolean).map(String));
-      normalizeArchiveSnapshots(archives).forEach((archive) => {
-        const closedAt = new Date(archive.closedAt || 0).getTime();
-        archive.orders.forEach((order) => {
-          const orderId = String(order?.id || "");
-          if (!orderId) return;
-          archivedOrderTimes.set(orderId, Math.max(archivedOrderTimes.get(orderId) || 0, Number.isFinite(closedAt) ? closedAt : 0));
+    function participantOrderIdentityMatches(left, right) {
+      const leftId = String(left?.actorId || "").trim();
+      const rightId = String(right?.actorId || "").trim();
+      if (leftId || rightId) return Boolean(leftId && rightId && leftId === rightId);
+      const leftName = String(left?.actorName || "").trim().toLocaleLowerCase();
+      return Boolean(leftName && leftName === String(right?.actorName || "").trim().toLocaleLowerCase());
+    }
+
+    function participantOrderRecordsMatch(left, right) {
+      const leftJournal = String(left?.journal || "").trim();
+      const rightJournal = String(right?.journal || "").trim();
+      if (leftJournal && rightJournal) return leftJournal === rightJournal;
+      const rightIds = new Set([right?.id, right?.internalOrderId, right?.collisionSourceOrderId].map((value) => String(value || "").trim()).filter(Boolean));
+      return [left?.id, left?.internalOrderId, left?.collisionSourceOrderId]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean)
+        .some((value) => rightIds.has(value));
+    }
+
+    function participantOrderActors(order, actors = []) {
+      const participants = [
+        { actorId: String(order?.brokerActorId || "").trim(), actorName: String(order?.broker || "").trim() },
+        { actorId: String(order?.agentActorId || "").trim(), actorName: String(order?.agent || "").trim() }
+      ].filter((participant) => {
+        if (!participant.actorId && !participant.actorName) return false;
+        if (["master", "master transactions", "unassigned", "cancelled"].includes(participant.actorName.toLocaleLowerCase())) return false;
+        const actor = participant.actorId
+          ? actors.find((item) => item?.id === participant.actorId)
+          : actors.find((item) => String(item?.name || "").trim().toLocaleLowerCase() === participant.actorName.toLocaleLowerCase());
+        return actor?.role !== "Master";
+      });
+      return participants.filter((participant, index) =>
+        participants.findIndex((candidate) => participantOrderIdentityMatches(candidate, participant)) === index
+      );
+    }
+
+    function participantOrderArchiveCoverage(order, archives = [], actors = []) {
+      const participants = participantOrderActors(order, actors);
+      const covered = participants.map((participant) => normalizeArchiveSnapshots(archives).some((archive) => {
+        if (archive?.kind === "master-transactions" || archive?.actorRole === "Master") return false;
+        const archiveIdentity = { actorId: String(archive?.actorId || "").trim(), actorName: String(archive?.actor || "").trim() };
+        return participantOrderIdentityMatches(participant, archiveIdentity) &&
+          (archive.orders || []).some((snapshot) => participantOrderRecordsMatch(order, snapshot));
+      }));
+      return { participants, complete: participants.length > 0 && covered.every(Boolean) };
+    }
+
+    function participantOrderHasOpenLine(order, ledger = [], actors = []) {
+      const participants = participantOrderActors(order, actors);
+      const journal = String(order?.journal || "").trim();
+      const orderIds = new Set([order?.id, order?.internalOrderId, order?.collisionSourceOrderId].map((value) => String(value || "").trim()).filter(Boolean));
+      return (Array.isArray(ledger) ? ledger : []).some((line) => {
+        if (line?.source !== "ORDER_PAYMENT" || line?.archived === true || String(line?.account || "").startsWith("MASTER_")) return false;
+        const lineJournal = String(line?.journal || "").trim();
+        const sameOrder = lineJournal && journal
+          ? lineJournal === journal
+          : Boolean(String(line?.orderId || "").trim() && orderIds.has(String(line.orderId).trim()));
+        if (!sameOrder) return false;
+        const accountName = String(line?.account || "").replace(/ ACTOR_CLEARING$/, "").trim().toLocaleLowerCase();
+        return participants.some((participant) => {
+          const actor = participant.actorId ? actors.find((item) => item?.id === participant.actorId) : null;
+          return [participant.actorName, actor?.name].some((name) => String(name || "").trim().toLocaleLowerCase() === accountName);
         });
       });
-      return (Array.isArray(orders) ? orders : [])
-        .filter((order) => {
-          if (deletedIds.has(String(order?.id || ""))) return false;
-          const archivedAt = archivedOrderTimes.get(String(order?.id || ""));
-          if (archivedAt === undefined) return true;
-          const createdAt = new Date(order?.createdAt || order?.sentAt || 0).getTime();
-          return Number.isFinite(createdAt) && createdAt > archivedAt;
-        });
+    }
+
+    function removeOrdersAlreadyArchived(orders = [], archives = [], deletedOrderIds = [], ledger = [], actors = []) {
+      const normalizedArchives = normalizeArchiveSnapshots(archives);
+      const deletedIds = new Set((Array.isArray(deletedOrderIds) ? deletedOrderIds : []).filter(Boolean).map(String));
+      return (Array.isArray(orders) ? orders : []).filter((order) => {
+        if (deletedIds.has(String(order?.id || ""))) return false;
+        const matchingArchives = normalizedArchives.filter((archive) =>
+          (archive.orders || []).some((snapshot) => participantOrderRecordsMatch(order, snapshot))
+        );
+        if (!matchingArchives.length) return true;
+        const latestClosedAt = Math.max(...matchingArchives.map((archive) => new Date(archive.closedAt || 0).getTime() || 0));
+        const createdAt = new Date(order?.createdAt || order?.sentAt || 0).getTime();
+        if (Number.isFinite(createdAt) && createdAt > latestClosedAt) return true;
+        if (!["Paid", "Voided"].includes(order?.state)) return false;
+        const coverage = participantOrderArchiveCoverage(order, normalizedArchives, actors);
+        return !coverage.complete || participantOrderHasOpenLine(order, ledger, actors);
+      });
     }
 
     function normalizeSavedCustomers(customers) {
@@ -4767,7 +4830,7 @@
       const archives = normalizeArchiveSnapshots(nextState?.archives);
       const preparedState = {
         ...nextState,
-        orders: removeOrdersAlreadyArchived(nextState?.orders, archives, nextState?.deletedOrderIds),
+        orders: removeOrdersAlreadyArchived(nextState?.orders, archives, nextState?.deletedOrderIds, nextState?.ledger, nextState?.actors),
         archives,
         deletedOrderIds: Array.isArray(nextState?.deletedOrderIds) ? nextState.deletedOrderIds : [],
         savedCustomers: normalizeSavedCustomers(nextState?.savedCustomers),
@@ -5115,7 +5178,7 @@
       state.settlements = Array.isArray(remoteState.settlements) ? remoteState.settlements : state.settlements;
       state.archives = normalizeArchiveSnapshots(mergeById(state.archives, remoteState.archives || []));
       state.deletedOrderIds = Array.from(new Set([...(state.deletedOrderIds || []), ...(remoteState.deletedOrderIds || [])].filter(Boolean).map(String)));
-      state.orders = removeOrdersAlreadyArchived(state.orders, state.archives, state.deletedOrderIds);
+      state.orders = removeOrdersAlreadyArchived(state.orders, state.archives, state.deletedOrderIds, state.ledger, state.actors);
       state.chatConversations = mergeChatConversations(state.chatConversations, remoteState.chatConversations || [])
         .filter((chat) => !deletedChatIds.has(chat.id))
         .map((chat) => ({
@@ -9712,21 +9775,29 @@
 
     function orderForLedgerLine(line) {
       if (!line || !String(line.source || "").startsWith("ORDER_")) return null;
-      const liveOrder = line.orderId
-        ? state.orders.find((order) => order.id === line.orderId)
-        : state.orders.find((order) =>
-            order.journal === line.journal || order.voidJournal === line.journal
-          );
-      if (liveOrder) return liveOrder;
       const reportedOrders = (state.archives || []).flatMap((archive) => archive.orders || []);
+      const candidateOrders = [...state.orders, ...reportedOrders];
+      const evidenceJournal = String(line.journal || "").trim();
+      if (evidenceJournal) {
+        const journalMatch = candidateOrders.find((order) =>
+          order.journal === evidenceJournal || order.voidJournal === evidenceJournal
+        );
+        if (journalMatch) return journalMatch;
+        return candidateOrders.find((order) =>
+          !order.journal && !order.voidJournal && line.orderId &&
+          (order.id === line.orderId || order.internalOrderId === line.orderId)
+        ) || null;
+      }
+      const liveOrder = line.orderId
+        ? state.orders.find((order) => order.id === line.orderId || order.internalOrderId === line.orderId)
+        : null;
+      if (liveOrder) return liveOrder;
       if (line.orderId) {
         return reportedOrders.find((order) =>
           order.id === line.orderId || order.internalOrderId === line.orderId
         ) || null;
       }
-      return reportedOrders.find((order) =>
-        order.journal === line.journal || order.voidJournal === line.journal
-      ) || null;
+      return null;
     }
 
     function transferForLedgerLine(line) {
@@ -10939,7 +11010,10 @@
       const actor = selectedActor();
       const visibleOrders = actor?.role === "Master"
         ? state.orders
-        : state.orders.filter((order) => order.broker === actor?.name || order.agent === actor?.name);
+        : state.orders.filter((order) =>
+            (orderParticipantMatchesActor(order, actor, "broker") || orderParticipantMatchesActor(order, actor, "agent")) &&
+            !orderArchivedForActor(order, actor)
+          );
       if (els.voidButton) {
         els.voidButton.disabled = !visibleOrders.some((order) => actorCanRequestVoidOrder(order, actor));
       }
@@ -11309,8 +11383,9 @@
     function orderAppearsInOrderbookForActor(order, actor) {
       if (!order || !actor) return false;
       if (actor.role === "Master") return true;
-      const isBroker = order.broker === actor.name;
-      const isPayer = order.agent === actor.name || Boolean(order.agentActorId && order.agentActorId === actor.id);
+      if (orderArchivedForActor(order, actor)) return false;
+      const isBroker = orderParticipantMatchesActor(order, actor, "broker");
+      const isPayer = orderParticipantMatchesActor(order, actor, "agent");
       if (!isBroker && !isPayer) return false;
       if (order.state === "Cancelled") return isBroker;
       return order.state !== "Voided" && order.locked !== true;
@@ -11798,7 +11873,10 @@
       const viewerIsMaster = actor.role === "Master";
       const orderResults = (viewerIsMaster
         ? state.orders
-        : state.orders.filter((order) => order.broker === actor.name || order.agent === actor.name))
+        : state.orders.filter((order) =>
+            (orderParticipantMatchesActor(order, actor, "broker") || orderParticipantMatchesActor(order, actor, "agent")) &&
+            !orderArchivedForActor(order, actor)
+          ))
         .map((order) => orderSearchResult(order, actor));
       const transferResults = (viewerIsMaster
         ? state.transfers.filter((transfer) => !transfer.masterTransactionClosedAt && !transferBalanceWasClosed(transfer))
@@ -13887,6 +13965,9 @@
     }
 
     function ordersReferToSameRecord(left, right) {
+      const leftJournal = String(left?.journal || "").trim();
+      const rightJournal = String(right?.journal || "").trim();
+      if (leftJournal && rightJournal) return leftJournal === rightJournal;
       const rightValues = new Set(orderArchiveIdentityValues(right));
       return orderArchiveIdentityValues(left).some((value) => rightValues.has(value));
     }
@@ -13894,8 +13975,8 @@
     function orderArchivedForActor(order, actor) {
       if (!order || !actor) return false;
       return state.archives.some((archive) => {
-        const belongsToActor = actor.id && archive.actorId
-          ? archive.actorId === actor.id
+        const belongsToActor = actor.id || archive.actorId
+          ? Boolean(actor.id && archive.actorId && archive.actorId === actor.id)
           : archive.actor === actor.name;
         return belongsToActor && (archive.orders || []).some((snapshot) => ordersReferToSameRecord(snapshot, order));
       });
@@ -13989,9 +14070,12 @@
           ? { ...line, archived: true, closedAt }
           : line
       );
-      state.orders = state.orders.filter((order) =>
-        !(order.state === "Paid" || order.state === "Voided") ||
-        (order.broker !== actor.name && order.agent !== actor.name)
+      state.orders = removeOrdersAlreadyArchived(
+        state.orders,
+        state.archives,
+        state.deletedOrderIds,
+        state.ledger,
+        state.actors
       );
       const archivedTransferIds = new Set(archivedTransfers.map(transferIdentity));
       state.transfers = state.transfers.map((transfer) => {
@@ -15411,6 +15495,12 @@
         `${Number(plan.closedActorCount || 0)} closed Actor report${Number(plan.closedActorCount || 0) === 1 ? "" : "s"} checked`,
         `${Number(plan.unclosedActorCount || 0)} unclosed Actor${Number(plan.unclosedActorCount || 0) === 1 ? "" : "s"} skipped`,
       ];
+      if (Number(plan.openParticipantRecoveryCount || 0) > 0) {
+        parts.push(`${Number(plan.openParticipantRecoveryCount)} shared paid order${Number(plan.openParticipantRecoveryCount) === 1 ? "" : "s"} will reappear for unclosed participants when they refresh`);
+      }
+      if (Number(plan.openParticipantConflictCount || 0) > 0) {
+        parts.push(`${Number(plan.openParticipantConflictCount)} open order${Number(plan.openParticipantConflictCount) === 1 ? " needs" : "s need"} manual review`);
+      }
       if (Number(plan.blockedActorCount || 0) > 0) {
         const blockedActors = (Array.isArray(plan.workspaces) ? plan.workspaces : []).flatMap((workspace) =>
           (Array.isArray(workspace?.blockedActors) ? workspace.blockedActors : []).map((item) =>
@@ -15435,12 +15525,19 @@
         if (els.ownerOrderArchiveRepairSummary) els.ownerOrderArchiveRepairSummary.textContent = summary;
         if (Number(plan.candidateCount || 0) === 0) {
           const blocked = Number(plan.blockedActorCount || 0);
-          setOwnerOrderArchiveRepairStatus(blocked ? "Manual review required" : "No missing orders", blocked ? "warn" : "good");
+          const openRecoveries = Number(plan.openParticipantRecoveryCount || 0);
+          const openConflicts = Number(plan.openParticipantConflictCount || 0);
+          setOwnerOrderArchiveRepairStatus(
+            blocked || openConflicts ? "Manual review required" : openRecoveries ? `${openRecoveries} open restored on refresh` : "No missing orders",
+            blocked || openConflicts ? "warn" : "good"
+          );
           notifyEvent(
             blocked ? "Safe repair unavailable" : "All closed reports checked",
             blocked
               ? `No unambiguous missing orders could be restored automatically. ${blocked} closed Actor report${blocked === 1 ? " needs" : "s need"} manual review; nothing was changed.`
-              : `No restorable paid orders are missing. ${Number(plan.unclosedActorCount || 0)} unclosed Actor${Number(plan.unclosedActorCount || 0) === 1 ? " was" : "s were"} skipped.`
+              : openRecoveries
+                ? `${openRecoveries} shared paid order${openRecoveries === 1 ? " will" : "s will"} reappear automatically for the still-unclosed participant when that Actor refreshes. No ledger amount was changed.`
+                : `No restorable paid orders are missing. ${Number(plan.unclosedActorCount || 0)} unclosed Actor${Number(plan.unclosedActorCount || 0) === 1 ? " was" : "s were"} skipped.`
           );
           return;
         }

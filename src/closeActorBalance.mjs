@@ -1,3 +1,8 @@
+import {
+  resolveParticipantOrderForLedgerLine,
+  retainOrdersForOpenParticipants,
+} from "./orderParticipantRetention.mjs";
+
 const supportedCurrencies = ["USD", "ETB", "EUR", "ERN", "SSP", "SDG", "LYD"];
 const currencyDecimalPlaces = { USD: 2, ETB: 0, EUR: 2, ERN: 0, SSP: 2, SDG: 2, LYD: 3 };
 
@@ -119,6 +124,9 @@ function orderIdentityValues(order) {
 }
 
 function ordersReferToSameRecord(left, right) {
+  const leftJournal = cleanText(left?.journal);
+  const rightJournal = cleanText(right?.journal);
+  if (leftJournal && rightJournal) return leftJournal === rightJournal;
   const rightValues = new Set(orderIdentityValues(right));
   return orderIdentityValues(left).some((value) => rightValues.has(value));
 }
@@ -136,6 +144,18 @@ function orderForLedgerLine(state, line) {
   if (!line || !cleanText(line.source).startsWith("ORDER_")) return null;
   const liveOrders = asArray(state.orders);
   const archivedOrders = asArray(state.archives).flatMap((archive) => asArray(archive?.orders));
+  if (cleanText(line.source) === "ORDER_PAYMENT") {
+    const resolved = resolveParticipantOrderForLedgerLine(line, liveOrders, state.archives);
+    return resolved.conflict ? null : resolved.order;
+  }
+  const evidenceJournal = cleanText(line.journal);
+  if (evidenceJournal) {
+    return liveOrders.find((order) =>
+      cleanText(order?.journal) === evidenceJournal || cleanText(order?.voidJournal) === evidenceJournal
+    ) || archivedOrders.find((order) =>
+      cleanText(order?.journal) === evidenceJournal || cleanText(order?.voidJournal) === evidenceJournal
+    ) || null;
+  }
   if (line.orderId) {
     return liveOrders.find((order) => cleanText(order?.id) === cleanText(line.orderId))
       || archivedOrders.find((order) =>
@@ -144,9 +164,7 @@ function orderForLedgerLine(state, line) {
       )
       || null;
   }
-  return liveOrders.find((order) => order?.journal === line.journal || order?.voidJournal === line.journal)
-    || archivedOrders.find((order) => order?.journal === line.journal || order?.voidJournal === line.journal)
-    || null;
+  return null;
 }
 
 function orderArchivedForActor(state, order, actor) {
@@ -169,6 +187,24 @@ function completedOrdersForActorClose(state, actor, actorLines) {
     && (participantMatchesActor(order, actor, "broker") || participantMatchesActor(order, actor, "agent"))
     && !orderArchivedForActor(state, order, actor)
   );
+}
+
+function orderPaymentIssueForActorClose(state, actor, actorLines) {
+  const liveOrders = asArray(state.orders);
+  for (const line of actorLines) {
+    if (line?.source !== "ORDER_PAYMENT") continue;
+    if (line?.voided === true || line?.excludedFromCalculations === true) continue;
+    const resolved = resolveParticipantOrderForLedgerLine(line, liveOrders, state.archives);
+    if (resolved.conflict) return { line, reason: "conflicting archived records" };
+    if (!resolved.order) return { line, reason: "no recoverable order record" };
+    if (
+      !participantMatchesActor(resolved.order, actor, "broker")
+      && !participantMatchesActor(resolved.order, actor, "agent")
+    ) {
+      return { line, reason: "an Actor identity conflict" };
+    }
+  }
+  return null;
 }
 
 function cancelledOrdersForActorClose(state, actor) {
@@ -734,6 +770,19 @@ export function closeActorBalance(workspaceState, options = {}) {
     || (line?.source === "PREVIOUS_CLOSE" && line?.account === "MASTER_PREVIOUS_CLOSE" && line?.details === previousCloseDetails);
   const actorLines = asArray(state.ledger).filter((line) => line?.archived !== true && closesWithActor(line));
   const openTransactionLines = actorLines.filter((line) => line?.source !== "PREVIOUS_CLOSE");
+  const orderPaymentIssue = orderPaymentIssueForActorClose(state, actor, actorLines);
+  if (orderPaymentIssue) {
+    const journal = cleanText(orderPaymentIssue.line?.journal);
+    return closeResult(
+      state,
+      false,
+      actor.name,
+      requestedArchiveId,
+      cancelledOrders.length,
+      policy,
+      `${journal ? `Order journal ${journal}` : "An order payment"} has ${orderPaymentIssue.reason}. Review it before closing ${actor.name}'s balance.`
+    );
+  }
   const archivedOrders = completedOrdersForActorClose(state, actor, actorLines);
   const archivedTransfers = asArray(state.transfers).filter((transfer) =>
     ["Approved", "Reversed"].includes(transfer?.state)
@@ -793,19 +842,17 @@ export function closeActorBalance(workspaceState, options = {}) {
     closesWithActor(line) && line?.archived !== true ? { ...line, archived: true, closedAt } : line
   );
 
-  const cancelledRecords = new Set(cancelledOrders);
-  state.orders = state.orders.filter((order) => {
-    if (cancelledRecords.has(order)) return false;
-    if (order?.state !== "Paid" && order?.state !== "Voided") return true;
-    return !participantMatchesActor(order, actor, "broker") && !participantMatchesActor(order, actor, "agent");
-  });
-
   const tombstones = new Set(asArray(state.deletedOrderIds).map(cleanText).filter(Boolean));
   cancelledOrders.forEach((order) => {
     const orderId = cleanText(order?.id || order?.internalOrderId);
     if (orderId) tombstones.add(orderId);
   });
   state.deletedOrderIds = Array.from(tombstones);
+  const cancelledRecords = new Set(cancelledOrders);
+  state.orders = retainOrdersForOpenParticipants({
+    ...state,
+    orders: state.orders.filter((order) => !cancelledRecords.has(order)),
+  }).orders;
 
   const archivedTransferIds = new Set(archivedTransfers.map(transferIdentity));
   state.transfers = state.transfers.map((transfer) => {

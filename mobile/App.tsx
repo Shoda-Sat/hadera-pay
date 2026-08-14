@@ -93,6 +93,7 @@ import type {
 } from "./src/types";
 import { formatDate, formatDateTime, formatMonthYear } from "./src/utils/date";
 import { calculateQuote, compactAmount, currencies, financialPosition, fixedOrderCommissionForActor, fixedOrderRateForActor, formatAmount, inputAmount, inputRate, majorFromMinor, reconcileFixedOrderConversion, reconcileOrderConversion } from "./src/utils/money";
+import { orderArchivedForActor } from "./src/utils/orderParticipantRetention";
 import type { OrderConversionField } from "./src/utils/money";
 
 type IconComponent = React.ComponentType<LucideProps>;
@@ -155,14 +156,20 @@ function orderBrokerMatchesSession(order: OrderRecord, session: UserSession): bo
     : order.broker === session.actorName;
 }
 
+function orderAgentMatchesSession(order: OrderRecord, session: UserSession): boolean {
+  return order.agentActorId
+    ? order.agentActorId === session.actorId
+    : order.agent === session.actorName;
+}
+
 function visibleOrdersFor(session: UserSession, workspaceState: WorkspaceState | null): OrderRecord[] {
   const orders = workspaceState?.orders || [];
   const visible = session.actorRole === "Master"
     ? orders
     : orders.filter((order) =>
-        orderBrokerMatchesSession(order, session) ||
-        order.agent === session.actorName ||
-        order.agentActorId === session.actorId
+        (orderBrokerMatchesSession(order, session) ||
+          orderAgentMatchesSession(order, session)) &&
+        !orderArchivedForActor(order, session.actorId, session.actorName, workspaceState?.archives || [])
       );
   return visible
     .filter((order) => !["Voided", "Cancelled"].includes(order.state) && order.locked !== true)
@@ -202,7 +209,7 @@ function actorCanReceivePayouts(role: UserSession["actorRole"]): boolean {
 }
 
 function orderNumber(order: OrderRecord, session: UserSession): string {
-  if (actorCanReceivePayouts(session.actorRole) && (order.agentActorId === session.actorId || order.agent === session.actorName)) {
+  if (actorCanReceivePayouts(session.actorRole) && orderAgentMatchesSession(order, session)) {
     return order.agentOrderNumbers?.[session.actorName] || order.agentOrderNumber || order.brokerOrderNumber || order.id;
   }
   return order.brokerOrderNumber || order.id;
