@@ -10,6 +10,12 @@ import {
 } from "./src/archiveParticipantBackfill.mjs";
 import { closeActorBalance } from "./src/closeActorBalance.mjs";
 import {
+  findPendingOrderIntegrityIssues,
+  nextBrokerOrderNumberForActor,
+  recoveredOrderMatches,
+  removeRecoveredOrderAliases,
+} from "./src/orderIntegrity.mjs";
+import {
   DeleteObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
@@ -1327,7 +1333,7 @@ function rewriteCollidingOrderReferences(state, order, oldId, newId, originalOrd
   if (!originalOrderRemainsInPayload && state.editingOrderId === oldId) state.editingOrderId = newId;
 }
 
-function resolveIncomingWorkspaceRecordCollisions(currentState = {}, incomingState = {}) {
+function resolveIncomingWorkspaceRecordCollisions(currentState = {}, incomingState = {}, options = {}) {
   const currentOrders = [
     ...(Array.isArray(currentState.orders) ? currentState.orders : []),
     ...archivedWorkspaceRecords(currentState, "orders"),
@@ -1374,10 +1380,31 @@ function resolveIncomingWorkspaceRecordCollisions(currentState = {}, incomingSta
       candidate !== order && candidate?.id === oldId &&
       matching.some((existing) => !orderIdentityConflicts(existing, candidate))
     );
+    const recoveryOrder = options.brokerActorId
+      ? { ...order, brokerActorId: options.brokerActorId, broker: options.brokerName || order?.broker }
+      : order;
+    const recoveredCandidates = currentOrders.filter((existing) =>
+      String(existing?.collisionSourceOrderId || "") === oldId &&
+      recoveredOrderMatches(existing, recoveryOrder)
+    );
+    if (recoveredCandidates.length === 1) {
+      const recovered = recoveredCandidates[0];
+      const recoveredId = String(recovered?.id || "");
+      if (recoveredId) {
+        order.id = recoveredId;
+        order.internalOrderId = recoveredId;
+        order.collisionSourceOrderId = oldId;
+        order.brokerOrderNumber = recovered.brokerOrderNumber;
+        order.brokerOrderNumberCycle = recovered.brokerOrderNumberCycle;
+        rewriteCollidingOrderReferences(resolved, order, oldId, recoveredId, originalOrderRemainsInPayload);
+        return;
+      }
+    }
     const newId = collisionSafeServerRecordId("ORD", nextOrderSequence, usedOrderIds);
     nextOrderSequence += 1;
     order.id = newId;
     if (order.internalOrderId === oldId) order.internalOrderId = newId;
+    order._serverCollisionSourceOrderId = oldId;
     rewriteCollidingOrderReferences(resolved, order, oldId, newId, originalOrderRemainsInPayload);
   });
 
@@ -1582,6 +1609,7 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   nextState.actors = mergeById(currentState.actors, incomingState.actors);
   nextState.actors = nextState.actors.filter((actor) => !deletedActorIds.has(actor?.id));
   nextState.orders = mergeOrders(currentState.orders, incomingState.orders);
+  nextState.orders = removeRecoveredOrderAliases(nextState.orders);
   nextState.savedCustomers = mergeById(currentState.savedCustomers, incomingState.savedCustomers);
   nextState.receivables = mergeReceivables(currentState.receivables, incomingState.receivables);
   nextState.transfers = mergeTransfers(currentState.transfers, incomingState.transfers);
@@ -2136,18 +2164,23 @@ async function applyActorBalanceClose(session, input = {}) {
 function sanitizeIncomingWorkspaceState(state, session, db) {
   if (!state || typeof state !== "object") return {};
   const persistedState = db.appStates[session.workspace.id] || {};
-  state = resolveIncomingWorkspaceRecordCollisions(persistedState, state);
+  const actorSession = session?.membership?.role === "Actor";
+  const actorCanInitiateOrders = actorSession && ["Broker", "Special Broker"].includes(session?.membership?.actorRole);
+  state = resolveIncomingWorkspaceRecordCollisions(persistedState, state, actorCanInitiateOrders ? {
+    brokerActorId: session.membership.actorId,
+    brokerName: session.membership.actorName,
+  } : {});
   const sanitized = { ...state };
   const persistedActors = new Map((persistedState.actors || []).map((actor) => [actor?.id, actor]));
   const persistedOrders = new Map((persistedState.orders || []).map((order) => [order?.id, order]));
-  const actorSession = session?.membership?.role === "Actor";
-  const actorCanInitiateOrders = actorSession && ["Broker", "Special Broker"].includes(session?.membership?.actorRole);
   const sessionActor = actorSession ? persistedActors.get(session.membership.actorId) : null;
   const fixedSetting = sessionActor?.orderFixedCommission;
   const rawFixedPercent = fixedSetting?.percent;
   const fixedPercent = fixedSetting?.enabled === true && rawFixedPercent !== null && rawFixedPercent !== undefined && String(rawFixedPercent).trim() !== ""
     ? Number(rawFixedPercent)
     : Number.NaN;
+  const canonicalizedNewOrders = [];
+  const brokerNumberChanges = [];
   delete sanitized._syncRevision;
   if (session?.membership?.role !== "Master") {
     sanitized.deletedOrderIds = Array.isArray(persistedState.deletedOrderIds)
@@ -2182,41 +2215,71 @@ function sanitizeIncomingWorkspaceState(state, session, db) {
     .map((file) => [file.id, file]));
   if (Array.isArray(state.orders)) {
     sanitized.orders = state.orders.map((order) => {
-      let allowedOrder = order;
+      let allowedOrder = { ...order };
+      const recoveredCollisionSourceId = String(allowedOrder?._serverCollisionSourceOrderId || "").trim();
+      delete allowedOrder._serverCollisionSourceOrderId;
       const proof = order?.paymentProof;
       if (proof?.attachmentId) {
         const file = storedFiles.get(proof.attachmentId);
         if (!(file?.purpose === "payment-proof" && file.contextId === order.id)) {
           const { attachmentId, size, ...allowedProof } = proof;
-          allowedOrder = { ...order, paymentProof: allowedProof };
+          allowedOrder = { ...allowedOrder, paymentProof: allowedProof };
         }
       }
-      if (!actorSession) return allowedOrder;
       const persistedOrder = persistedOrders.get(allowedOrder?.id);
+      const persistedBrokerActor = persistedOrder
+        ? persistedActors.get(persistedOrder?.brokerActorId) ||
+          Array.from(persistedActors.values()).find((actor) => !persistedOrder?.brokerActorId && actor?.name === persistedOrder?.broker)
+        : null;
+      const submittedBrokerActor = persistedActors.get(allowedOrder?.brokerActorId) ||
+        Array.from(persistedActors.values()).find((actor) => !allowedOrder?.brokerActorId && actor?.name === allowedOrder?.broker);
       const persistedBelongsToSessionActor = Boolean(persistedOrder) && (
         String(persistedOrder?.brokerActorId || "") === String(session.membership.actorId || "") ||
         (!persistedOrder?.brokerActorId && String(persistedOrder?.broker || "") === String(session.membership.actorName || ""))
       );
       const isReturnedResubmission = persistedBelongsToSessionActor && persistedOrder.state === "Returned" && allowedOrder?.state === "Pending Forward";
-      if (persistedOrder && !isReturnedResubmission) {
+      if (persistedOrder) {
         const protectedOrder = { ...allowedOrder };
-        for (const field of ["commissionPercent", "commissionMinor", "grossMinor", "orderCommissionLiability"]) {
+        for (const field of ["brokerActorId", "broker", "brokerOrderNumber", "brokerOrderNumberCycle", "collisionSourceOrderId"]) {
           if (Object.prototype.hasOwnProperty.call(persistedOrder, field)) protectedOrder[field] = persistedOrder[field];
           else delete protectedOrder[field];
         }
-        if (persistedBelongsToSessionActor) {
-          protectedOrder.brokerActorId = persistedOrder.brokerActorId || session.membership.actorId;
-          protectedOrder.broker = persistedOrder.broker || session.membership.actorName;
+        if (actorSession && !isReturnedResubmission) {
+          for (const field of ["commissionPercent", "commissionMinor", "grossMinor", "orderCommissionLiability"]) {
+            if (Object.prototype.hasOwnProperty.call(persistedOrder, field)) protectedOrder[field] = persistedOrder[field];
+            else delete protectedOrder[field];
+          }
         }
-        return protectedOrder;
+        if (!actorSession || !isReturnedResubmission) return protectedOrder;
+        allowedOrder = protectedOrder;
       }
-      if (!actorCanInitiateOrders) return null;
-      allowedOrder = {
-        ...allowedOrder,
-        brokerActorId: isReturnedResubmission ? persistedOrder.brokerActorId || session.membership.actorId : session.membership.actorId,
-        broker: isReturnedResubmission ? persistedOrder.broker || session.membership.actorName : session.membership.actorName,
-      };
-      if (!Number.isFinite(fixedPercent)) return allowedOrder;
+      if (actorSession) {
+        if (!actorCanInitiateOrders) return null;
+        allowedOrder = {
+          ...allowedOrder,
+          brokerActorId: isReturnedResubmission ? persistedOrder.brokerActorId || session.membership.actorId : session.membership.actorId,
+          broker: isReturnedResubmission ? persistedOrder.broker || session.membership.actorName : session.membership.actorName,
+        };
+      }
+      const brokerActor = actorSession ? sessionActor : submittedBrokerActor || persistedBrokerActor;
+      const isNewOrder = !persistedOrder;
+      if (isNewOrder && brokerActor && ["Broker", "Special Broker"].includes(String(brokerActor.role || ""))) {
+        const previousNumber = String(allowedOrder.brokerOrderNumber || "");
+        const canonicalNumber = nextBrokerOrderNumberForActor(persistedState, brokerActor, canonicalizedNewOrders);
+        allowedOrder.brokerActorId = brokerActor.id;
+        allowedOrder.broker = brokerActor.name;
+        allowedOrder.brokerOrderNumber = canonicalNumber.brokerOrderNumber;
+        allowedOrder.brokerOrderNumberCycle = canonicalNumber.brokerOrderNumberCycle;
+        if (recoveredCollisionSourceId) allowedOrder.collisionSourceOrderId = recoveredCollisionSourceId;
+        else delete allowedOrder.collisionSourceOrderId;
+        canonicalizedNewOrders.push(allowedOrder);
+        if (previousNumber && previousNumber !== allowedOrder.brokerOrderNumber) {
+          brokerNumberChanges.push({ orderId: allowedOrder.id, previousNumber, nextNumber: allowedOrder.brokerOrderNumber });
+        }
+      } else if (!persistedOrder) {
+        delete allowedOrder.collisionSourceOrderId;
+      }
+      if (!actorSession || !Number.isFinite(fixedPercent)) return allowedOrder;
       const sourceAmountMinor = Math.round(Number(allowedOrder.sourceAmountMinor || 0));
       const commissionMinor = Math.round(sourceAmountMinor * fixedPercent / 100);
       return {
@@ -2227,6 +2290,13 @@ function sanitizeIncomingWorkspaceState(state, session, db) {
         orderCommissionLiability: fixedPercent < 0 ? "Master" : "Broker",
       };
     }).filter(Boolean);
+  }
+  if (brokerNumberChanges.length) {
+    const changesByOrderId = new Map(brokerNumberChanges.map((change) => [String(change.orderId || ""), change]));
+    sanitized.receivables = (sanitized.receivables || []).map((receivable) => {
+      const change = changesByOrderId.get(String(receivable?.orderId || ""));
+      return change ? { ...receivable, brokerOrderNumber: change.nextNumber } : receivable;
+    });
   }
   if (Array.isArray(state.chatConversations)) {
     sanitized.chatConversations = state.chatConversations.map((chat) => ({
@@ -2256,6 +2326,17 @@ function sanitizeIncomingWorkspaceState(state, session, db) {
         }
         const { attachmentId, fileSize, ...allowedMessage } = message;
         return allowedMessage;
+      }),
+    }));
+  }
+  if (brokerNumberChanges.length && Array.isArray(sanitized.chatConversations)) {
+    const changesByOrderId = new Map(brokerNumberChanges.map((change) => [String(change.orderId || ""), change]));
+    sanitized.chatConversations = sanitized.chatConversations.map((conversation) => ({
+      ...conversation,
+      messages: (conversation?.messages || []).map((message) => {
+        const change = changesByOrderId.get(String(message?.orderId || ""));
+        if (!change || String(message?.orderNumber || "") !== change.previousNumber) return message;
+        return { ...message, orderNumber: change.nextNumber };
       }),
     }));
   }
@@ -2854,6 +2935,37 @@ async function handleApi(request, response, url) {
     return;
   }
 
+  if (url.pathname === "/api/owner/order-integrity/plan" && method === "GET") {
+    if (!requireOwner(session, response)) return;
+    const issues = (Array.isArray(db.workspaces) ? db.workspaces : []).flatMap((workspace) => {
+      const state = db.appStates?.[workspace.id] || {};
+      const master = workspaceOwnerSubscription(db, workspace).ownerName;
+      return findPendingOrderIntegrityIssues(state).map((issue) => ({
+        workspace: String(workspace.name || "Workspace"),
+        master,
+        actor: issue.actorName,
+        actorRole: issue.actorRole,
+        orderNumber: issue.orderNumber,
+        expectedPrefix: issue.expectedPrefix,
+        count: issue.count,
+        extraCopies: issue.extraCopies,
+        wrongPrefix: issue.wrongPrefix,
+        duplicate: issue.duplicate,
+        exactDuplicates: issue.exactDuplicates,
+        linkedRecords: issue.linkedRecords,
+        safeAutoRepair: issue.safeAutoRepair,
+        reason: issue.reason,
+      }));
+    });
+    sendJson(response, 200, {
+      issueCount: issues.length,
+      safeIssueCount: issues.filter((issue) => issue.safeAutoRepair).length,
+      extraCopyCount: issues.reduce((total, issue) => total + issue.extraCopies, 0),
+      issues,
+    });
+    return;
+  }
+
   if (url.pathname === "/api/owner/repair-order-archives/apply-all" && method === "POST") {
     if (!requireOwner(session, response)) return;
     const body = await readJson(request);
@@ -3126,7 +3238,7 @@ async function handleApi(request, response, url) {
   }
 
   if (url.pathname === "/api/app-state/version" && method === "GET") {
-    sendJson(response, 200, { revision: workspaceStateRevision(db, session.workspace.id), clientReleaseId: "global-order-archive-repair-v3" });
+    sendJson(response, 200, { revision: workspaceStateRevision(db, session.workspace.id), clientReleaseId: "order-routing-integrity-v1" });
     return;
   }
 

@@ -93,7 +93,7 @@ test("Master can configure and Actors cannot override a fixed commission on web 
   assert.match(mobileScreens, /updateActorOrderSettings\(actor\.id, \{ orderFixedCommission: \{ enabled: draft\.enabled, percent \} \}\)/);
 
   assert.match(server, /for \(const field of \["orderFixedRates", "orderFixedCommission"\]\)/);
-  assert.match(server, /state = resolveIncomingWorkspaceRecordCollisions\(persistedState, state\)/);
+  assert.match(server, /state = resolveIncomingWorkspaceRecordCollisions\(persistedState, state,[\s\S]*brokerActorId: session\.membership\.actorId/);
   assert.match(server, /const isReturnedResubmission = persistedBelongsToSessionActor && persistedOrder\.state === "Returned" && allowedOrder\?\.state === "Pending Forward"/);
   assert.match(server, /brokerActorId: isReturnedResubmission \? persistedOrder\.brokerActorId \|\| session\.membership\.actorId : session\.membership\.actorId/);
   assert.match(server, /for \(const field of \["commissionPercent", "commissionMinor", "grossMinor", "orderCommissionLiability"\]\)/);

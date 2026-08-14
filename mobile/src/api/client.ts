@@ -372,6 +372,35 @@ function removeOrdersAlreadyReported(orders: OrderRecord[] | undefined, archives
   });
 }
 
+function recoveredOrderMatches(left: OrderRecord, right: OrderRecord): boolean {
+  const leftActorId = String(left.brokerActorId || "").trim();
+  const rightActorId = String(right.brokerActorId || "").trim();
+  const sameActor = leftActorId && rightActorId
+    ? leftActorId === rightActorId
+    : String(left.broker || "").trim().toLocaleLowerCase() === String(right.broker || "").trim().toLocaleLowerCase();
+  if (!sameActor) return false;
+  const leftMoment = String(left.createdAt || left.sentAt || "").trim();
+  const rightMoment = String(right.createdAt || right.sentAt || "").trim();
+  if (leftMoment && rightMoment && leftMoment !== rightMoment) return false;
+  return String(left.sourceCurrency || "") === String(right.sourceCurrency || "") &&
+    Number(left.sourceAmountMinor || 0) === Number(right.sourceAmountMinor || 0) &&
+    String(left.payoutCurrency || "") === String(right.payoutCurrency || "") &&
+    Number(left.payoutAmountMinor || 0) === Number(right.payoutAmountMinor || 0) &&
+    String(left.receiverName || "").trim().toLocaleLowerCase() === String(right.receiverName || "").trim().toLocaleLowerCase() &&
+    String(left.accountNumber || "").trim() === String(right.accountNumber || "").trim() &&
+    String(left.phoneNumber || "").trim() === String(right.phoneNumber || "").trim();
+}
+
+function removeRecoveredOrderAliases(orders: OrderRecord[]): OrderRecord[] {
+  const recovered = orders.filter((order) => String(order.collisionSourceOrderId || "").trim());
+  if (!recovered.length) return orders;
+  return orders.filter((candidate) => !recovered.some((order) =>
+    candidate !== order &&
+    String(candidate.id || "") === String(order.collisionSourceOrderId || "") &&
+    recoveredOrderMatches(candidate, order)
+  ));
+}
+
 function normalizeState(state: Partial<WorkspaceState> | null | undefined): WorkspaceState {
   const archives = normalizeArchiveSnapshots(state?.archives);
   const deletedOrderIds = Array.from(new Set(
@@ -384,7 +413,7 @@ function normalizeState(state: Partial<WorkspaceState> | null | undefined): Work
     ...(state || {}),
     actors: Array.isArray(state?.actors) ? state.actors : [],
     orders: removeOrdersAlreadyReported(
-      (Array.isArray(state?.orders) ? state.orders : []).filter((order) => !deletedOrderIdSet.has(order.id)),
+      removeRecoveredOrderAliases((Array.isArray(state?.orders) ? state.orders : []).filter((order) => !deletedOrderIdSet.has(order.id))),
       archives
     ),
     receivables: Array.isArray(state?.receivables) ? state.receivables : [],

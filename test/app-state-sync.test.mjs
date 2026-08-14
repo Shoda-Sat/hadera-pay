@@ -419,6 +419,7 @@ test("workspace revision checks stay read-only and detect saved changes", async 
     const protectedOrder = actorProtectedSave.data.state.orders.find((order) => order.id === "ORD-FIXED-COMMISSION");
     assert.equal(protectedOrder.brokerActorId, fixedCommissionActorId);
     assert.equal(protectedOrder.broker, "Fixed Commission Broker");
+    assert.equal(protectedOrder.brokerOrderNumber, "FIX001");
     assert.equal(protectedOrder.commissionPercent, -2);
     assert.equal(protectedOrder.commissionMinor, -200);
     assert.equal(protectedOrder.grossMinor, 9_800);
@@ -488,7 +489,7 @@ test("workspace revision checks stay read-only and detect saved changes", async 
         id: "ORD-FIXED-COMMISSION",
         brokerActorId: "ACT-SPOOFED-COLLISION",
         broker: "Spoofed Collision Broker",
-        brokerOrderNumber: "FIX002",
+        brokerOrderNumber: "HAB011",
         agent: "Unassigned",
         sourceCurrency: "USD",
         payoutCurrency: "ETB",
@@ -510,7 +511,7 @@ test("workspace revision checks stay read-only and detect saved changes", async 
       {
         id: "REC-COLLISION-NEW",
         orderId: "ORD-FIXED-COMMISSION",
-        brokerOrderNumber: "FIX002",
+        brokerOrderNumber: "HAB011",
         borrower: "Spoofed Collision Broker",
         borrowerActorId: "ACT-SPOOFED-COLLISION",
         currency: "USD",
@@ -541,7 +542,7 @@ test("workspace revision checks stay read-only and detect saved changes", async 
       from: "Fixed Commission Broker",
       text: "New colliding order message",
       orderId: "ORD-FIXED-COMMISSION",
-      orderNumber: "FIX002",
+      orderNumber: "HAB011",
       createdAt: actorCollisionState.orders[0].updatedAt,
     });
     const actorCollisionSave = await requestJson(baseUrl, "/api/app-state", {
@@ -558,14 +559,33 @@ test("workspace revision checks stay read-only and detect saved changes", async 
     assert.equal(collisionOrder.commissionMinor, -400);
     assert.equal(collisionOrder.grossMinor, 19_600);
     assert.equal(collisionOrder.orderCommissionLiability, "Master");
+    assert.equal(collisionOrder.collisionSourceOrderId, "ORD-FIXED-COMMISSION");
     assert.equal(actorCollisionSave.data.state.orders.some((order) => order.id === "ORD-FIXED-COMMISSION" && order.brokerOrderNumber === "FIX001"), true);
     assert.equal(actorCollisionSave.data.state.receivables.find((item) => item.id === "REC-COLLISION-ORIGINAL")?.orderId, "ORD-FIXED-COMMISSION");
     assert.equal(actorCollisionSave.data.state.receivables.find((item) => item.id === "REC-COLLISION-NEW")?.orderId, collisionOrder.id);
+    assert.equal(actorCollisionSave.data.state.receivables.find((item) => item.id === "REC-COLLISION-NEW")?.brokerOrderNumber, "FIX002");
     assert.equal(actorCollisionSave.data.state.ledger.find((line) => line.journal === "JRN-COLLISION-ORIGINAL")?.orderId, "ORD-FIXED-COMMISSION");
     assert.equal(actorCollisionSave.data.state.ledger.find((line) => line.journal === "JRN-COLLISION-NEW")?.orderId, collisionOrder.id);
     const savedCollisionConversation = actorCollisionSave.data.state.chatConversations.find((chat) => chat.id === "CHAT-COLLISION-SCOPE");
     assert.equal(savedCollisionConversation?.messages.find((message) => message.id === "MSG-COLLISION-ORIGINAL")?.orderId, "ORD-FIXED-COMMISSION");
     assert.equal(savedCollisionConversation?.messages.find((message) => message.id === "MSG-COLLISION-NEW")?.orderId, collisionOrder.id);
+    assert.equal(savedCollisionConversation?.messages.find((message) => message.id === "MSG-COLLISION-NEW")?.orderNumber, "FIX002");
+
+    let repeatedCollisionSave = actorCollisionSave;
+    for (let repeat = 0; repeat < 3; repeat += 1) {
+      repeatedCollisionSave = await requestJson(baseUrl, "/api/app-state", {
+        cookie: fixedCommissionActorSignup.cookie,
+        method: "PUT",
+        body: { state: actorCollisionState, expectedRevision: repeatedCollisionSave.data.revision },
+      });
+    }
+    const repeatedCollisionOrders = repeatedCollisionSave.data.state.orders.filter((order) =>
+      order.brokerActorId === fixedCommissionActorId && order.createdAt === actorCollisionState.orders[0].createdAt
+    );
+    assert.equal(repeatedCollisionOrders.length, 1, "Repeated stale uploads must not create another order copy");
+    assert.equal(repeatedCollisionOrders[0].id, collisionOrder.id);
+    assert.equal(repeatedCollisionOrders[0].brokerOrderNumber, "FIX002");
+    assert.equal(repeatedCollisionSave.data.state.receivables.filter((item) => item.id === "REC-COLLISION-NEW").length, 1);
 
     const clearableForwardingFields = [
       "forwardedPayoutDivider",
@@ -575,7 +595,7 @@ test("workspace revision checks stay read-only and detect saved changes", async 
       "manualMasterRateDivider",
       "manualMasterRatePercent",
     ];
-    const stateWithForwardingTerms = structuredClone(actorCollisionSave.data.state);
+    const stateWithForwardingTerms = structuredClone(repeatedCollisionSave.data.state);
     const forwardingOrder = {
       id: "ORD-SYNC-FORWARDING",
       broker: "Galaxy Broker",

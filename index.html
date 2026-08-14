@@ -3907,7 +3907,7 @@
   <script>
     let storageKey = "haderapay.local.state.v1";
     let currentAuth = null;
-    const clientReleaseId = "global-order-archive-repair-v3";
+    const clientReleaseId = "order-routing-integrity-v1";
     let currentLoginStartedAt = 0;
     let remoteStateReady = false;
     let remoteStateRevision = "0";
@@ -4857,6 +4857,35 @@
       return Array.from(merged.values());
     }
 
+    function recoveredOrderMatches(left, right) {
+      const leftActorId = String(left?.brokerActorId || "").trim();
+      const rightActorId = String(right?.brokerActorId || "").trim();
+      const sameActor = leftActorId && rightActorId
+        ? leftActorId === rightActorId
+        : String(left?.broker || "").trim().toLowerCase() === String(right?.broker || "").trim().toLowerCase();
+      if (!sameActor) return false;
+      const leftMoment = String(left?.createdAt || left?.sentAt || "").trim();
+      const rightMoment = String(right?.createdAt || right?.sentAt || "").trim();
+      if (leftMoment && rightMoment && leftMoment !== rightMoment) return false;
+      return String(left?.sourceCurrency || "") === String(right?.sourceCurrency || "") &&
+        Number(left?.sourceAmountMinor || 0) === Number(right?.sourceAmountMinor || 0) &&
+        String(left?.payoutCurrency || "") === String(right?.payoutCurrency || "") &&
+        Number(left?.payoutAmountMinor || 0) === Number(right?.payoutAmountMinor || 0) &&
+        String(left?.receiverName || "").trim().toLowerCase() === String(right?.receiverName || "").trim().toLowerCase() &&
+        String(left?.accountNumber || "").trim() === String(right?.accountNumber || "").trim() &&
+        String(left?.phoneNumber || "").trim() === String(right?.phoneNumber || "").trim();
+    }
+
+    function removeRecoveredOrderAliases(orders = [], referenceOrders = orders) {
+      const recovered = referenceOrders.filter((order) => String(order?.collisionSourceOrderId || "").trim());
+      if (!recovered.length) return orders;
+      return orders.filter((candidate) => !recovered.some((order) =>
+        candidate !== order &&
+        String(candidate?.id || "") === String(order?.collisionSourceOrderId || "") &&
+        recoveredOrderMatches(candidate, order)
+      ));
+    }
+
     function mergeTransfers(existingItems = [], incomingItems = []) {
       const merged = new Map();
       [...existingItems, ...incomingItems].forEach((item) => {
@@ -5043,7 +5072,9 @@
       const remoteActors = Array.isArray(remoteState.actors) ? remoteState.actors : [];
       state.actors = normalizeActors(mergeById(state.actors, remoteState.actors || []));
       state.actors = state.actors.filter((actor) => !deletedActorIds.has(actor.id) || remoteActors.some((remoteActor) => remoteActor?.id === actor.id));
-      state.orders = mergeOrders(state.orders, remoteState.orders || []);
+      const remoteOrders = Array.isArray(remoteState.orders) ? remoteState.orders : [];
+      state.orders = removeRecoveredOrderAliases(state.orders, remoteOrders);
+      state.orders = removeRecoveredOrderAliases(mergeOrders(state.orders, remoteOrders));
       state.savedCustomers = normalizeSavedCustomers(mergeById(state.savedCustomers, remoteState.savedCustomers || []));
       state.receivables = mergeReceivables(state.receivables, remoteState.receivables || []);
       state.transfers = normalizeTransfers(mergeTransfers(state.transfers, remoteState.transfers || []));
