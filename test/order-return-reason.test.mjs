@@ -22,7 +22,7 @@ test("Master and paying Actor return reasons are required, latest-only, and refr
   assert.match(index, /const orderReturnReasonDrafts = new Map\(\)/);
   assert.match(index, /orderReturnReasonDrafts\.set\(input\.dataset\.id, input\.value \|\| ""\)/);
   assert.match(index, /if \(!actorCanPayOrder\(order, actor\)\) return;[\s\S]*if \(!actorCanPayOrder\(currentOrder, actor\)\) return;[\s\S]*currentOrder\.returnedBy = actor\.name;[\s\S]*currentOrder\.returnedReason = reason/);
-  assert.match(index, /settingsRateInputIsFocused\(\)[\s\S]*\.order-return-reason/);
+  assert.match(index, /workspaceInputIsFocused\(\)[\s\S]*input, textarea, select/);
   assert.match(index, /document\.activeElement\?\.closest\?\.\("\.forward-agent,[^\n]+\.order-return-reason"\)/);
   assert.match(index, /function viewerCanSeeOrderReturnReason[\s\S]*order\?\.state !== "Returned"[\s\S]*order\?\.broker === viewer\?\.name/);
   assert.match(index, /order\.state = "Assigned";[\s\S]*order\.returnedReason = "";/);

@@ -3923,11 +3923,13 @@
   <script>
     let storageKey = "haderapay.local.state.v1";
     let currentAuth = null;
-    const clientReleaseId = "order-routing-integrity-v1";
+    const clientReleaseId = "non-disruptive-workspace-sync-v1";
     let currentLoginStartedAt = 0;
     let remoteStateReady = false;
     let remoteStateRevision = "0";
     let remoteSaveChain = Promise.resolve();
+    let remoteSavePending = 0;
+    let clientUpdateNoticeShown = false;
     let saveTimer = null;
     let suppressRemoteSave = false;
     let remoteRefreshTimer = null;
@@ -4575,31 +4577,45 @@
       if (!currentAuth || !remoteStateReady || suppressRemoteSave) return;
       clearTimeout(saveTimer);
       saveTimer = setTimeout(() => {
+        saveTimer = null;
         queueRemoteStateSave().catch(handleRemoteSaveError);
       }, 250);
     }
 
     function handleRemoteSaveError(error) {
       if (error?.status === 409) {
-        notifyEvent("Workspace refreshed", "Another change was saved first. Refreshing now; please repeat your last action.");
-        setTimeout(() => window.location.reload(), 500);
+        notifyEvent("Save paused", "Several workspace changes arrived together. Your screen was not refreshed; please press Save again.");
       }
     }
 
     function queueRemoteStateSave() {
       const write = remoteSaveChain.then(async () => {
-        const result = await api("/api/app-state", {
-          method: "PUT",
-          body: { state, expectedRevision: remoteStateRevision }
-        });
-        remoteStateRevision = String(result.revision || result.state?._syncRevision || remoteStateRevision || "0");
-        if (result.state) mergeSharedState(result.state);
+        remoteSavePending += 1;
         try {
-          localStorage.setItem(storageKey, JSON.stringify(state));
-        } catch {
-          // Keep the authoritative remote save even if local storage is full.
+          for (let attempt = 0; attempt < 3; attempt += 1) {
+            try {
+              const result = await api("/api/app-state", {
+                method: "PUT",
+                body: { state, expectedRevision: remoteStateRevision }
+              });
+              remoteStateRevision = String(result.revision || result.state?._syncRevision || remoteStateRevision || "0");
+              if (result.state) mergeSharedState(result.state);
+              try {
+                localStorage.setItem(storageKey, JSON.stringify(state));
+              } catch {
+                // Keep the authoritative remote save even if local storage is full.
+              }
+              return result;
+            } catch (error) {
+              if (error?.status !== 409 || attempt === 2) throw error;
+              const version = await api("/api/app-state/version");
+              remoteStateRevision = String(version?.revision || remoteStateRevision || "0");
+            }
+          }
+          throw new Error("The workspace could not be saved.");
+        } finally {
+          remoteSavePending = Math.max(0, remoteSavePending - 1);
         }
-        return result;
       });
       remoteSaveChain = write.catch(() => {});
       return write;
@@ -5136,23 +5152,25 @@
       return true;
     }
 
-    function settingsRateInputIsFocused() {
-      return Boolean(document.activeElement?.closest?.(
-        ".forward-transfer-form, .fixed-order-rate, .fixed-order-commission, .special-agent-divider, .special-agent-percent, .usd-agent-income-divider, .usd-agent-income-percent, .master-rate-divider, .master-rate-percent, .buying-rate-input, .forward-agent, .forward-payout-divider, .forward-payout-percent, .order-return-reason, .receivable-payment, .ledger-tool-input, .actor-name-input, .actor-currency-input, .actor-currency-rate, #actorResetActor, #actorResetPermit"
-      ));
+    function workspaceInputIsFocused() {
+      const activeElement = document.activeElement;
+      return Boolean(activeElement?.matches?.("input, textarea, select, [contenteditable='true']"));
     }
 
     async function refreshSharedState() {
       if (!currentAuth || !remoteStateReady) return;
       refreshAccountDeviceWarning();
-      if (actorPermissionSavePending > 0 || settingsRateInputIsFocused()) return;
+      if (actorPermissionSavePending > 0 || remoteSavePending > 0 || saveTimer !== null || workspaceInputIsFocused()) return;
       const version = await api("/api/app-state/version").catch(() => null);
       if (version?.clientReleaseId && version.clientReleaseId !== clientReleaseId) {
-        window.location.reload();
-        return;
+        if (!clientUpdateNoticeShown) {
+          clientUpdateNoticeShown = true;
+          notifyEvent("Update available", "Refresh the page when convenient to load the newest version. Your current work will not be interrupted.");
+        }
       }
+      if (!version?.revision || String(version.revision) === String(remoteStateRevision)) return;
       const remote = await api("/api/app-state").catch(() => null);
-      if (actorPermissionSavePending > 0) return;
+      if (actorPermissionSavePending > 0 || remoteSavePending > 0 || saveTimer !== null || workspaceInputIsFocused()) return;
       if (!mergeSharedState(remote?.state)) return;
       remoteStateRevision = String(remote?.revision || remote?.state?._syncRevision || remoteStateRevision || "0");
       suppressRemoteSave = true;
@@ -5372,6 +5390,7 @@
       saveState();
       if (!currentAuth || !remoteStateReady || suppressRemoteSave) return false;
       clearTimeout(saveTimer);
+      saveTimer = null;
       try {
         await queueRemoteStateSave();
         return true;
@@ -15343,6 +15362,7 @@
       els.r2MigrateButton.disabled = true;
       els.r2RefreshButton.disabled = true;
       clearTimeout(saveTimer);
+      saveTimer = null;
       let latestState = null;
       let totalMigrated = 0;
       let totalFailed = 0;
@@ -15559,6 +15579,7 @@
           `Restore ${plan.candidateCount} missing paid-order records to ${actor.name}'s existing closed Report? This changes Report details only—not ledger balances or closed totals—and creates private local and encrypted offsite backups first.`,
           async () => {
             clearTimeout(saveTimer);
+            saveTimer = null;
             els.orderArchiveRepairButton.disabled = true;
             els.orderArchiveRepairButton.textContent = "Backing up and restoring...";
             setOrderArchiveRepairStatus("Creating backup...");

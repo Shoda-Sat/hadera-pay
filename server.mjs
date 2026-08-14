@@ -3238,7 +3238,7 @@ async function handleApi(request, response, url) {
   }
 
   if (url.pathname === "/api/app-state/version" && method === "GET") {
-    sendJson(response, 200, { revision: workspaceStateRevision(db, session.workspace.id), clientReleaseId: "order-routing-integrity-v1" });
+    sendJson(response, 200, { revision: workspaceStateRevision(db, session.workspace.id), clientReleaseId: "non-disruptive-workspace-sync-v1" });
     return;
   }
 
