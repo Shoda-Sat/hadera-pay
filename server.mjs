@@ -1862,6 +1862,13 @@ function ownerOrderArchiveRepairPlan(db) {
         actor: String(item?.actor || item?.actorName || ""),
         skippedCount: Number(item?.skippedCount || 0),
         orphanCount: Number(item?.orphanCount || 0),
+        reason: Number(item?.skippedCount || 0) > 0
+          ? "ambiguous evidence"
+          : Number(item?.orphanCount || 0) > 0
+            ? "incomplete evidence"
+            : !String(item?.actorId || "")
+              ? "legacy identity without a permanent Actor ID"
+              : "manual review required",
       })).sort((left, right) => [left.actorId, left.actor].join(":").localeCompare([right.actorId, right.actor].join(":")));
       const workspacePlanDigest = crypto.createHash("sha256").update(canonicalJson({
         planSchema,
@@ -1934,6 +1941,10 @@ function publicOwnerOrderArchiveRepairPlan(plan) {
       candidateCount: workspace.candidateCount,
       affectedActorCount: workspace.repairedActorCount,
       blockedActorCount: workspace.blockedActorCount,
+      blockedActors: workspace.blockedActors.map((item) => ({
+        actor: item.actor || "Unknown Actor",
+        reason: item.reason,
+      })),
       closedActorCount: workspace.closedActorCount,
       unclosedActorCount: workspace.unclosedActorCount,
     })),
@@ -3115,7 +3126,7 @@ async function handleApi(request, response, url) {
   }
 
   if (url.pathname === "/api/app-state/version" && method === "GET") {
-    sendJson(response, 200, { revision: workspaceStateRevision(db, session.workspace.id), clientReleaseId: "global-order-archive-repair-v2" });
+    sendJson(response, 200, { revision: workspaceStateRevision(db, session.workspace.id), clientReleaseId: "global-order-archive-repair-v3" });
     return;
   }
 

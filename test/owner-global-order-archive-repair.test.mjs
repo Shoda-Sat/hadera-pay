@@ -141,6 +141,7 @@ test("Owner can safely plan and atomically repair closed reports across workspac
   assert.match(server, /orderArchiveRepairEvidenceDigest[\s\S]*archives[\s\S]*ORDER_PAYMENT/);
   assert.match(server, /owner-order-archive-repair-v2/);
   assert.match(server, /plannedOrderArchiveAdditions[\s\S]*plannedAdditions/);
+  assert.match(server, /blockedActors: workspace\.blockedActors\.map/);
   assert.match(server, /\/api\/owner\/repair-order-archives\/plan-all[\s\S]*requireOwner/);
   assert.match(server, /\/api\/owner\/repair-order-archives\/apply-all[\s\S]*requireOwner/);
   assert.match(server, /applyOwnerOrderArchiveRepairs[\s\S]*enqueueDbWrite/);
@@ -157,6 +158,7 @@ test("Owner can safely plan and atomically repair closed reports across workspac
   assert.match(index, /expectedCount: Number\(plan\.candidateCount\)/);
   assert.match(index, /planDigest: plan\.planDigest/);
   assert.match(index, /Create Backup & Restore/);
+  assert.match(index, /Manual review:.*blockedActors\.join/);
   assert.match(index, /not ledger balances, settlements, income, or closed totals/i);
 });
 

@@ -3907,7 +3907,7 @@
   <script>
     let storageKey = "haderapay.local.state.v1";
     let currentAuth = null;
-    const clientReleaseId = "global-order-archive-repair-v2";
+    const clientReleaseId = "global-order-archive-repair-v3";
     let currentLoginStartedAt = 0;
     let remoteStateReady = false;
     let remoteStateRevision = "0";
@@ -15341,7 +15341,14 @@
         `${Number(plan.unclosedActorCount || 0)} unclosed Actor${Number(plan.unclosedActorCount || 0) === 1 ? "" : "s"} skipped`,
       ];
       if (Number(plan.blockedActorCount || 0) > 0) {
-        parts.push(`${Number(plan.blockedActorCount)} closed report${Number(plan.blockedActorCount) === 1 ? "" : "s"} left unchanged for manual review`);
+        const blockedActors = (Array.isArray(plan.workspaces) ? plan.workspaces : []).flatMap((workspace) =>
+          (Array.isArray(workspace?.blockedActors) ? workspace.blockedActors : []).map((item) =>
+            `${item.actor || "Unknown Actor"} in ${workspace.workspace || "Unknown workspace"} (${item.reason || "manual review required"})`
+          )
+        );
+        parts.push(blockedActors.length
+          ? `Manual review: ${blockedActors.join(", ")}`
+          : `${Number(plan.blockedActorCount)} closed report${Number(plan.blockedActorCount) === 1 ? "" : "s"} left unchanged for manual review`);
       }
       return parts.join(" · ");
     }
