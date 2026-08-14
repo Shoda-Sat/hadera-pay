@@ -3620,6 +3620,21 @@
                 <span class="field-error" id="subscriptionError"></span>
               </div>
             </div>
+            <div class="panel span-12">
+              <div class="panel-header">
+                <div>
+                  <h2>Closed Report Repair</h2>
+                  <small>Check every workspace for paid-order details missing from Actors whose balances were already closed. Unclosed Actors are skipped.</small>
+                </div>
+                <span id="ownerOrderArchiveRepairStatus" class="state-pill">Ready to check</span>
+              </div>
+              <div class="panel-body">
+                <p id="ownerOrderArchiveRepairSummary" class="muted">Only closed Actor reports are checked. Ledger balances, settlements, and closed totals are never recalculated.</p>
+                <div class="actions">
+                  <button class="btn primary" id="ownerOrderArchiveRepairButton" type="button">Check All Closed Reports</button>
+                </div>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -3892,7 +3907,7 @@
   <script>
     let storageKey = "haderapay.local.state.v1";
     let currentAuth = null;
-    const clientReleaseId = "cancelled-order-close-v1";
+    const clientReleaseId = "global-order-archive-repair-v1";
     let currentLoginStartedAt = 0;
     let remoteStateReady = false;
     let remoteStateRevision = "0";
@@ -5535,6 +5550,9 @@
       orderArchiveRepairButton: document.getElementById("orderArchiveRepairButton"),
       subscriptionRows: document.getElementById("subscriptionRows"),
       subscriptionError: document.getElementById("subscriptionError"),
+      ownerOrderArchiveRepairStatus: document.getElementById("ownerOrderArchiveRepairStatus"),
+      ownerOrderArchiveRepairSummary: document.getElementById("ownerOrderArchiveRepairSummary"),
+      ownerOrderArchiveRepairButton: document.getElementById("ownerOrderArchiveRepairButton"),
       inviteRows: document.getElementById("inviteRows"),
       inviteForm: document.getElementById("inviteForm"),
       inviteRole: document.getElementById("inviteRole"),
@@ -15310,6 +15328,94 @@
 
     els.r2RefreshButton?.addEventListener("click", refreshR2StorageStatus);
     els.r2MigrateButton?.addEventListener("click", migrateExistingAttachments);
+
+    function setOwnerOrderArchiveRepairStatus(message, tone = "") {
+      if (!els.ownerOrderArchiveRepairStatus) return;
+      els.ownerOrderArchiveRepairStatus.textContent = message;
+      els.ownerOrderArchiveRepairStatus.className = `state-pill ${tone}`.trim();
+    }
+
+    function ownerOrderArchiveRepairSummary(plan) {
+      const parts = [
+        `${Number(plan.closedActorCount || 0)} closed Actor report${Number(plan.closedActorCount || 0) === 1 ? "" : "s"} checked`,
+        `${Number(plan.unclosedActorCount || 0)} unclosed Actor${Number(plan.unclosedActorCount || 0) === 1 ? "" : "s"} skipped`,
+      ];
+      if (Number(plan.blockedActorCount || 0) > 0) {
+        parts.push(`${Number(plan.blockedActorCount)} closed report${Number(plan.blockedActorCount) === 1 ? "" : "s"} left unchanged for manual review`);
+      }
+      return parts.join(" · ");
+    }
+
+    async function checkAllOrderArchiveRepairs() {
+      if (!signedInAsOwner() || !els.ownerOrderArchiveRepairButton || els.ownerOrderArchiveRepairButton.disabled) return;
+      els.ownerOrderArchiveRepairButton.disabled = true;
+      els.ownerOrderArchiveRepairButton.textContent = "Checking...";
+      setOwnerOrderArchiveRepairStatus("Checking closed reports...");
+      try {
+        const plan = await api("/api/owner/repair-order-archives/plan-all", { method: "POST", body: {} });
+        const summary = ownerOrderArchiveRepairSummary(plan);
+        if (els.ownerOrderArchiveRepairSummary) els.ownerOrderArchiveRepairSummary.textContent = summary;
+        if (Number(plan.candidateCount || 0) === 0) {
+          const blocked = Number(plan.blockedActorCount || 0);
+          setOwnerOrderArchiveRepairStatus(blocked ? "Manual review required" : "No missing orders", blocked ? "warn" : "good");
+          notifyEvent(
+            blocked ? "Safe repair unavailable" : "All closed reports checked",
+            blocked
+              ? `No unambiguous missing orders could be restored automatically. ${blocked} closed Actor report${blocked === 1 ? " needs" : "s need"} manual review; nothing was changed.`
+              : `No restorable paid orders are missing. ${Number(plan.unclosedActorCount || 0)} unclosed Actor${Number(plan.unclosedActorCount || 0) === 1 ? " was" : "s were"} skipped.`
+          );
+          return;
+        }
+        if (!plan.privateBackupReady || !plan.canApply) {
+          setOwnerOrderArchiveRepairStatus("Private backup unavailable", "danger");
+          notifyEvent("Repair stopped", "A verified private encrypted backup could not be guaranteed. Nothing was changed.");
+          return;
+        }
+        const blockedMessage = Number(plan.blockedActorCount || 0)
+          ? ` ${Number(plan.blockedActorCount)} closed Actor report${Number(plan.blockedActorCount) === 1 ? " has" : "s have"} incomplete or ambiguous evidence and will be left unchanged for manual review.`
+          : "";
+        setOwnerOrderArchiveRepairStatus(`${Number(plan.candidateCount)} ready to restore`, "warn");
+        confirmAction(
+          `Restore ${Number(plan.candidateCount)} missing paid-order record${Number(plan.candidateCount) === 1 ? "" : "s"} across ${Number(plan.eligibleWorkspaceCount || 0)} workspace${Number(plan.eligibleWorkspaceCount || 0) === 1 ? "" : "s"}? Unclosed Actors are skipped.${blockedMessage} This appends Report details only—not ledger balances, settlements, income, or closed totals—and creates a verified local and encrypted offsite backup first.`,
+          async () => {
+            els.ownerOrderArchiveRepairButton.disabled = true;
+            els.ownerOrderArchiveRepairButton.textContent = "Backing up and restoring...";
+            setOwnerOrderArchiveRepairStatus("Creating verified backup...");
+            try {
+              const result = await api("/api/owner/repair-order-archives/apply-all", {
+                method: "POST",
+                body: {
+                  expectedCount: Number(plan.candidateCount),
+                  planDigest: plan.planDigest,
+                },
+              });
+              setOwnerOrderArchiveRepairStatus(`${Number(result.restoredCount || 0)} restored`, "good");
+              if (els.ownerOrderArchiveRepairSummary) {
+                els.ownerOrderArchiveRepairSummary.textContent = `${Number(result.restoredCount || 0)} paid-order record${Number(result.restoredCount || 0) === 1 ? "" : "s"} restored across ${Number(result.workspaceCount || 0)} workspace${Number(result.workspaceCount || 0) === 1 ? "" : "s"}. ${Number(result.blockedActorCount || 0)} closed Actor report${Number(result.blockedActorCount || 0) === 1 ? " remains" : "s remain"} unchanged for manual review.`;
+              }
+              notifyEvent("Closed Reports restored", `${Number(result.restoredCount || 0)} missing paid-order record${Number(result.restoredCount || 0) === 1 ? "" : "s"} restored. Ledger balances, settlements, income, and closed totals were unchanged.`);
+            } catch (error) {
+              setOwnerOrderArchiveRepairStatus("Restore stopped", "danger");
+              notifyEvent("Repair stopped", error.message || "Nothing was changed.");
+            } finally {
+              els.ownerOrderArchiveRepairButton.disabled = false;
+              els.ownerOrderArchiveRepairButton.textContent = "Check All Closed Reports";
+            }
+          },
+          () => {},
+          { yes: "Create Backup & Restore", no: "Cancel" }
+        );
+      } catch (error) {
+        setOwnerOrderArchiveRepairStatus("Check failed", "danger");
+        notifyEvent("Report check failed", error.message || "Closed reports could not be checked.");
+      } finally {
+        els.ownerOrderArchiveRepairButton.disabled = false;
+        els.ownerOrderArchiveRepairButton.textContent = "Check All Closed Reports";
+      }
+    }
+
+    els.ownerOrderArchiveRepairButton?.addEventListener("click", checkAllOrderArchiveRepairs);
+
 
     function setOrderArchiveRepairStatus(message, tone = "") {
       if (!els.orderArchiveRepairStatus) return;

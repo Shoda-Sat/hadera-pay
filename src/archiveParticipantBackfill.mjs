@@ -203,10 +203,16 @@ export function backfillClosedParticipantOrderSnapshots(workspaceState = {}, tar
   let evidenceCount = 0;
   const targetActorId = cleanText(target?.actorId);
   const targetActorName = cleanText(target?.actorName);
+  const targetLegacyOnly = target?.legacyOnly === true;
+  const allowLegacyNameFallback = target?.allowLegacyNameFallback !== false;
   const destinationIsTargeted = (archive) => {
-    if (!targetActorId && !targetActorName) return true;
     const archiveActorId = cleanText(archive?.actorId);
+    if (targetLegacyOnly) {
+      return !archiveActorId && Boolean(targetActorName && sameName(archive?.actor, targetActorName));
+    }
+    if (!targetActorId && !targetActorName) return true;
     if (targetActorId && archiveActorId) return archiveActorId === targetActorId;
+    if (targetActorId && !allowLegacyNameFallback) return false;
     return Boolean(targetActorName && sameName(archive?.actor, targetActorName));
   };
   const targetAliases = new Set([
@@ -287,6 +293,157 @@ export function backfillClosedParticipantOrderSnapshots(workspaceState = {}, tar
     state: repaired.length ? { ...workspaceState, archives: workingArchives } : workspaceState,
     repairedCount: repaired.length,
     repaired,
+    skippedCount,
+    orphanCount,
+    existingCount,
+    evidenceCount,
+  };
+}
+
+function archiveIsClosedActorReport(archive, actors) {
+  if (!archive || typeof archive !== "object" || !timestampKey(archive.closedAt)) return false;
+  if (archive.kind === "master-transactions" || sameName(archive.actor, "Master Transactions")) return false;
+  if (cleanText(archive.actorRole) === "Master") return false;
+  const archiveActorId = cleanText(archive.actorId);
+  const archiveActorName = cleanText(archive.actor);
+  if (!archiveActorId && !archiveActorName) return false;
+  const knownActor = archiveActorId
+    ? actorById(actors, archiveActorId)
+    : actors.find((actor) => sameName(actor?.name, archiveActorName));
+  return cleanText(knownActor?.role) !== "Master";
+}
+
+function closedActorRepairTargets(workspaceState) {
+  const actors = Array.isArray(workspaceState?.actors) ? workspaceState.actors : [];
+  const targets = new Map();
+  (Array.isArray(workspaceState?.archives) ? workspaceState.archives : [])
+    .filter((archive) => archiveIsClosedActorReport(archive, actors))
+    .forEach((archive) => {
+      const actorId = cleanText(archive.actorId);
+      const actorName = cleanText(actorById(actors, actorId)?.name || archive.actor);
+      const key = actorId ? `id:${actorId}` : `name:${normalizedName(actorName)}`;
+      if (!key || targets.has(key)) return;
+      targets.set(key, {
+        actorId,
+        actorName,
+        legacyIdentity: !actorId,
+        repairTarget: actorId
+          ? { actorId, actorName, allowLegacyNameFallback: false }
+          : { actorName, legacyOnly: true },
+      });
+    });
+  return Array.from(targets.values());
+}
+
+function activeNonMasterActorIdentities(workspaceState) {
+  const actors = Array.isArray(workspaceState?.actors) ? workspaceState.actors : [];
+  const identities = new Map();
+  actors
+    .filter((actor) => actor?.active !== false && cleanText(actor?.role) !== "Master")
+    .forEach((actor) => {
+      const actorId = cleanText(actor?.id);
+      const actorName = cleanText(actor?.name);
+      if (!actorId && !actorName) return;
+      const key = actorId ? `id:${actorId}` : `name:${normalizedName(actorName)}`;
+      if (!identities.has(key)) identities.set(key, { actorId, actorName });
+    });
+  return Array.from(identities.values());
+}
+
+function actorIdentityMatchesTarget(actor, target) {
+  if (actor.actorId && target.actorId) return actor.actorId === target.actorId;
+  return Boolean(actor.actorName && target.actorName && sameName(actor.actorName, target.actorName));
+}
+
+function emptyWorkspaceRepairResult(workspaceState) {
+  return {
+    state: workspaceState,
+    repairedCount: 0,
+    repaired: [],
+    safeActorCount: 0,
+    blockedActorCount: 0,
+    blockedActors: [],
+    closedActorCount: 0,
+    unclosedActorCount: 0,
+    actorResults: [],
+    repairedActorCount: 0,
+    skippedCount: 0,
+    orphanCount: 0,
+    existingCount: 0,
+    evidenceCount: 0,
+  };
+}
+
+/**
+ * Safely repairs every existing closed Actor report in one workspace. Targets are
+ * derived only from closed non-Master archives. A target with ambiguous or orphaned
+ * evidence is left completely untouched while independent safe targets can proceed.
+ */
+export function backfillAllClosedActorOrderSnapshots(workspaceState = {}) {
+  if (!workspaceState || typeof workspaceState !== "object") {
+    return emptyWorkspaceRepairResult(workspaceState);
+  }
+
+  const targets = closedActorRepairTargets(workspaceState);
+  const activeActors = activeNonMasterActorIdentities(workspaceState);
+  const unclosedActorCount = activeActors.filter((actor) =>
+    !targets.some((target) => actorIdentityMatchesTarget(actor, target))
+  ).length;
+  let workingState = workspaceState;
+  const repaired = [];
+  const blockedActors = [];
+  const actorResults = [];
+  let repairedActorCount = 0;
+  let skippedCount = 0;
+  let orphanCount = 0;
+  let existingCount = 0;
+  let evidenceCount = 0;
+
+  targets.forEach((target) => {
+    const plan = backfillClosedParticipantOrderSnapshots(workingState, target.repairTarget);
+    // A name-only historical archive cannot be proven to belong to a currently
+    // active Actor if that name was reused. Keep it available for manual review,
+    // but never include it in an automatic workspace-wide repair.
+    const blocked = target.legacyIdentity || plan.skippedCount > 0 || plan.orphanCount > 0;
+    skippedCount += plan.skippedCount;
+    orphanCount += plan.orphanCount;
+    existingCount += plan.existingCount;
+    evidenceCount += plan.evidenceCount;
+    const actorResult = {
+      actorId: target.actorId,
+      actorName: target.actorName,
+      name: target.actorName,
+      status: blocked ? "blocked" : "safe",
+      candidateCount: plan.repairedCount,
+      repairedCount: blocked ? 0 : plan.repairedCount,
+      skippedCount: plan.skippedCount,
+      orphanCount: plan.orphanCount,
+      existingCount: plan.existingCount,
+      evidenceCount: plan.evidenceCount,
+    };
+    actorResults.push(actorResult);
+    if (blocked) {
+      blockedActors.push({ ...actorResult });
+      return;
+    }
+    if (plan.repairedCount > 0) {
+      workingState = plan.state;
+      repaired.push(...plan.repaired);
+      repairedActorCount += 1;
+    }
+  });
+
+  return {
+    state: workingState,
+    repairedCount: repaired.length,
+    repaired,
+    safeActorCount: targets.length - blockedActors.length,
+    blockedActorCount: blockedActors.length,
+    blockedActors,
+    closedActorCount: targets.length,
+    unclosedActorCount,
+    actorResults,
+    repairedActorCount,
     skippedCount,
     orphanCount,
     existingCount,

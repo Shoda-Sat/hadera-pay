@@ -4,7 +4,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { backfillClosedParticipantOrderSnapshots } from "./src/archiveParticipantBackfill.mjs";
+import {
+  backfillAllClosedActorOrderSnapshots,
+  backfillClosedParticipantOrderSnapshots,
+} from "./src/archiveParticipantBackfill.mjs";
 import { closeActorBalance } from "./src/closeActorBalance.mjs";
 import {
   DeleteObjectCommand,
@@ -1740,6 +1743,132 @@ function validateOrderArchiveRepair(beforeState, plan) {
   }
 }
 
+function validateWorkspaceWideOrderArchiveRepair(beforeState, result) {
+  if (!isDeepStrictEqual(
+    orderArchiveRepairInvariantState(beforeState),
+    orderArchiveRepairInvariantState(result.state)
+  )) {
+    throw httpError(500, "The all-workspace report repair safety check detected an accounting change and stopped.");
+  }
+  const beforeArchives = Array.isArray(beforeState?.archives) ? beforeState.archives : [];
+  const afterArchives = Array.isArray(result.state?.archives) ? result.state.archives : [];
+  const beforeOrderCount = beforeArchives.reduce((total, archive) => total + (archive.orders || []).length, 0);
+  const afterOrderCount = afterArchives.reduce((total, archive) => total + (archive.orders || []).length, 0);
+  if (afterOrderCount - beforeOrderCount !== Number(result.repairedCount || 0)) {
+    throw httpError(500, "The all-workspace report repair count check failed and stopped.");
+  }
+  const repairedArchiveIds = new Set((result.repaired || []).map((item) => String(item?.archiveId || "")).filter(Boolean));
+  for (let index = 0; index < Math.max(beforeArchives.length, afterArchives.length); index += 1) {
+    const beforeOrders = Array.isArray(beforeArchives[index]?.orders) ? beforeArchives[index].orders : [];
+    const afterOrders = Array.isArray(afterArchives[index]?.orders) ? afterArchives[index].orders : [];
+    if (!isDeepStrictEqual(beforeOrders, afterOrders.slice(0, beforeOrders.length))) {
+      throw httpError(500, "The all-workspace report repair attempted to rewrite existing report history and stopped.");
+    }
+    if (afterOrders.length > beforeOrders.length && !repairedArchiveIds.has(String(afterArchives[index]?.id || ""))) {
+      throw httpError(500, "The all-workspace report repair attempted to change an unplanned report and stopped.");
+    }
+  }
+  const repairedKeys = new Set();
+  for (const item of result.repaired || []) {
+    const key = [item?.archiveId, item?.orderId, item?.journal].map((value) => String(value || "")).join(":");
+    if (repairedKeys.has(key)) throw httpError(500, "The all-workspace report repair found a duplicate candidate and stopped.");
+    repairedKeys.add(key);
+  }
+  const secondPass = backfillAllClosedActorOrderSnapshots(result.state);
+  if (secondPass.repairedCount !== 0 || !isDeepStrictEqual(secondPass.state, result.state)) {
+    throw httpError(500, "The all-workspace report repair could not prove an idempotent result and stopped.");
+  }
+}
+
+function ownerOrderArchiveRepairPlan(db) {
+  const workspacePlans = (Array.isArray(db?.workspaces) ? db.workspaces : [])
+    .slice()
+    .sort((left, right) => String(left?.id || "").localeCompare(String(right?.id || "")))
+    .map((workspace) => {
+      const workspaceId = String(workspace?.id || "");
+      const state = db.appStates?.[workspaceId] || {};
+      const revision = workspaceStateRevision(db, workspaceId);
+      const result = backfillAllClosedActorOrderSnapshots(state);
+      const repaired = (result.repaired || []).slice().sort((left, right) =>
+        [left.archiveId, left.orderId, left.journal].join(":").localeCompare([right.archiveId, right.orderId, right.journal].join(":"))
+      );
+      const blockedActors = (result.blockedActors || []).map((item) => ({
+        actorId: String(item?.actorId || ""),
+        actor: String(item?.actor || item?.actorName || ""),
+        skippedCount: Number(item?.skippedCount || 0),
+        orphanCount: Number(item?.orphanCount || 0),
+      })).sort((left, right) => [left.actorId, left.actor].join(":").localeCompare([right.actorId, right.actor].join(":")));
+      const workspacePlanDigest = crypto.createHash("sha256").update(JSON.stringify({
+        workspaceId,
+        revision,
+        repaired,
+        blockedActors,
+        closedActorCount: Number(result.closedActorCount || 0),
+        unclosedActorCount: Number(result.unclosedActorCount || 0),
+      })).digest("hex");
+      const repairedActorCount = new Set(repaired.map((item) => String(item.actorId || item.actor || "")).filter(Boolean)).size;
+      return {
+        workspaceId,
+        workspaceName: String(workspace?.name || "Workspace"),
+        masterName: workspaceOwnerSubscription(db, workspace).ownerName,
+        revision,
+        workspacePlanDigest,
+        result,
+        repaired,
+        blockedActors,
+        candidateCount: Number(result.repairedCount || 0),
+        repairedActorCount,
+        blockedActorCount: Number(result.blockedActorCount || blockedActors.length || 0),
+        closedActorCount: Number(result.closedActorCount || 0),
+        unclosedActorCount: Number(result.unclosedActorCount || 0),
+      };
+    });
+  const planDigest = crypto.createHash("sha256").update(JSON.stringify(workspacePlans.map((plan) => ({
+    workspaceId: plan.workspaceId,
+    revision: plan.revision,
+    workspacePlanDigest: plan.workspacePlanDigest,
+  })))).digest("hex");
+  const revisionDigest = crypto.createHash("sha256").update(JSON.stringify(workspacePlans.map((plan) => [
+    plan.workspaceId,
+    plan.revision,
+  ]))).digest("hex");
+  const candidateCount = workspacePlans.reduce((total, plan) => total + plan.candidateCount, 0);
+  return {
+    workspacePlans,
+    planDigest,
+    revisionDigest,
+    candidateCount,
+    eligibleWorkspaceCount: workspacePlans.filter((plan) => plan.candidateCount > 0).length,
+    affectedActorCount: workspacePlans.reduce((total, plan) => total + plan.repairedActorCount, 0),
+    blockedActorCount: workspacePlans.reduce((total, plan) => total + plan.blockedActorCount, 0),
+    closedActorCount: workspacePlans.reduce((total, plan) => total + plan.closedActorCount, 0),
+    unclosedActorCount: workspacePlans.reduce((total, plan) => total + plan.unclosedActorCount, 0),
+  };
+}
+
+function publicOwnerOrderArchiveRepairPlan(plan) {
+  return {
+    planDigest: plan.planDigest,
+    candidateCount: plan.candidateCount,
+    eligibleWorkspaceCount: plan.eligibleWorkspaceCount,
+    affectedActorCount: plan.affectedActorCount,
+    blockedActorCount: plan.blockedActorCount,
+    closedActorCount: plan.closedActorCount,
+    unclosedActorCount: plan.unclosedActorCount,
+    privateBackupReady: r2Configured,
+    canApply: plan.candidateCount > 0 && r2Configured,
+    workspaces: plan.workspacePlans.map((workspace) => ({
+      workspace: workspace.workspaceName,
+      master: workspace.masterName,
+      candidateCount: workspace.candidateCount,
+      affectedActorCount: workspace.repairedActorCount,
+      blockedActorCount: workspace.blockedActorCount,
+      closedActorCount: workspace.closedActorCount,
+      unclosedActorCount: workspace.unclosedActorCount,
+    })),
+  };
+}
+
 async function createOrderArchiveRepairBackup(rawDatabase, { workspaceId, revision, planDigest }) {
   if (!r2Client) throw httpError(503, "Private backup storage is unavailable, so no report data was changed.");
   const createdAt = new Date().toISOString();
@@ -1783,6 +1912,13 @@ async function createOrderArchiveRepairBackup(rawDatabase, { workspaceId, revisi
   if (!storedPayload.equals(Buffer.from(payload))) {
     throw httpError(503, "The encrypted private backup could not be verified, so no report data was changed.");
   }
+  const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
+  decipher.setAAD(additionalData);
+  decipher.setAuthTag(cipher.getAuthTag());
+  const restoredDatabase = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+  if (!restoredDatabase.equals(rawDatabase) || crypto.createHash("sha256").update(restoredDatabase).digest("hex") !== sourceSha256) {
+    throw httpError(503, "The encrypted private backup could not be restored and verified, so no report data was changed.");
+  }
   return { repairId, createdAt, sourceSha256, localBackupName, objectKey };
 }
 
@@ -1818,6 +1954,60 @@ async function applyOrderArchiveRepair(session, input = {}) {
       orphanCount: plan.orphanCount,
       actor: target.actorName,
       revision: nextRevision,
+      backup: {
+        repairId: backup.repairId,
+        createdAt: backup.createdAt,
+        sourceSha256: backup.sourceSha256,
+        offsite: true,
+      },
+    };
+  });
+}
+
+async function applyOwnerOrderArchiveRepairs(input = {}) {
+  return enqueueDbWrite(async () => {
+    const rawDatabase = await readFile(dbPath);
+    const latestDb = { ...blankDb(), ...JSON.parse(rawDatabase.toString("utf8")) };
+    const plan = ownerOrderArchiveRepairPlan(latestDb);
+    const expectedCount = Number(input.expectedCount);
+    if (!Number.isSafeInteger(expectedCount) || expectedCount <= 0) {
+      throw httpError(400, "Check all closed reports before applying a repair.");
+    }
+    if (String(input.planDigest || "") !== plan.planDigest || expectedCount !== plan.candidateCount) {
+      throw httpError(409, "One or more workspaces changed after the repair check. Check all closed reports again before restoring them.");
+    }
+    const eligiblePlans = plan.workspacePlans.filter((workspace) => workspace.candidateCount > 0);
+    for (const workspace of eligiblePlans) {
+      validateWorkspaceWideOrderArchiveRepair(latestDb.appStates?.[workspace.workspaceId] || {}, workspace.result);
+    }
+    const backup = await createOrderArchiveRepairBackup(rawDatabase, {
+      workspaceId: "all-workspaces",
+      revision: plan.revisionDigest,
+      planDigest: plan.planDigest,
+    });
+    latestDb.appStates ||= {};
+    const revisions = {};
+    for (const workspace of eligiblePlans) {
+      latestDb.appStates[workspace.workspaceId] = workspace.result.state;
+      revisions[workspace.workspaceId] = markWorkspaceStateChanged(latestDb, workspace.workspaceId, workspace.result.state);
+    }
+    const serializedCheck = JSON.parse(JSON.stringify(latestDb));
+    for (const workspace of eligiblePlans) {
+      const secondPass = backfillAllClosedActorOrderSnapshots(serializedCheck.appStates?.[workspace.workspaceId] || {});
+      if (secondPass.repairedCount !== 0) {
+        throw httpError(500, "The restored database did not pass its final idempotency check, so no report data was changed.");
+      }
+    }
+    await writePersistedDbAtomic(latestDb);
+    return {
+      ok: true,
+      restoredCount: plan.candidateCount,
+      workspaceCount: plan.eligibleWorkspaceCount,
+      actorCount: plan.affectedActorCount,
+      blockedActorCount: plan.blockedActorCount,
+      closedActorCount: plan.closedActorCount,
+      unclosedActorCount: plan.unclosedActorCount,
+      revisions,
       backup: {
         repairId: backup.repairId,
         createdAt: backup.createdAt,
@@ -2575,6 +2765,21 @@ async function handleApi(request, response, url) {
     return;
   }
 
+  if (url.pathname === "/api/owner/repair-order-archives/plan-all" && method === "POST") {
+    if (!requireOwner(session, response)) return;
+    const plan = ownerOrderArchiveRepairPlan(db);
+    sendJson(response, 200, publicOwnerOrderArchiveRepairPlan(plan));
+    return;
+  }
+
+  if (url.pathname === "/api/owner/repair-order-archives/apply-all" && method === "POST") {
+    if (!requireOwner(session, response)) return;
+    const body = await readJson(request);
+    const result = await applyOwnerOrderArchiveRepairs(body);
+    sendJson(response, 200, result);
+    return;
+  }
+
   if (url.pathname === "/api/owner/masters" && method === "POST") {
     if (!requireOwner(session, response)) return;
     const body = await readJson(request);
@@ -2839,7 +3044,7 @@ async function handleApi(request, response, url) {
   }
 
   if (url.pathname === "/api/app-state/version" && method === "GET") {
-    sendJson(response, 200, { revision: workspaceStateRevision(db, session.workspace.id), clientReleaseId: "cancelled-order-close-v1" });
+    sendJson(response, 200, { revision: workspaceStateRevision(db, session.workspace.id), clientReleaseId: "global-order-archive-repair-v1" });
     return;
   }
 
