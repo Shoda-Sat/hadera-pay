@@ -138,6 +138,9 @@ test("Owner can safely plan and atomically repair closed reports across workspac
 
   assert.equal(index, preview, "The deployed web entry points must stay identical.");
   assert.match(server, /backfillAllClosedActorOrderSnapshots/);
+  assert.match(server, /orderArchiveRepairEvidenceDigest[\s\S]*archives[\s\S]*ORDER_PAYMENT/);
+  assert.match(server, /owner-order-archive-repair-v2/);
+  assert.match(server, /plannedOrderArchiveAdditions[\s\S]*plannedAdditions/);
   assert.match(server, /\/api\/owner\/repair-order-archives\/plan-all[\s\S]*requireOwner/);
   assert.match(server, /\/api\/owner\/repair-order-archives\/apply-all[\s\S]*requireOwner/);
   assert.match(server, /applyOwnerOrderArchiveRepairs[\s\S]*enqueueDbWrite/);
@@ -222,6 +225,38 @@ test("Owner plan scans multiple workspaces, skips unclosed Actors, and Master ca
     assert.equal(plan.data.privateBackupReady, false);
     assert.equal(plan.data.canApply, false);
 
+    const beforeHarmlessSave = await requestOk(baseUrl, "/api/app-state", { cookie: masterSessions[0] });
+    const harmlessState = structuredClone(beforeHarmlessSave.data.state);
+    harmlessState.orders.push({
+      id: "ORD-LIVE-ACTIVITY",
+      internalOrderId: "ORD-LIVE-ACTIVITY",
+      broker: "Broker 1",
+      brokerActorId: "ACT-BROKER-1",
+      state: "Pending Forward",
+    });
+    harmlessState.ledger.push({
+      journal: "JRN-LIVE-ACTIVITY",
+      orderId: "ORD-LIVE-ACTIVITY",
+      source: "ORDER_PAYMENT",
+      account: "Payer 1 ACTOR_CLEARING",
+      direction: "Credit",
+      currency: "USD",
+      amountMinor: 123,
+      archived: false,
+    });
+    await requestOk(baseUrl, "/api/app-state", {
+      cookie: masterSessions[0],
+      method: "PUT",
+      body: { state: harmlessState, expectedRevision: beforeHarmlessSave.data.revision },
+    });
+    const afterHarmlessSavePlan = await requestOk(baseUrl, "/api/owner/repair-order-archives/plan-all", {
+      cookie: owner.cookie,
+      method: "POST",
+      body: {},
+    });
+    assert.equal(afterHarmlessSavePlan.data.planDigest, plan.data.planDigest, "A revision-only save must not invalidate the repair evidence.");
+    assert.equal(afterHarmlessSavePlan.data.candidateCount, plan.data.candidateCount);
+
     const staleApply = await request(baseUrl, "/api/owner/repair-order-archives/apply-all", {
       cookie: owner.cookie,
       method: "POST",
@@ -235,6 +270,51 @@ test("Owner plan scans multiple workspaces, skips unclosed Actors, and Master ca
       body: { expectedCount: plan.data.candidateCount, planDigest: plan.data.planDigest },
     });
     assert.equal(noBackupApply.response.status, 503);
+
+    const beforeArchivedEvidenceChange = await requestOk(baseUrl, "/api/app-state", { cookie: masterSessions[0] });
+    const archivedEvidenceState = structuredClone(beforeArchivedEvidenceChange.data.state);
+    archivedEvidenceState.ledger.push({
+      journal: "JRN-ARCHIVED-WITHOUT-CLOSE",
+      orderId: "ORD-ARCHIVED-WITHOUT-CLOSE",
+      source: "ORDER_PAYMENT",
+      account: "Broker 1 ACTOR_CLEARING",
+      direction: "Debit",
+      currency: "USD",
+      amountMinor: 321,
+      archived: true,
+    });
+    await requestOk(baseUrl, "/api/app-state", {
+      cookie: masterSessions[0],
+      method: "PUT",
+      body: { state: archivedEvidenceState, expectedRevision: beforeArchivedEvidenceChange.data.revision },
+    });
+    const archivedEvidenceApply = await request(baseUrl, "/api/owner/repair-order-archives/apply-all", {
+      cookie: owner.cookie,
+      method: "POST",
+      body: { expectedCount: plan.data.candidateCount, planDigest: plan.data.planDigest },
+    });
+    assert.equal(archivedEvidenceApply.response.status, 409, "Every archived payment-evidence change must require a fresh preview.");
+    const afterArchivedEvidencePlan = await requestOk(baseUrl, "/api/owner/repair-order-archives/plan-all", {
+      cookie: owner.cookie,
+      method: "POST",
+      body: {},
+    });
+
+    const beforeEvidenceChange = await requestOk(baseUrl, "/api/app-state", { cookie: masterSessions[0] });
+    const changedEvidenceState = structuredClone(beforeEvidenceChange.data.state);
+    changedEvidenceState.archives[0].orders[0].remarks = "Relevant archived evidence changed";
+    await requestOk(baseUrl, "/api/app-state", {
+      cookie: masterSessions[0],
+      method: "PUT",
+      body: { state: changedEvidenceState, expectedRevision: beforeEvidenceChange.data.revision },
+    });
+    const changedEvidenceApply = await request(baseUrl, "/api/owner/repair-order-archives/apply-all", {
+      cookie: owner.cookie,
+      method: "POST",
+      body: { expectedCount: afterArchivedEvidencePlan.data.candidateCount, planDigest: afterArchivedEvidencePlan.data.planDigest },
+    });
+    assert.equal(changedEvidenceApply.response.status, 409, "Archived order evidence changes must require a fresh preview.");
+
     for (const cookie of masterSessions) {
       const after = await requestOk(baseUrl, "/api/app-state", { cookie });
       const brokerArchive = after.data.state.archives.find((archive) => String(archive.id || "").startsWith("ARC-BROKER-"));

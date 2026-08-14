@@ -1780,7 +1780,70 @@ function validateWorkspaceWideOrderArchiveRepair(beforeState, result) {
   }
 }
 
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value)
+      .filter((key) => value[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(",")}}`;
+  }
+  const encoded = JSON.stringify(value);
+  return encoded === undefined ? "null" : encoded;
+}
+
+function orderArchiveRepairEvidenceDigest(state) {
+  const evidence = {
+    actors: (Array.isArray(state?.actors) ? state.actors : []).map((actor) => ({
+      id: actor?.id,
+      name: actor?.name,
+      role: actor?.role,
+      active: actor?.active,
+    })),
+    archives: (Array.isArray(state?.archives) ? state.archives : []).map((archive) => ({
+      id: archive?.id,
+      actor: archive?.actor,
+      actorId: archive?.actorId,
+      actorRole: archive?.actorRole,
+      kind: archive?.kind,
+      closedAt: archive?.closedAt,
+      orders: Array.isArray(archive?.orders) ? archive.orders : [],
+    })),
+    ledger: (Array.isArray(state?.ledger) ? state.ledger : [])
+      .filter((line) => line?.source === "ORDER_PAYMENT" && line?.archived === true)
+      .map((line) => ({
+        journal: line?.journal,
+        orderId: line?.orderId,
+        source: line?.source,
+        account: line?.account,
+        direction: line?.direction,
+        currency: line?.currency,
+        amountMinor: line?.amountMinor,
+        archived: line?.archived,
+        closedAt: line?.closedAt,
+      })),
+  };
+  return crypto.createHash("sha256").update(canonicalJson(evidence)).digest("hex");
+}
+
+function plannedOrderArchiveAdditions(beforeState, result) {
+  const beforeArchives = Array.isArray(beforeState?.archives) ? beforeState.archives : [];
+  const afterArchives = Array.isArray(result?.state?.archives) ? result.state.archives : [];
+  return afterArchives.flatMap((archive, archiveIndex) => {
+    const beforeCount = Array.isArray(beforeArchives[archiveIndex]?.orders) ? beforeArchives[archiveIndex].orders.length : 0;
+    const afterOrders = Array.isArray(archive?.orders) ? archive.orders : [];
+    return afterOrders.slice(beforeCount).map((order, additionIndex) => ({
+      archiveIndex,
+      archiveId: String(archive?.id || ""),
+      additionIndex,
+      order,
+    }));
+  });
+}
+
 function ownerOrderArchiveRepairPlan(db) {
+  const planSchema = "owner-order-archive-repair-v2";
   const workspacePlans = (Array.isArray(db?.workspaces) ? db.workspaces : [])
     .slice()
     .sort((left, right) => String(left?.id || "").localeCompare(String(right?.id || "")))
@@ -1789,6 +1852,8 @@ function ownerOrderArchiveRepairPlan(db) {
       const state = db.appStates?.[workspaceId] || {};
       const revision = workspaceStateRevision(db, workspaceId);
       const result = backfillAllClosedActorOrderSnapshots(state);
+      const evidenceDigest = orderArchiveRepairEvidenceDigest(state);
+      const plannedAdditions = plannedOrderArchiveAdditions(state, result);
       const repaired = (result.repaired || []).slice().sort((left, right) =>
         [left.archiveId, left.orderId, left.journal].join(":").localeCompare([right.archiveId, right.orderId, right.journal].join(":"))
       );
@@ -1798,9 +1863,11 @@ function ownerOrderArchiveRepairPlan(db) {
         skippedCount: Number(item?.skippedCount || 0),
         orphanCount: Number(item?.orphanCount || 0),
       })).sort((left, right) => [left.actorId, left.actor].join(":").localeCompare([right.actorId, right.actor].join(":")));
-      const workspacePlanDigest = crypto.createHash("sha256").update(JSON.stringify({
+      const workspacePlanDigest = crypto.createHash("sha256").update(canonicalJson({
+        planSchema,
         workspaceId,
-        revision,
+        evidenceDigest,
+        plannedAdditions,
         repaired,
         blockedActors,
         closedActorCount: Number(result.closedActorCount || 0),
@@ -1812,6 +1879,8 @@ function ownerOrderArchiveRepairPlan(db) {
         workspaceName: String(workspace?.name || "Workspace"),
         masterName: workspaceOwnerSubscription(db, workspace).ownerName,
         revision,
+        evidenceDigest,
+        plannedAdditions,
         workspacePlanDigest,
         result,
         repaired,
@@ -1823,11 +1892,13 @@ function ownerOrderArchiveRepairPlan(db) {
         unclosedActorCount: Number(result.unclosedActorCount || 0),
       };
     });
-  const planDigest = crypto.createHash("sha256").update(JSON.stringify(workspacePlans.map((plan) => ({
-    workspaceId: plan.workspaceId,
-    revision: plan.revision,
-    workspacePlanDigest: plan.workspacePlanDigest,
-  })))).digest("hex");
+  const planDigest = crypto.createHash("sha256").update(canonicalJson({
+    planSchema,
+    workspaces: workspacePlans.map((plan) => ({
+      workspaceId: plan.workspaceId,
+      workspacePlanDigest: plan.workspacePlanDigest,
+    })),
+  })).digest("hex");
   const revisionDigest = crypto.createHash("sha256").update(JSON.stringify(workspacePlans.map((plan) => [
     plan.workspaceId,
     plan.revision,
@@ -3044,7 +3115,7 @@ async function handleApi(request, response, url) {
   }
 
   if (url.pathname === "/api/app-state/version" && method === "GET") {
-    sendJson(response, 200, { revision: workspaceStateRevision(db, session.workspace.id), clientReleaseId: "global-order-archive-repair-v1" });
+    sendJson(response, 200, { revision: workspaceStateRevision(db, session.workspace.id), clientReleaseId: "global-order-archive-repair-v2" });
     return;
   }
 
