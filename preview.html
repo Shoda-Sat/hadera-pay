@@ -3635,6 +3635,22 @@
                 </div>
               </div>
             </div>
+            <div class="panel span-12">
+              <div class="panel-header">
+                <div>
+                  <h2>Order Identity Check</h2>
+                  <small>Check pending routing orders for a Broker-name/code mismatch or duplicate copies. This check never changes an order.</small>
+                </div>
+                <span id="ownerOrderIntegrityStatus" class="state-pill">Ready to check</span>
+              </div>
+              <div class="panel-body">
+                <p id="ownerOrderIntegritySummary" class="muted">Only pending routing orders are checked; customer and account details are not displayed.</p>
+                <div id="ownerOrderIntegrityDetails" class="muted"></div>
+                <div class="actions">
+                  <button class="btn primary" id="ownerOrderIntegrityButton" type="button">Check Pending Orders</button>
+                </div>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -5584,6 +5600,10 @@
       ownerOrderArchiveRepairStatus: document.getElementById("ownerOrderArchiveRepairStatus"),
       ownerOrderArchiveRepairSummary: document.getElementById("ownerOrderArchiveRepairSummary"),
       ownerOrderArchiveRepairButton: document.getElementById("ownerOrderArchiveRepairButton"),
+      ownerOrderIntegrityStatus: document.getElementById("ownerOrderIntegrityStatus"),
+      ownerOrderIntegritySummary: document.getElementById("ownerOrderIntegritySummary"),
+      ownerOrderIntegrityDetails: document.getElementById("ownerOrderIntegrityDetails"),
+      ownerOrderIntegrityButton: document.getElementById("ownerOrderIntegrityButton"),
       inviteRows: document.getElementById("inviteRows"),
       inviteForm: document.getElementById("inviteForm"),
       inviteRole: document.getElementById("inviteRole"),
@@ -15453,6 +15473,35 @@
     }
 
     els.ownerOrderArchiveRepairButton?.addEventListener("click", checkAllOrderArchiveRepairs);
+
+    async function checkPendingOrderIntegrity() {
+      if (!signedInAsOwner() || !els.ownerOrderIntegrityButton || els.ownerOrderIntegrityButton.disabled) return;
+      els.ownerOrderIntegrityButton.disabled = true;
+      els.ownerOrderIntegrityButton.textContent = "Checking...";
+      els.ownerOrderIntegrityStatus.textContent = "Checking pending orders...";
+      els.ownerOrderIntegrityStatus.className = "state-pill";
+      try {
+        const result = await api("/api/owner/order-integrity/plan");
+        const issues = Array.isArray(result.issues) ? result.issues : [];
+        els.ownerOrderIntegritySummary.textContent = issues.length
+          ? `${issues.length} order identity issue${issues.length === 1 ? "" : "s"} found; ${Number(result.extraCopyCount || 0)} extra cop${Number(result.extraCopyCount || 0) === 1 ? "y" : "ies"}.`
+          : "No Broker-name/code mismatch or duplicate pending routing order was found.";
+        els.ownerOrderIntegrityDetails.textContent = issues.map((issue) =>
+          `${issue.workspace} · ${issue.actor} · ${issue.orderNumber} (expected ${issue.expectedPrefix}...) · ${issue.count} cop${issue.count === 1 ? "y" : "ies"} · ${issue.safeAutoRepair ? "safe cleanup candidate" : "manual review required"}`
+        ).join("\n");
+        els.ownerOrderIntegrityStatus.textContent = issues.length ? `${issues.length} found` : "All clear";
+        els.ownerOrderIntegrityStatus.className = `state-pill ${issues.length ? "warn" : "good"}`;
+      } catch (error) {
+        els.ownerOrderIntegrityStatus.textContent = "Check failed";
+        els.ownerOrderIntegrityStatus.className = "state-pill danger";
+        notifyEvent("Order check failed", error.message || "Pending orders could not be checked.");
+      } finally {
+        els.ownerOrderIntegrityButton.disabled = false;
+        els.ownerOrderIntegrityButton.textContent = "Check Pending Orders";
+      }
+    }
+
+    els.ownerOrderIntegrityButton?.addEventListener("click", checkPendingOrderIntegrity);
 
 
     function setOrderArchiveRepairStatus(message, tone = "") {
