@@ -84,6 +84,7 @@ export interface ApiSession {
 
 export interface ActorRecord {
   id: string;
+  workspaceId?: string;
   name: string;
   role: ActorRole;
   currency: Currency;

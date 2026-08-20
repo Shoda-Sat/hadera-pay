@@ -5490,6 +5490,30 @@
       state.selectedActorId = membership.actorId;
     }
 
+    function notifyWorkspaceIsolationRepair() {
+      if (currentAuth?.membership?.role !== "Master") return;
+      const repair = (state.workspaceIsolationRepairs || []).find((item) =>
+        item?.id === "siem-galaxy-workspace-isolation-v1"
+      );
+      if (!repair || Number(repair.leakedActorCount || 0) <= 0) return;
+      const noticeKey = `haderapay.workspace-isolation-notice.${currentAuth.workspace?.id || "workspace"}.${repair.appliedAt || "repair"}`;
+      try {
+        if (sessionStorage.getItem(noticeKey)) return;
+        sessionStorage.setItem(noticeKey, "shown");
+      } catch {
+        // A blocked browser store should not hide an important accounting notice.
+      }
+      const actorCount = Number(repair.leakedActorCount || 0);
+      const ledgerCount = Number(repair.removedLedgerLineCount || 0);
+      const balanceMessage = repair.balanceMerged === true
+        ? `${ledgerCount} copied active ledger line${ledgerCount === 1 ? " was" : "s were"} removed and Galaxy's balances were recalculated.`
+        : "No active ledger lines were connected to them, so the balances were not merged.";
+      notifyEvent(
+        "Workspace separation fixed",
+        `${actorCount} Siem actor profile${actorCount === 1 ? "" : "s"} removed from Galaxy. ${balanceMessage} Closed reports were unchanged.`
+      );
+    }
+
     async function applyAuthSession(session) {
       endingAuthSession = false;
       currentAuth = session;
@@ -5528,6 +5552,7 @@
       document.documentElement.classList.remove("auth-locked");
       document.body.classList.remove("auth-locked");
       renderAll();
+      notifyWorkspaceIsolationRepair();
       setView(viewFromLocation() || state.activeView, { historyMode: "replace" });
     }
 
@@ -15820,6 +15845,7 @@
       const hasSpecialPayout = actorHasSpecialPayout(roleInput.value);
       state.actors.push({
         id: nextManagedActorId(),
+        workspaceId: currentAuth?.workspace?.id || "",
         name,
         role: roleInput.value,
         currency: currencyInput.value,

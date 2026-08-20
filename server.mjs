@@ -9,10 +9,17 @@ import {
   backfillClosedParticipantOrderSnapshots,
 } from "./src/archiveParticipantBackfill.mjs";
 import { closeActorBalance } from "./src/closeActorBalance.mjs";
-import { removeExactDuplicateOrders } from "./src/exactDuplicateOrderCleanup.mjs";
+import {
+  recalculateSettlementsFromLedger,
+  removeExactDuplicateOrders,
+} from "./src/exactDuplicateOrderCleanup.mjs";
 import { removeGalaxySpecifiedOpenOrders } from "./src/galaxyOrderCleanup.mjs";
 import { repairOrderJournalCollisions } from "./src/orderJournalCollisions.mjs";
 import { retainOrdersForOpenParticipants } from "./src/orderParticipantRetention.mjs";
+import {
+  repairSiemActorsLeakedIntoGalaxy,
+  stateDeclaresAnotherWorkspace,
+} from "./src/workspaceIsolation.mjs";
 import {
   findPendingOrderIntegrityIssues,
   nextBrokerOrderNumberForActor,
@@ -961,6 +968,7 @@ function workspaceActors(db, workspaceId) {
       transferMode: "master",
       incomeStatementVisible: true,
       managedByMaster: false,
+      workspaceId,
     }));
 }
 
@@ -1606,7 +1614,11 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
     new Date(incomingState.chatHistoryResetAt || 0).getTime() || 0
   );
   activeActorIds.forEach((actorId) => deletedActorIds.delete(actorId));
-  nextState.actors = mergeById(currentState.actors, incomingState.actors);
+  nextState.actors = mergeById(currentState.actors, incomingState.actors)
+    .filter((actor) => {
+      const actorWorkspaceId = String(actor?.workspaceId || "").trim();
+      return !actorWorkspaceId || actorWorkspaceId === workspaceId;
+    });
   nextState.actors = nextState.actors.filter((actor) => !deletedActorIds.has(actor?.id));
   nextState.orders = mergeOrders(currentState.orders, incomingState.orders);
   nextState.orders = removeRecoveredOrderAliases(nextState.orders);
@@ -1636,15 +1648,31 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
     }));
   nextState.actorResetTombstones = actorResetTombstones;
   applyActorResetTombstones(nextState);
+  const isolationRepair = repairSiemActorsLeakedIntoGalaxy(db, workspaceId, nextState);
+  const membershipActorsById = new Map(membershipActors.map((actor) => [actor.id, actor]));
   nextState.actors = mergeById(membershipActors, nextState.actors)
-    .map((actor) => ({
-      ...actor,
-      managedByMaster: actor?.role !== "Master" && !activeActorIds.has(actor?.id),
-    }));
+    .map((actor) => {
+      const membershipActor = membershipActorsById.get(actor?.id);
+      const canonicalActor = membershipActor
+        ? {
+            ...actor,
+            name: membershipActor.name,
+            role: membershipActor.role,
+            currency: membershipActor.currency,
+            workingCurrencies: membershipActor.workingCurrencies,
+            active: true,
+          }
+        : actor;
+      return {
+        ...canonicalActor,
+        managedByMaster: canonicalActor?.role !== "Master" && !activeActorIds.has(canonicalActor?.id),
+        workspaceId,
+      };
+    });
   nextState.actors = nextState.actors.filter((actor) => activeActorIds.has(actor?.id) || !deletedActorIds.has(actor?.id));
-  nextState.deletedActorIds = Array.from(deletedActorIds);
+  nextState.deletedActorIds = Array.from(new Set([...deletedActorIds, ...(nextState.deletedActorIds || [])]));
   nextState.deletedActorNames = [];
-  nextState.deletedChatIds = Array.from(deletedChatIds);
+  nextState.deletedChatIds = Array.from(new Set([...deletedChatIds, ...(nextState.deletedChatIds || [])]));
   nextState.chatHistoryResetAt = chatHistoryResetTime ? new Date(chatHistoryResetTime).toISOString() : "";
   nextState.orderCounter = Math.max(Number(currentState.orderCounter || 0), Number(incomingState.orderCounter || 0), nextOrderNumberFromOrders(nextState.orders) - 1);
   nextState.receivableCounter = Math.max(Number(currentState.receivableCounter || 0), Number(incomingState.receivableCounter || 0), nextReceivableNumberFromReceivables(nextState.receivables) - 1);
@@ -1671,6 +1699,11 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   removeExactDuplicateOrders(nextState);
   const workspaceName = db.workspaces?.find((workspace) => workspace?.id === workspaceId)?.name || "";
   removeGalaxySpecifiedOpenOrders(nextState, workspaceName);
+  if (isolationRepair.repaired) recalculateSettlementsFromLedger(nextState);
+  nextState._workspaceId = workspaceId;
+  if (isolationRepair.repaired) {
+    Object.defineProperty(nextState, "__workspaceIsolationRepairApplied", { value: true, enumerable: false });
+  }
   return nextState;
 }
 
@@ -2183,6 +2216,9 @@ async function applyActorBalanceClose(session, input = {}) {
 
 function sanitizeIncomingWorkspaceState(state, session, db) {
   if (!state || typeof state !== "object") return {};
+  if (stateDeclaresAnotherWorkspace(state, session.workspace.id)) {
+    throw httpError(409, "This saved data belongs to another workspace. Refresh to load the correct Master's data.");
+  }
   const persistedState = db.appStates[session.workspace.id] || {};
   const actorSession = session?.membership?.role === "Actor";
   const actorCanInitiateOrders = actorSession && ["Broker", "Special Broker"].includes(session?.membership?.actorRole);
@@ -2191,6 +2227,7 @@ function sanitizeIncomingWorkspaceState(state, session, db) {
     brokerName: session.membership.actorName,
   } : {});
   const sanitized = { ...state };
+  sanitized._workspaceId = session.workspace.id;
   const persistedActors = new Map((persistedState.actors || []).map((actor) => [actor?.id, actor]));
   const persistedOrders = new Map((persistedState.orders || []).map((order) => [order?.id, order]));
   const sessionActor = actorSession ? persistedActors.get(session.membership.actorId) : null;
@@ -3303,9 +3340,15 @@ async function handleApi(request, response, url) {
   if (url.pathname === "/api/app-state" && method === "GET") {
     const currentState = db.appStates[session.workspace.id] || {};
     const state = mergeWorkspaceState(db, session.workspace.id, currentState);
+    let revision = workspaceStateRevision(db, session.workspace.id);
+    if (state.__workspaceIsolationRepairApplied === true) {
+      const expectedRevision = revision;
+      revision = markWorkspaceStateChanged(db, session.workspace.id, state);
+      await saveDb(db, { replace: true, ...workspaceStateSaveOptions(db, session.workspace.id, expectedRevision) });
+    }
     sendJson(response, 200, {
       state: stripRestrictedCreditReminders(state, session),
-      revision: workspaceStateRevision(db, session.workspace.id),
+      revision,
     });
     return;
   }
