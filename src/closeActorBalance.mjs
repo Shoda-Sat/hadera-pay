@@ -2,6 +2,7 @@ import {
   resolveParticipantOrderForLedgerLine,
   retainOrdersForOpenParticipants,
 } from "./orderParticipantRetention.mjs";
+import { repairOrderJournalCollisions } from "./orderJournalCollisions.mjs";
 
 const supportedCurrencies = ["USD", "ETB", "EUR", "ERN", "SSP", "SDG", "LYD"];
 const currencyDecimalPlaces = { USD: 2, ETB: 0, EUR: 2, ERN: 0, SSP: 2, SDG: 2, LYD: 3 };
@@ -681,7 +682,7 @@ function archiveLedgerLineIsSmart(line) {
 
 function nextJournalNumberFromLedger(state) {
   return asArray(state.ledger).reduce((next, line) => {
-    const match = cleanText(line?.journal).match(/^JRN-(\d+)(?:-|$)/);
+    const match = cleanText(line?.journal).match(/^JRN-(\d+)(?:\s+\(\d+\))?(?:-|$)/);
     return match ? Math.max(next, Number(match[1]) - 999) : next;
   }, 1);
 }
@@ -739,6 +740,7 @@ export function closeActorBalance(workspaceState, options = {}) {
   if (!requestedArchiveId) throw new TypeError("archiveId is required.");
 
   const state = cloneWorkspaceState(workspaceState);
+  repairOrderJournalCollisions(state);
   const actor = selectActor(state, options.actorId, options.actorName);
   const resultActorName = actor?.name || cleanText(options.actorName);
   if (!actor || actor.role === "Master") {

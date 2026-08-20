@@ -1023,13 +1023,24 @@ export function TransfersScreen(props: CommonProps) {
   const targets = transferTargetsFor(session, state);
   const receivingActor = targets.find((target) => target.id === draft.toActorId);
   const payoutCurrencies = actorTransferReceiveCurrencies(receivingActor);
+  const master = isMasterView(session);
   const transfers = useMemo(
     () => state.transfers.filter((item) => isMasterView(session) || item.from === session.actorName || item.to === session.actorName),
     [session, state.transfers]
   );
+  const journalWithdrawalEntries = useMemo(
+    () => state.ledger
+      .filter((line) => line.archived !== true && ["JOURNAL", "WITHDRAWAL"].includes(String(line.source || "")))
+      .filter((line) => master
+        ? String(line.account || "").endsWith(" ACTOR_CLEARING")
+        : line.account === `${session.actorName} ACTOR_CLEARING`
+      )
+      .slice()
+      .sort((left, right) => new Date(right.postedAt || 0).getTime() - new Date(left.postedAt || 0).getTime()),
+    [master, session.actorName, state.ledger]
+  );
   const transferPage = useProgressiveLimit(`${session.actorId}:${session.actorName}`, 20);
   const displayedTransfers = transfers.slice(0, transferPage.limit);
-  const master = isMasterView(session);
   const masterActor = activeActors(state).find((item) => item.role === "Master");
   const [forwardingTransferId, setForwardingTransferId] = useState("");
   const [forwardDrafts, setForwardDrafts] = useState<Record<string, InternalTransferForwardDraft>>({});
@@ -1296,6 +1307,22 @@ export function TransfersScreen(props: CommonProps) {
         {displayedTransfers.length < transfers.length ? (
           <Button label={`Load 20 more transfers (${transfers.length - displayedTransfers.length} remaining)`} variant="secondary" onPress={transferPage.showMore} />
         ) : null}
+      </Panel>
+      <Panel title="Journals & withdrawals" badge={String(journalWithdrawalEntries.length)}>
+        {journalWithdrawalEntries.length ? journalWithdrawalEntries.map((line) => {
+          const type = line.source === "JOURNAL" ? "Journal" : "Withdrawal";
+          const actorName = String(line.account || "").replace(/ ACTOR_CLEARING$/, "") || "Actor";
+          return <View key={`${line.journal || "entry"}-${line.entryId || ""}-${line.account}`} style={styles.recordRow}>
+            <View style={styles.recordMain}>
+              <Text style={styles.primaryLine}>{type} · {line.entryId || line.journal || "Entry"}</Text>
+              <Text style={styles.muted}>Journal: {line.journal || "-"} · Actor: {actorName}</Text>
+              <Text style={styles.amountLine}>{compactAmount(line.currency, majorFromMinor(Number(line.amountMinor || 0), line.currency))} · {line.direction}</Text>
+              {line.details ? <Text style={styles.muted}>{line.details}</Text> : null}
+              {line.postedAt ? <Text style={styles.muted}>{formatDateTime(line.postedAt)}</Text> : null}
+            </View>
+            <Pill label={type} tone={type === "Journal" ? "good" : "warn"} />
+          </View>;
+        }) : <Text style={styles.emptyText}>No journals or withdrawals in this balance period.</Text>}
       </Panel>
     </View>
   );

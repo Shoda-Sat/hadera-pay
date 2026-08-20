@@ -322,6 +322,67 @@ test("conflicting archived snapshots block the second participant close without 
   assert.deepEqual(state, before);
 });
 
+test("a distinct archived journal collision is renamed before the affected balance closes", () => {
+  const state = baseState();
+  const source = paidOrder({
+    id: "ORD-OLD-HIDDEN-ID",
+    internalOrderId: "ORD-OLD-HIDDEN-ID",
+    actor: "PPP",
+    locked: true,
+    archivedAt: closedAt,
+  });
+  state.archives = [
+    {
+      id: "ARC-PPP-FIRST",
+      actor: "PPP",
+      actorId: "ACT-PPP",
+      actorRole: "Broker",
+      closedAt,
+      balances: { EUR: 10_000 },
+      incomeProfitMinor: 321,
+      orders: [source],
+    },
+    {
+      id: "ARC-OTHER",
+      actor: "Other",
+      actorId: "ACT-OTHER",
+      actorRole: "Broker",
+      closedAt: "2026-08-13T19:30:00.000Z",
+      balances: {},
+      incomeProfitMinor: 0,
+      orders: [paidOrder({
+        id: "ORD-OTHER",
+        internalOrderId: "ORD-OTHER",
+        brokerActorId: "ACT-OTHER",
+        broker: "Other",
+        brokerOrderNumber: "OTH-1",
+        agentActorId: "",
+        agent: "Unassigned",
+        journal: "JRN-1826",
+        createdAt: "2026-08-13T16:00:00.000Z",
+        paidAt: "2026-08-13T16:10:00.000Z",
+      })],
+    },
+  ];
+  state.ledger = paidLedger().map((line) => ({
+    ...line,
+    orderId: line.account === "PPP ACTOR_CLEARING" ? "ORD-OLD-HIDDEN-ID" : "ORD-NEW-HIDDEN-ID",
+    ...(line.account === "PPP ACTOR_CLEARING" ? { archived: true, closedAt } : {}),
+  }));
+
+  const result = closeActorBalance(state, {
+    actorId: "ACT-WALTA",
+    cancelledOrderPolicy: "include",
+    closedAt: "2026-08-13T20:00:00.000Z",
+    archiveId: "ARC-WALTA-REPAIRED",
+  });
+
+  assert.equal(result.closed, true);
+  assert.equal(result.state.archives.find((archive) => archive.id === "ARC-PPP-FIRST").orders[0].journal, "JRN-1826");
+  assert.equal(result.state.archives.find((archive) => archive.id === "ARC-OTHER").orders[0].journal, "JRN-1826 (1)");
+  assert.equal(result.state.archives.find((archive) => archive.id === "ARC-WALTA-REPAIRED").orders[0].journal, "JRN-1826");
+});
+
 test("a recreated same-name Actor cannot inherit an old participant's payment balance", () => {
   const state = baseState();
   state.actors = state.actors.map((actor) =>
