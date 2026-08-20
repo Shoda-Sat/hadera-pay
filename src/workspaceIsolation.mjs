@@ -1,6 +1,7 @@
 import { recalculateSettlementsFromLedger } from "./exactDuplicateOrderCleanup.mjs";
 
 export const siemGalaxyIsolationRepairId = "siem-galaxy-workspace-isolation-v1";
+export const explicitlyConfirmedSiemActorsInGalaxy = Object.freeze(["Europe", "Asdc"]);
 
 function clean(value) {
   return String(value ?? "").trim();
@@ -128,10 +129,12 @@ export function repairSiemActorsLeakedIntoGalaxy(db, targetWorkspaceId, state = 
   const sourceFingerprints = new Map(asArray(sourceState.actors)
     .map((actor) => [actorFingerprint(actor), actor])
     .filter(([fingerprint]) => fingerprint));
+  const explicitlyConfirmedNames = new Set(explicitlyConfirmedSiemActorsInGalaxy.map(normalized));
   const leakedActors = asArray(state.actors).filter((actor) => {
     const fingerprint = actorFingerprint(actor);
-    return fingerprint
-      && sourceFingerprints.has(fingerprint)
+    const explicitlyConfirmedManagedActor = actor?.managedByMaster === true
+      && explicitlyConfirmedNames.has(normalized(actor?.name));
+    return (Boolean(fingerprint && sourceFingerprints.has(fingerprint)) || explicitlyConfirmedManagedActor)
       && !targetMembershipProtectsActor(db, targetWorkspaceId, actor);
   });
   const previouslyLeakedNames = new Set(asArray(previousAudit?.leakedActors).map(normalized).filter(Boolean));

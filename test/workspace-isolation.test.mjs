@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  explicitlyConfirmedSiemActorsInGalaxy,
   repairSiemActorsLeakedIntoGalaxy,
   siemGalaxyIsolationRepairId,
   stateDeclaresAnotherWorkspace,
@@ -216,6 +217,43 @@ test("the audit reports when leaked profiles did not merge an active balance", (
   const audit = state.workspaceIsolationRepairs.find((item) => item.id === siemGalaxyIsolationRepairId);
   assert.equal(audit.balanceMerged, false);
   assert.equal(audit.closedReportsChanged, false);
+});
+
+test("Galaxy hides the explicitly confirmed Europe and Asdc profiles even after their settings diverge", () => {
+  const { db, state, siemActor } = fixture();
+  const europeSource = { ...siemActor, id: "ACT-EUROPE", name: "Europe", currency: "USD", orderFixedCommission: { enabled: true, percent: 2 } };
+  const asdcSource = { ...siemActor, id: "ACT-ASDC", name: "Asdc", currency: "EUR", transferMode: "both" };
+  db.appStates["WS-SIEM"].actors = [
+    { id: "ACT-0", name: "Master", role: "Master", currency: "USD" },
+    europeSource,
+    asdcSource,
+  ];
+  state.actors = state.actors.filter((actor) => actor.name !== siemActor.name);
+  state.actors.push(
+    { ...europeSource, currency: "ETB", orderFixedCommission: { enabled: false, percent: 9 } },
+    { ...asdcSource, currency: "SSP", transferMode: "master" },
+  );
+  state.orders = [];
+  state.receivables = [];
+  state.transfers = [];
+  state.savedCustomers = [];
+  state.chatConversations = [];
+  state.ledger = [
+    { journal: "JRN-EUROPE", entryId: "JRN-EUROPE", source: "JOURNAL", account: "Europe ACTOR_CLEARING", direction: "Debit", currency: "USD", amountMinor: 400 },
+    { journal: "JRN-EUROPE", entryId: "JRN-EUROPE", source: "JOURNAL", account: "MASTER_JOURNAL_CLEARING", direction: "Credit", currency: "USD", amountMinor: 400 },
+    { journal: "JRN-ASDC", entryId: "JRN-ASDC", source: "JOURNAL", account: "Asdc ACTOR_CLEARING", direction: "Credit", currency: "EUR", amountMinor: 250 },
+    { journal: "JRN-ASDC", entryId: "JRN-ASDC", source: "JOURNAL", account: "MASTER_JOURNAL_CLEARING", direction: "Debit", currency: "EUR", amountMinor: 250 },
+  ];
+
+  assert.deepEqual(explicitlyConfirmedSiemActorsInGalaxy, ["Europe", "Asdc"]);
+  const result = repairSiemActorsLeakedIntoGalaxy(db, "WS-GALAXY", state);
+  assert.equal(result.repaired, true);
+  assert.deepEqual(new Set(result.leakedActors), new Set(["Europe", "Asdc"]));
+  assert.equal(result.balanceMerged, true);
+  assert.equal(result.removedLedgerLineCount, 4);
+  assert.equal(state.actors.some((actor) => ["europe", "asdc"].includes(actor.name.toLocaleLowerCase())), false);
+  assert.deepEqual(state.ledger, []);
+  assert.equal(state.archives.length, 1, "Closed reports remain untouched.");
 });
 
 test("the web Master receives the balance-isolation result after login", async () => {
