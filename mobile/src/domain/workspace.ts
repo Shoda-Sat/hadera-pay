@@ -215,11 +215,28 @@ export function transferTargetsFor(session: UserSession, state: WorkspaceState):
 
 function nextJournalId(state: WorkspaceState): string {
   const highest = state.ledger.reduce((value, line) => {
-    const match = String(line.journal || "").match(/^JRN-(\d+)$/);
+    const match = String(line.journal || "").match(/^JRN-(\d+)(?:\s+\(\d+\))?$/);
     return match ? Math.max(value, Number(match[1]) - 1000) : value;
   }, 0);
   state.journalCounter = Math.max(Number(state.journalCounter || 0), highest) + 1;
-  return `JRN-${1000 + state.journalCounter}`;
+  const base = `JRN-${1000 + state.journalCounter}`;
+  const hasJournal = (record: { journal?: string; voidJournal?: string; reversalJournal?: string } | undefined, journal: string) =>
+    record?.journal === journal || record?.voidJournal === journal || record?.reversalJournal === journal;
+  const journalInUse = (journal: string) =>
+    state.ledger.some((line) => line.journal === journal)
+    || state.orders.some((order) => hasJournal(order, journal))
+    || state.receivables.some((receivable) => hasJournal(receivable, journal))
+    || state.transfers.some((transfer) => hasJournal(transfer, journal))
+    || state.archives.some((archive) =>
+      (archive.orders || []).some((order) => hasJournal(order, journal))
+      || (archive.receivables || []).some((receivable) => hasJournal(receivable, journal))
+      || (archive.transfers || []).some((transfer) => hasJournal(transfer, journal))
+      || (archive.ledger || []).some((line) => line.journal === journal)
+    );
+  let duplicate = 0;
+  let journal = base;
+  while (journalInUse(journal)) journal = `${base} (${++duplicate})`;
+  return journal;
 }
 
 function nextTransferId(state: WorkspaceState): string {
@@ -243,6 +260,12 @@ export function orderForLedgerLine(state: WorkspaceState, line: LedgerLine): Ord
   if (!String(line.source || "").startsWith("ORDER_")) return undefined;
   const reportedOrders = state.archives.flatMap((archive) => archive.orders || []);
   const candidateOrders = [...state.orders, ...reportedOrders];
+  const exactIdMatch = line.orderId
+    ? candidateOrders.find((order) =>
+      order.id === line.orderId || order.internalOrderId === line.orderId || order.collisionSourceOrderId === line.orderId
+    )
+    : undefined;
+  if (exactIdMatch) return exactIdMatch;
   const evidenceJournal = String(line.journal || "").trim();
   if (evidenceJournal) {
     const journalMatch = candidateOrders.find((order) =>

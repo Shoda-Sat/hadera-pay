@@ -195,11 +195,16 @@ export function resolveParticipantOrderForLedgerLine(line, liveOrders = [], arch
   if (!candidates.length) {
     return { order: null, source: "", archive: null, conflict: false, reason: "not-found" };
   }
-  const archived = candidates.filter((candidate) => candidate.source === "archive").map((candidate) => candidate.order);
-  if (archivedSnapshotsConflict(archived) || archivedSnapshotsConflict(candidates.map((candidate) => candidate.order))) {
+  const orderId = clean(line?.orderId);
+  const exactIdCandidates = orderId
+    ? candidates.filter((candidate) => orderStableIds(candidate.order).has(orderId))
+    : [];
+  const resolvedCandidates = exactIdCandidates.length ? exactIdCandidates : candidates;
+  const archived = resolvedCandidates.filter((candidate) => candidate.source === "archive").map((candidate) => candidate.order);
+  if (archivedSnapshotsConflict(archived) || archivedSnapshotsConflict(resolvedCandidates.map((candidate) => candidate.order))) {
     return { order: null, source: "", archive: null, conflict: true, reason: "conflicting-snapshots" };
   }
-  const selected = candidates.slice().sort((left, right) => {
+  const selected = resolvedCandidates.slice().sort((left, right) => {
     if (left.source !== right.source) return left.source === "live" ? -1 : 1;
     return snapshotCompleteness(right.order) - snapshotCompleteness(left.order);
   })[0];

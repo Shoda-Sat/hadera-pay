@@ -3179,6 +3179,15 @@
                 </form>
               </div>
             </div>
+            <div class="panel span-12">
+              <div class="panel-header">
+                <h2>Journals &amp; Withdrawals</h2>
+                <span class="state-pill">Current balance period</span>
+              </div>
+              <div class="panel-body">
+                <div class="transfer-list" id="transferJournalHistory"></div>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -5647,6 +5656,7 @@
       archivePdfActor: document.getElementById("archivePdfActor"),
       archivePdfTime: document.getElementById("archivePdfTime"),
       transferList: document.getElementById("transferList"),
+      transferJournalHistory: document.getElementById("transferJournalHistory"),
       closeMasterTransactionsButton: document.getElementById("closeMasterTransactionsButton"),
       archiveRows: document.getElementById("archiveRows"),
       archiveBalanceSummary: document.getElementById("archiveBalanceSummary"),
@@ -6849,14 +6859,32 @@
 
     function nextJournalNumberFromLedger() {
       return state.ledger.reduce((next, line) => {
-        const match = String(line?.journal || "").match(/^JRN-(\d+)$/);
+        const match = String(line?.journal || "").match(/^JRN-(\d+)(?:\s+\(\d+\))?$/);
         return match ? Math.max(next, Number(match[1]) - 999) : next;
       }, 1);
     }
 
+    function journalIdInUse(journalId) {
+      const hasJournal = (record) => record?.journal === journalId || record?.voidJournal === journalId || record?.reversalJournal === journalId;
+      return state.ledger.some((line) => line?.journal === journalId)
+        || state.orders.some(hasJournal)
+        || state.receivables.some(hasJournal)
+        || state.transfers.some(hasJournal)
+        || state.archives.some((archive) =>
+          (archive.orders || []).some(hasJournal)
+          || (archive.receivables || []).some(hasJournal)
+          || (archive.transfers || []).some(hasJournal)
+          || (archive.ledger || []).some((line) => line?.journal === journalId)
+        );
+    }
+
     function nextJournalId() {
       state.journalCounter = Math.max(Number(state.journalCounter || 0), nextJournalNumberFromLedger() - 1) + 1;
-      return "JRN-" + String(1000 + state.journalCounter);
+      const base = "JRN-" + String(1000 + state.journalCounter);
+      let duplicate = 0;
+      let journalId = base;
+      while (journalIdInUse(journalId)) journalId = `${base} (${++duplicate})`;
+      return journalId;
     }
 
     function nextTransferId() {
@@ -9777,6 +9805,10 @@
       if (!line || !String(line.source || "").startsWith("ORDER_")) return null;
       const reportedOrders = (state.archives || []).flatMap((archive) => archive.orders || []);
       const candidateOrders = [...state.orders, ...reportedOrders];
+      const exactIdMatch = line.orderId && candidateOrders.find((order) =>
+        order.id === line.orderId || order.internalOrderId === line.orderId || order.collisionSourceOrderId === line.orderId
+      );
+      if (exactIdMatch) return exactIdMatch;
       const evidenceJournal = String(line.journal || "").trim();
       if (evidenceJournal) {
         const journalMatch = candidateOrders.find((order) =>
@@ -12508,8 +12540,45 @@
       downloadBlob(new Blob([html], { type: "application/vnd.ms-excel;charset=utf-8" }), `master-bank-statement-${safeFilename(month)}.xls`);
     }
 
+    function transferJournalHistoryLines(actor) {
+      const isMaster = actor?.role === "Master";
+      return activeLedgerLines(state.ledger)
+        .filter((line) => ["JOURNAL", "WITHDRAWAL"].includes(line?.source))
+        .filter((line) => isMaster
+          ? String(line.account || "").endsWith(" ACTOR_CLEARING")
+          : line.account === `${actor?.name} ACTOR_CLEARING`
+        )
+        .sort((left, right) => new Date(right.postedAt || 0).getTime() - new Date(left.postedAt || 0).getTime());
+    }
+
+    function renderTransferJournalHistory(actor) {
+      const lines = transferJournalHistoryLines(actor);
+      if (!lines.length) {
+        els.transferJournalHistory.innerHTML = '<div class="empty">No journals or withdrawals in this balance period.</div>';
+        return;
+      }
+      els.transferJournalHistory.innerHTML = lines.map((line) => {
+        const type = line.source === "JOURNAL" ? "Journal" : "Withdrawal";
+        const actorName = actorNameFromAccount(line.account) || line.account;
+        return `
+          <div class="transfer-row">
+            <div>
+              <div class="transfer-row-title">
+                <strong>${escapeHtml(type)} · ${escapeHtml(line.entryId || line.journal || "Entry")}</strong>
+                <span class="state-pill ${line.source === "JOURNAL" ? "good" : "warn"}">${escapeHtml(line.direction || "")}</span>
+              </div>
+              <span>Journal: ${escapeHtml(line.journal || "-")} · Actor: ${escapeHtml(actorName)}</span>
+              <span>${escapeHtml(displayDate(line.postedAt))} · ${money(line.currency, Number(line.amountMinor || 0))}</span>
+              ${line.details ? `<span>${escapeHtml(line.details)}</span>` : ""}
+            </div>
+          </div>
+        `;
+      }).join("");
+    }
+
     function renderTransfers() {
       const actor = selectedActor();
+      renderTransferJournalHistory(actor);
       const visibleTransfers = actor?.role === "Master"
         ? state.transfers.filter((transfer) => !transfer.masterTransactionClosedAt && !transferBalanceWasClosed(transfer))
         : state.transfers.filter((transfer) =>

@@ -9,6 +9,7 @@ import {
   backfillClosedParticipantOrderSnapshots,
 } from "./src/archiveParticipantBackfill.mjs";
 import { closeActorBalance } from "./src/closeActorBalance.mjs";
+import { repairOrderJournalCollisions } from "./src/orderJournalCollisions.mjs";
 import { retainOrdersForOpenParticipants } from "./src/orderParticipantRetention.mjs";
 import {
   findPendingOrderIntegrityIssues,
@@ -1455,7 +1456,7 @@ function nextWithdrawalNumberFromLedger(ledger = []) {
 
 function nextJournalNumberFromLedger(ledger = []) {
   return ledger.reduce((next, line) => {
-    const match = String(line?.journal || "").match(/^JRN-(\d+)$/);
+    const match = String(line?.journal || "").match(/^JRN-(\d+)(?:\s+\(\d+\))?$/);
     return match ? Math.max(next, Number(match[1]) - 999) : next;
   }, 1);
 }
@@ -1664,6 +1665,7 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
       : transfer
   );
   nextState.journalCounter = Math.max(Number(currentState.journalCounter || 0), Number(incomingState.journalCounter || 0), nextJournalNumberFromLedger(nextState.ledger) - 1);
+  repairOrderJournalCollisions(nextState);
   return nextState;
 }
 
