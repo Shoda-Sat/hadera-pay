@@ -9,6 +9,7 @@ import {
   backfillClosedParticipantOrderSnapshots,
 } from "./src/archiveParticipantBackfill.mjs";
 import { closeActorBalance } from "./src/closeActorBalance.mjs";
+import { removeExactDuplicateOrders } from "./src/exactDuplicateOrderCleanup.mjs";
 import { repairOrderJournalCollisions } from "./src/orderJournalCollisions.mjs";
 import { retainOrdersForOpenParticipants } from "./src/orderParticipantRetention.mjs";
 import {
@@ -1666,6 +1667,7 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   );
   nextState.journalCounter = Math.max(Number(currentState.journalCounter || 0), Number(incomingState.journalCounter || 0), nextJournalNumberFromLedger(nextState.ledger) - 1);
   repairOrderJournalCollisions(nextState);
+  removeExactDuplicateOrders(nextState);
   return nextState;
 }
 
