@@ -4,6 +4,7 @@ import {
 } from "./orderParticipantRetention.mjs";
 import { repairOrderJournalCollisions } from "./orderJournalCollisions.mjs";
 import { removeExactDuplicateOrders } from "./exactDuplicateOrderCleanup.mjs";
+import { removeGalaxySpecifiedOpenOrders } from "./galaxyOrderCleanup.mjs";
 
 const supportedCurrencies = ["USD", "ETB", "EUR", "ERN", "SSP", "SDG", "LYD"];
 const currencyDecimalPlaces = { USD: 2, ETB: 0, EUR: 2, ERN: 0, SSP: 2, SDG: 2, LYD: 3 };
@@ -743,6 +744,7 @@ export function closeActorBalance(workspaceState, options = {}) {
   const state = cloneWorkspaceState(workspaceState);
   repairOrderJournalCollisions(state);
   removeExactDuplicateOrders(state);
+  removeGalaxySpecifiedOpenOrders(state, options.workspaceName);
   const actor = selectActor(state, options.actorId, options.actorName);
   const resultActorName = actor?.name || cleanText(options.actorName);
   if (!actor || actor.role === "Master") {
