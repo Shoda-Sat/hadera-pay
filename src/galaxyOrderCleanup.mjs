@@ -17,6 +17,7 @@ const targetEntries = [
   ["JRN-1252 (2)", ["Habtom"]],
   ["JRN-1252 (1)", ["Habtom"]],
 ];
+const repairPostedAt = "2026-08-20T15:25:50.000Z";
 
 export const galaxyOpenOrderCleanupTargets = Object.freeze(
   targetEntries.map(([journal, actors]) => Object.freeze({ journal, actors: Object.freeze([...actors]) }))
@@ -48,10 +49,20 @@ function actorNameFromAccount(account) {
     : value;
 }
 
+function actorNameMatches(value, allowedActor) {
+  const candidate = normalized(value);
+  const allowed = normalized(allowedActor);
+  return Boolean(
+    candidate && allowed && (
+      candidate === allowed
+      || candidate.split("/")[0].trim() === allowed
+    )
+  );
+}
+
 function orderMatchesActors(order, allowedActors) {
   return [order?.broker, order?.agent]
-    .map(normalized)
-    .some((actorName) => actorName && allowedActors.has(actorName));
+    .some((actorName) => [...allowedActors].some((allowed) => actorNameMatches(actorName, allowed)));
 }
 
 function allOrderRecords(state = {}) {
@@ -70,17 +81,108 @@ function targetMap() {
   ]));
 }
 
+function isGalaxyWorkspace(workspaceName) {
+  const compact = normalized(workspaceName).replace(/[^a-z0-9]+/g, "");
+  return compact === "galaxy" || compact === "galaxyworkspace";
+}
+
+function correctionKey(journal, actorName, currency) {
+  return ["GALAXY-DUPLICATE-ORDER", clean(journal), normalized(actorName), clean(currency)].join(":");
+}
+
+function correctionJournal(journal, actorName, currency) {
+  const safe = (value) => clean(value).toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return `CORR-${safe(journal)}-${safe(actorName)}-${safe(currency)}`;
+}
+
+function currentActorForApprovedName(state, approvedName) {
+  return asArray(state.actors).find((actor) =>
+    actor?.active !== false
+    && clean(actor?.role) !== "Master"
+    && actorNameMatches(actor?.name, approvedName)
+  ) || null;
+}
+
+function archivedCorrectionLines(state, targets) {
+  const ledger = asArray(state.ledger);
+  const existingKeys = new Set(ledger.map((line) => clean(line?.repairKey)).filter(Boolean));
+  const corrections = [];
+
+  targets.forEach((allowedActors, journal) => {
+    allowedActors.forEach((approvedName) => {
+      const actor = currentActorForApprovedName(state, approvedName);
+      if (!actor) return;
+      const balances = new Map();
+      ledger.forEach((line) => {
+        if (
+          line?.archived !== true
+          || clean(line?.source) !== "ORDER_PAYMENT"
+          || clean(line?.journal) !== journal
+          || line?.voided === true
+          || line?.excludedFromCalculations === true
+          || !actorNameMatches(actorNameFromAccount(line?.account), approvedName)
+        ) return;
+        const currency = clean(line?.currency);
+        if (!currency) return;
+        const sign = clean(line?.direction) === "Debit" ? 1 : -1;
+        balances.set(currency, Number(balances.get(currency) || 0) + sign * Number(line?.amountMinor || 0));
+      });
+
+      balances.forEach((netMinor, currency) => {
+        if (!Number.isFinite(netMinor) || netMinor === 0) return;
+        const repairKey = correctionKey(journal, approvedName, currency);
+        if (existingKeys.has(repairKey)) return;
+        const amountMinor = Math.abs(netMinor);
+        const actorDirection = netMinor > 0 ? "Credit" : "Debit";
+        const masterDirection = actorDirection === "Debit" ? "Credit" : "Debit";
+        const correctionId = correctionJournal(journal, approvedName, currency);
+        const details = `Balance correction for duplicate order ${journal}; closed report retained unchanged`;
+        corrections.push(
+          {
+            journal: correctionId,
+            entryId: correctionId,
+            repairKey,
+            source: "DUPLICATE_ORDER_CORRECTION",
+            account: `${actor.name} ACTOR_CLEARING`,
+            direction: actorDirection,
+            currency,
+            amountMinor,
+            details,
+            postedAt: repairPostedAt,
+          },
+          {
+            journal: correctionId,
+            entryId: correctionId,
+            repairKey,
+            source: "DUPLICATE_ORDER_CORRECTION",
+            account: "MASTER_DUPLICATE_ORDER_CORRECTION",
+            direction: masterDirection,
+            currency,
+            amountMinor,
+            details,
+            postedAt: repairPostedAt,
+          }
+        );
+        existingKeys.add(repairKey);
+      });
+    });
+  });
+  return corrections;
+}
+
 /**
- * Applies the explicitly approved Galaxy Workspace repair. Only open ORDER_*
- * accounting is removed. Closed report snapshots, archived ledger rows, and
- * archived receivables remain untouched.
+ * Applies the explicitly approved Galaxy Workspace repair. Open ORDER_* rows
+ * are removed directly. When an approved duplicate is already inside a closed
+ * period, a one-time current-period correction removes its balance effect while
+ * the closed report and every archived row remain unchanged.
  */
 export function removeGalaxySpecifiedOpenOrders(state = {}, workspaceName = "") {
-  if (normalized(workspaceName) !== "galaxy workspace") {
+  if (!isGalaxyWorkspace(workspaceName)) {
     return {
       removedCount: 0,
       removedLedgerLineCount: 0,
       removedReceivableCount: 0,
+      correctionLineCount: 0,
       removedOrderIds: [],
       journals: [],
     };
@@ -107,11 +209,6 @@ export function removeGalaxySpecifiedOpenOrders(state = {}, workspaceName = "") 
     );
     if (!linkedLines.length) return;
 
-    const actorEvidence = matchingRecords.length > 0 || linkedLines.some((line) =>
-      allowedActors.has(normalized(actorNameFromAccount(line?.account)))
-    );
-    if (!actorEvidence) return;
-
     eligibleJournals.add(journal);
     matchingRecordIds.forEach((id) => candidateOrderIds.add(id));
     linkedLines
@@ -120,16 +217,6 @@ export function removeGalaxySpecifiedOpenOrders(state = {}, workspaceName = "") 
       .filter(Boolean)
       .forEach((id) => candidateOrderIds.add(id));
   });
-
-  if (!eligibleJournals.size) {
-    return {
-      removedCount: 0,
-      removedLedgerLineCount: 0,
-      removedReceivableCount: 0,
-      removedOrderIds: [],
-      journals: [],
-    };
-  }
 
   const protectedOrderIds = new Set(
     records
@@ -165,12 +252,20 @@ export function removeGalaxySpecifiedOpenOrders(state = {}, workspaceName = "") 
     ...asArray(state.deletedOrderIds).map(clean).filter(Boolean),
     ...removedOrderIds,
   ]));
-  recalculateSettlementsFromLedger(state);
+  const correctionLines = archivedCorrectionLines(state, targets);
+  if (correctionLines.length) state.ledger.unshift(...correctionLines);
+  const removedCount = ordersBefore.length - state.orders.length;
+  const removedLedgerLineCount = ledgerBefore.length - state.ledger.length + correctionLines.length;
+  const removedReceivableCount = receivablesBefore.length - state.receivables.length;
+  if (removedCount || removedLedgerLineCount || removedReceivableCount || correctionLines.length) {
+    recalculateSettlementsFromLedger(state);
+  }
 
   return {
-    removedCount: ordersBefore.length - state.orders.length,
-    removedLedgerLineCount: ledgerBefore.length - state.ledger.length,
-    removedReceivableCount: receivablesBefore.length - state.receivables.length,
+    removedCount,
+    removedLedgerLineCount,
+    removedReceivableCount,
+    correctionLineCount: correctionLines.length,
     removedOrderIds,
     journals: [...eligibleJournals],
   };

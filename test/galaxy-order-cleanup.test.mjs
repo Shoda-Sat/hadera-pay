@@ -50,7 +50,7 @@ test("Galaxy repair list exactly matches the approved journals and Actors", () =
     { journal: "JRN-1252 (1)", actors: ["Habtom"] },
   ]);
 });
-test("removes only approved open Galaxy journals and rebuilds balances without changing reports", () => {
+test("removes every approved open Galaxy journal and rebuilds balances without changing reports", () => {
   const goitomDuplicate = order("ORD-GOITOM-DUP", "JRN-1648 (1)", "Goitom", "Kampala");
   const habtomDuplicate = order("ORD-HABTOM-DUP", "JRN-1251 (2)", "Habtom", "Remote Payer");
   const wrongActor = order("ORD-WRONG-ACTOR", "JRN-1555 (1)", "Else", "Remote Payer", {
@@ -77,6 +77,8 @@ test("removes only approved open Galaxy journals and rebuilds balances without c
       ...orderLines("ORD-CLOSED", "JRN-2063 (1)", "Goitom", "Nahom", true),
       { orderId: "ORD-WRONG-ACTOR", journal: "JRN-1555 (1)", source: "ORDER_PAYMENT", account: "Else ACTOR_CLEARING", direction: "Debit", currency: "USD", amountMinor: 500 },
       { orderId: "ORD-WRONG-ACTOR", journal: "JRN-1555 (1)", source: "ORDER_PAYMENT", account: "MASTER_FX_CLEARING", direction: "Credit", currency: "USD", amountMinor: 500 },
+      { journal: "JRN-OPENING", source: "PREVIOUS_CLOSE", account: "Goitom ACTOR_CLEARING", direction: "Debit", currency: "USD", amountMinor: 10_000 },
+      { journal: "JRN-OPENING", source: "PREVIOUS_CLOSE", account: "MASTER_PREVIOUS_CLOSE", direction: "Credit", currency: "USD", amountMinor: 10_000 },
       { journal: "JRN-MANUAL", source: "JOURNAL", account: "Goitom ACTOR_CLEARING", direction: "Credit", currency: "USD", amountMinor: 100 },
     ],
     receivables: [
@@ -90,21 +92,22 @@ test("removes only approved open Galaxy journals and rebuilds balances without c
 
   const result = removeGalaxySpecifiedOpenOrders(state, "Galaxy Workspace");
 
-  assert.equal(result.removedCount, 1);
-  assert.equal(result.removedLedgerLineCount, 8);
+  assert.equal(result.removedCount, 2);
+  assert.equal(result.removedLedgerLineCount, 10);
   assert.equal(result.removedReceivableCount, 1);
-  assert.deepEqual(result.journals, ["JRN-1648 (1)", "JRN-1251 (2)"]);
-  assert.deepEqual(new Set(result.removedOrderIds), new Set(["ORD-GOITOM-DUP", "ORD-HABTOM-DUP"]));
+  assert.equal(result.correctionLineCount, 2);
+  assert.deepEqual(result.journals, ["JRN-1648 (1)", "JRN-1555 (1)", "JRN-1251 (2)"]);
+  assert.deepEqual(new Set(result.removedOrderIds), new Set(["ORD-GOITOM-DUP", "ORD-HABTOM-DUP", "ORD-WRONG-ACTOR"]));
   assert.deepEqual(state.archives, reportsBefore);
-  assert.deepEqual(state.orders.map((item) => item.id), ["ORD-WRONG-ACTOR"]);
+  assert.deepEqual(state.orders, []);
   assert.equal(state.ledger.filter((line) => line.journal === "JRN-2063 (1)").length, 4, "Archived closed-order rows remain.");
-  assert.equal(state.ledger.filter((line) => line.journal === "JRN-1555 (1)").length, 2, "A listed journal with the wrong Actor is not removed.");
+  assert.equal(state.ledger.filter((line) => line.journal === "JRN-1555 (1)").length, 0, "The explicit journal list wins over stale participant labels.");
   assert.deepEqual(state.receivables.map((item) => item.id), ["REC-HABTOM-CLOSED"]);
   assert.deepEqual(state.settlements, [
     { actor: "Goitom", currency: "USD", netMinor: -100 },
     { actor: "Kampala", currency: "ETB", netMinor: 0 },
     { actor: "Habtom", currency: "USD", netMinor: 0 },
-    { actor: "Else", currency: "USD", netMinor: 500 },
+    { actor: "Else", currency: "USD", netMinor: 0 },
   ]);
 });
 
@@ -155,4 +158,45 @@ test("a shared hidden ID does not remove the canonical base journal", () => {
     { actor: "PPP", currency: "USD", netMinor: 10_000 },
     { actor: "Nahom", currency: "ETB", netMinor: -1_000_000 },
   ]);
+});
+
+test("archived duplicate amounts receive one active correction without editing the closed period", () => {
+  const closedDuplicate = order("ORD-CLOSED-DUP", "JRN-2041 (1)", "PPP", "Walta");
+  const state = {
+    actors: [
+      { id: "ACT-PPP", name: "PPP", role: "Broker", currency: "USD" },
+      { id: "ACT-WALTA", name: "Walta", role: "Agent", currency: "ETB" },
+    ],
+    orders: [],
+    archives: [{ id: "ARC-CLOSED", actor: "PPP", orders: [closedDuplicate] }],
+    ledger: [
+      ...orderLines("ORD-CLOSED-DUP", "JRN-2041 (1)", "PPP", "Walta", true),
+      { journal: "JRN-OPEN-PPP", source: "PREVIOUS_CLOSE", account: "PPP ACTOR_CLEARING", direction: "Debit", currency: "USD", amountMinor: 10_000 },
+      { journal: "JRN-OPEN-PPP", source: "PREVIOUS_CLOSE", account: "MASTER_PREVIOUS_CLOSE", direction: "Credit", currency: "USD", amountMinor: 10_000 },
+      { journal: "JRN-OPEN-WALTA", source: "PREVIOUS_CLOSE", account: "Walta ACTOR_CLEARING", direction: "Credit", currency: "ETB", amountMinor: 1_000_000 },
+      { journal: "JRN-OPEN-WALTA", source: "PREVIOUS_CLOSE", account: "MASTER_PREVIOUS_CLOSE", direction: "Debit", currency: "ETB", amountMinor: 1_000_000 },
+    ],
+    receivables: [],
+    settlements: [],
+    deletedOrderIds: [],
+  };
+  const reportsBefore = structuredClone(state.archives);
+  const archivedLinesBefore = structuredClone(state.ledger.filter((line) => line.archived === true));
+
+  const result = removeGalaxySpecifiedOpenOrders(state, "Galaxy");
+
+  assert.equal(result.removedLedgerLineCount, 0);
+  assert.equal(result.correctionLineCount, 4);
+  assert.equal(state.ledger.filter((line) => line.source === "DUPLICATE_ORDER_CORRECTION").length, 4);
+  assert.deepEqual(state.archives, reportsBefore);
+  assert.deepEqual(state.ledger.filter((line) => line.archived === true), archivedLinesBefore);
+  assert.deepEqual(state.settlements, [
+    { actor: "PPP", currency: "USD", netMinor: 0 },
+    { actor: "Walta", currency: "ETB", netMinor: 0 },
+  ]);
+
+  const repeated = removeGalaxySpecifiedOpenOrders(state, "Galaxy Workspace");
+  assert.equal(repeated.correctionLineCount, 0);
+  assert.equal(state.ledger.filter((line) => line.source === "DUPLICATE_ORDER_CORRECTION").length, 4);
+  assert.deepEqual(state.archives, reportsBefore);
 });
