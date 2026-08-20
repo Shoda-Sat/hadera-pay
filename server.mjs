@@ -13,7 +13,10 @@ import {
   recalculateSettlementsFromLedger,
   removeExactDuplicateOrders,
 } from "./src/exactDuplicateOrderCleanup.mjs";
-import { removeGalaxySpecifiedOpenOrders } from "./src/galaxyOrderCleanup.mjs";
+import {
+  galaxyLedgerOnlyOrderJournals,
+  removeGalaxySpecifiedOpenOrders,
+} from "./src/galaxyOrderCleanup.mjs";
 import { repairOrderJournalCollisions } from "./src/orderJournalCollisions.mjs";
 import { retainOrdersForOpenParticipants } from "./src/orderParticipantRetention.mjs";
 import {
@@ -1696,8 +1699,10 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   );
   nextState.journalCounter = Math.max(Number(currentState.journalCounter || 0), Number(incomingState.journalCounter || 0), nextJournalNumberFromLedger(nextState.ledger) - 1);
   repairOrderJournalCollisions(nextState);
-  removeExactDuplicateOrders(nextState);
   const workspaceName = db.workspaces?.find((workspace) => workspace?.id === workspaceId)?.name || "";
+  removeExactDuplicateOrders(nextState, {
+    preserveOrderJournals: galaxyLedgerOnlyOrderJournals(workspaceName),
+  });
   removeGalaxySpecifiedOpenOrders(nextState, workspaceName);
   if (isolationRepair.repaired) recalculateSettlementsFromLedger(nextState);
   nextState._workspaceId = workspaceId;

@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  galaxyLedgerOnlyOrderJournals,
+  galaxyNahomLedgerOnlyJournals,
   galaxyOpenOrderCleanupTargets,
   removeGalaxySpecifiedOpenOrders,
 } from "../src/galaxyOrderCleanup.mjs";
+import { removeExactDuplicateOrders } from "../src/exactDuplicateOrderCleanup.mjs";
 
 function order(id, journal, broker, agent, overrides = {}) {
   return {
@@ -149,15 +152,81 @@ test("a shared hidden ID does not remove the canonical base journal", () => {
 
   const result = removeGalaxySpecifiedOpenOrders(state, "Galaxy Workspace");
 
-  assert.equal(result.removedLedgerLineCount, 4);
+  assert.equal(result.removedLedgerLineCount, 2);
   assert.deepEqual(result.removedOrderIds, [], "The canonical order ID is protected from a tombstone.");
-  assert.equal(state.ledger.length, 4);
-  assert.equal(state.ledger.every((line) => line.journal === "JRN-1868"), true);
+  assert.equal(state.ledger.length, 6);
+  assert.equal(state.ledger.filter((line) => line.journal === "JRN-1868 (1)").length, 2, "The other participant's balanced side remains.");
+  assert.equal(state.ledger.filter((line) => line.journal === "JRN-1868").length, 4, "The canonical journal remains complete.");
+  assert.deepEqual(state.orders, [targeted]);
+  assert.deepEqual(state.receivables, [{ id: "REC-TARGET", orderId: "ORD-SHARED", journal: "JRN-1868 (1)" }]);
   assert.deepEqual(state.archives, reportsBefore);
   assert.deepEqual(state.settlements, [
-    { actor: "PPP", currency: "USD", netMinor: 10_000 },
+    { actor: "PPP", currency: "USD", netMinor: 20_000 },
     { actor: "Nahom", currency: "ETB", netMinor: -1_000_000 },
   ]);
+});
+
+test("Nahom's three approved journals lose only Nahom ledger pairs while every order stays unchanged", () => {
+  const duplicates = [
+    order("ORD-1739-DUP", "JRN-1739 (1)", "Goitom", "Nahom"),
+    order("ORD-1868-DUP", "JRN-1868 (1)", "PPP", "Nahom"),
+    order("ORD-2063-DUP", "JRN-2063 (1)", "Goitom", "Nahom"),
+  ];
+  const canonical = duplicates.map((item) => ({
+    ...item,
+    id: item.id.replace("-DUP", "-BASE"),
+    internalOrderId: item.id.replace("-DUP", "-BASE"),
+    journal: item.journal.replace(" (1)", ""),
+  }));
+  const state = {
+    actors: [
+      { id: "ACT-GOITOM", name: "Goitom", role: "Broker", currency: "USD" },
+      { id: "ACT-PPP", name: "PPP", role: "Broker", currency: "USD" },
+      { id: "ACT-NAHOM", name: "Nahom", role: "Agent", currency: "ETB" },
+    ],
+    orders: structuredClone(duplicates),
+    archives: canonical.map((item) => ({ id: `ARC-${item.id}`, actor: item.broker, orders: [item], ledger: [] })),
+    ledger: duplicates.flatMap((item) => orderLines(item.id, item.journal, item.broker, item.agent)),
+    receivables: duplicates.map((item) => ({ id: `REC-${item.id}`, orderId: item.id, journal: item.journal })),
+    settlements: [],
+    deletedOrderIds: duplicates.map((item) => item.id),
+  };
+  const ordersBefore = structuredClone(state.orders);
+  const receivablesBefore = structuredClone(state.receivables);
+  const reportsBefore = structuredClone(state.archives);
+  const completeLedgerBefore = structuredClone(state.ledger);
+
+  assert.deepEqual(galaxyNahomLedgerOnlyJournals, ["JRN-1739 (1)", "JRN-1868 (1)", "JRN-2063 (1)"]);
+  const genericResult = removeExactDuplicateOrders(state, {
+    preserveOrderJournals: galaxyLedgerOnlyOrderJournals("Galaxy Workspace"),
+  });
+  assert.equal(genericResult.removedCount, 0);
+  assert.deepEqual(state.orders, ordersBefore, "The general duplicate cleaner must not delete these orders.");
+  assert.deepEqual(state.receivables, receivablesBefore);
+  assert.deepEqual(state.deletedOrderIds, [], "Old tombstones are cleared for the protected order records.");
+
+  const result = removeGalaxySpecifiedOpenOrders(state, "Galaxy Workspace");
+  assert.equal(result.removedCount, 0);
+  assert.equal(result.removedLedgerLineCount, 6);
+  assert.equal(result.removedReceivableCount, 0);
+  assert.deepEqual(new Set(result.journals), new Set(galaxyNahomLedgerOnlyJournals));
+  assert.deepEqual(state.orders, ordersBefore);
+  assert.deepEqual(state.receivables, receivablesBefore);
+  assert.deepEqual(state.archives, reportsBefore);
+  assert.equal(state.ledger.length, 6);
+  assert.equal(state.ledger.some((line) => line.account === "Nahom ACTOR_CLEARING"), false);
+  assert.equal(state.ledger.every((line) => line.currency === "USD"), true);
+  assert.deepEqual(state.settlements, [
+    { actor: "Goitom", currency: "USD", netMinor: 20_000 },
+    { actor: "PPP", currency: "USD", netMinor: 10_000 },
+    { actor: "Nahom", currency: "ETB", netMinor: 0 },
+  ]);
+
+  state.ledger = structuredClone(completeLedgerBefore);
+  const repeated = removeGalaxySpecifiedOpenOrders(state, "Galaxy Workspace");
+  assert.equal(repeated.removedLedgerLineCount, 6, "A stale device cannot restore Nahom's removed ledger pairs.");
+  assert.deepEqual(state.orders, ordersBefore);
+  assert.deepEqual(state.archives, reportsBefore);
 });
 
 test("archived duplicate amounts receive one active correction without editing the closed period", () => {

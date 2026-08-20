@@ -215,21 +215,38 @@ function groupHasOpenEffects(state, group) {
   );
 }
 
-function removeTombstonedOpenOrderEffects(state) {
+function preservedJournalSet(options = {}) {
+  return new Set(asArray(options?.preserveOrderJournals).map(clean).filter(Boolean));
+}
+
+function removeTombstonedOpenOrderEffects(state, options = {}) {
+  const preservedJournals = preservedJournalSet(options);
   const deletedIds = new Set(asArray(state.deletedOrderIds).map(clean).filter(Boolean));
   if (!deletedIds.size) return { orders: 0, ledger: 0, receivables: 0 };
 
   const ordersBefore = asArray(state.orders);
-  state.orders = ordersBefore.filter((order) => !valuesOverlap(ownOrderIds(order), deletedIds));
+  const preservedOrderIds = new Set(ordersBefore
+    .filter((order) => preservedJournals.has(clean(order?.journal)))
+    .flatMap((order) => [...ownOrderIds(order)]));
+  preservedOrderIds.forEach((orderId) => deletedIds.delete(orderId));
+  state.deletedOrderIds = asArray(state.deletedOrderIds)
+    .map(clean)
+    .filter((orderId) => orderId && !preservedOrderIds.has(orderId));
+  state.orders = ordersBefore.filter((order) =>
+    preservedJournals.has(clean(order?.journal)) || !valuesOverlap(ownOrderIds(order), deletedIds)
+  );
   const ledgerBefore = asArray(state.ledger);
   state.ledger = ledgerBefore.filter((line) => !(
     line?.archived !== true
     && clean(line?.source).startsWith("ORDER_")
+    && !preservedJournals.has(clean(line?.journal))
     && deletedIds.has(clean(line?.orderId))
   ));
   const receivablesBefore = asArray(state.receivables);
   state.receivables = receivablesBefore.filter((receivable) => !(
-    !clean(receivable?.archivedAt) && deletedIds.has(clean(receivable?.orderId))
+    !clean(receivable?.archivedAt)
+    && !preservedJournals.has(clean(receivable?.journal))
+    && deletedIds.has(clean(receivable?.orderId))
   ));
   return {
     orders: ordersBefore.length - state.orders.length,
@@ -243,10 +260,13 @@ function removeTombstonedOpenOrderEffects(state) {
  * has the explicit Windows-style "(1)" suffix. Closed archive snapshots and
  * archived ledger/receivable records are never edited or removed.
  */
-export function removeExactDuplicateOrders(state = {}) {
-  const groups = duplicateGroups(state).filter((group) => groupHasOpenEffects(state, group));
+export function removeExactDuplicateOrders(state = {}, options = {}) {
+  const preservedJournals = preservedJournalSet(options);
+  const groups = duplicateGroups(state).filter((group) =>
+    !preservedJournals.has(group.duplicateJournal) && groupHasOpenEffects(state, group)
+  );
   if (!groups.length) {
-    const tombstoned = removeTombstonedOpenOrderEffects(state);
+    const tombstoned = removeTombstonedOpenOrderEffects(state, options);
     if (tombstoned.orders || tombstoned.ledger || tombstoned.receivables) {
       recalculateSettlementsFromLedger(state);
     }
@@ -307,7 +327,7 @@ export function removeExactDuplicateOrders(state = {}) {
     ...asArray(state.deletedOrderIds).map(clean).filter(Boolean),
     ...removedOrderIds,
   ]));
-  removeTombstonedOpenOrderEffects(state);
+  removeTombstonedOpenOrderEffects(state, options);
   recalculateSettlementsFromLedger(state);
 
   return {

@@ -18,6 +18,11 @@ const targetEntries = [
   ["JRN-1252 (1)", ["Habtom"]],
 ];
 const repairPostedAt = "2026-08-20T15:25:50.000Z";
+export const galaxyNahomLedgerOnlyJournals = Object.freeze([
+  "JRN-1739 (1)",
+  "JRN-1868 (1)",
+  "JRN-2063 (1)",
+]);
 
 export const galaxyOpenOrderCleanupTargets = Object.freeze(
   targetEntries.map(([journal, actors]) => Object.freeze({ journal, actors: Object.freeze([...actors]) }))
@@ -84,6 +89,50 @@ function targetMap() {
 function isGalaxyWorkspace(workspaceName) {
   const compact = normalized(workspaceName).replace(/[^a-z0-9]+/g, "");
   return compact === "galaxy" || compact === "galaxyworkspace";
+}
+
+export function galaxyLedgerOnlyOrderJournals(workspaceName = "") {
+  return isGalaxyWorkspace(workspaceName) ? [...galaxyNahomLedgerOnlyJournals] : [];
+}
+
+function removeNahomActiveLedgerPairs(state) {
+  const ledger = asArray(state.ledger);
+  const ledgerOnlyJournals = new Set(galaxyNahomLedgerOnlyJournals);
+  const removedIndexes = new Set();
+  const affectedJournals = new Set();
+
+  galaxyNahomLedgerOnlyJournals.forEach((journal) => {
+    const availableIndexes = ledger
+      .map((line, index) => ({ line, index }))
+      .filter(({ line }) =>
+        line?.archived !== true
+        && clean(line?.journal) === journal
+        && clean(line?.source).startsWith("ORDER_")
+      );
+    const nahomLines = availableIndexes.filter(({ line }) =>
+      actorNameMatches(actorNameFromAccount(line?.account), "Nahom")
+    );
+    nahomLines.forEach(({ line: actorLine, index: actorIndex }) => {
+      if (removedIndexes.has(actorIndex)) return;
+      const counterpart = availableIndexes.find(({ line, index }) =>
+        !removedIndexes.has(index)
+        && index !== actorIndex
+        && normalized(line?.account).startsWith("master")
+        && clean(line?.direction) !== clean(actorLine?.direction)
+        && clean(line?.currency) === clean(actorLine?.currency)
+        && Number(line?.amountMinor || 0) === Number(actorLine?.amountMinor || 0)
+      );
+      if (!counterpart) return;
+      removedIndexes.add(actorIndex);
+      removedIndexes.add(counterpart.index);
+      affectedJournals.add(journal);
+    });
+  });
+
+  state.ledger = ledger.filter((line, index) =>
+    line?.archived === true || !removedIndexes.has(index) || !ledgerOnlyJournals.has(clean(line?.journal))
+  );
+  return { removedLedgerLineCount: removedIndexes.size, journals: [...affectedJournals] };
 }
 
 function correctionKey(journal, actorName, currency) {
@@ -189,6 +238,8 @@ export function removeGalaxySpecifiedOpenOrders(state = {}, workspaceName = "") 
   }
 
   const targets = targetMap();
+  const nahomLedgerRepair = removeNahomActiveLedgerPairs(state);
+  const ledgerOnlyJournals = new Set(galaxyNahomLedgerOnlyJournals);
   const records = allOrderRecords(state);
   const openOrderLines = asArray(state.ledger).filter((line) =>
     line?.archived !== true && clean(line?.source).startsWith("ORDER_")
@@ -197,6 +248,7 @@ export function removeGalaxySpecifiedOpenOrders(state = {}, workspaceName = "") 
   const candidateOrderIds = new Set();
 
   targets.forEach((allowedActors, journal) => {
+    if (ledgerOnlyJournals.has(journal)) return;
     const matchingRecords = records.filter(({ order }) =>
       clean(order?.journal) === journal && orderMatchesActors(order, allowedActors)
     );
@@ -255,7 +307,8 @@ export function removeGalaxySpecifiedOpenOrders(state = {}, workspaceName = "") 
   const correctionLines = archivedCorrectionLines(state, targets);
   if (correctionLines.length) state.ledger.unshift(...correctionLines);
   const removedCount = ordersBefore.length - state.orders.length;
-  const removedLedgerLineCount = ledgerBefore.length - state.ledger.length + correctionLines.length;
+  const removedLedgerLineCount = nahomLedgerRepair.removedLedgerLineCount
+    + ledgerBefore.length - state.ledger.length + correctionLines.length;
   const removedReceivableCount = receivablesBefore.length - state.receivables.length;
   if (removedCount || removedLedgerLineCount || removedReceivableCount || correctionLines.length) {
     recalculateSettlementsFromLedger(state);
@@ -267,6 +320,6 @@ export function removeGalaxySpecifiedOpenOrders(state = {}, workspaceName = "") 
     removedReceivableCount,
     correctionLineCount: correctionLines.length,
     removedOrderIds,
-    journals: [...eligibleJournals],
+    journals: Array.from(new Set([...nahomLedgerRepair.journals, ...eligibleJournals])),
   };
 }
