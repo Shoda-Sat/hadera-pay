@@ -17,6 +17,7 @@ import {
   galaxyLedgerOnlyOrderJournals,
   removeGalaxySpecifiedOpenOrders,
 } from "./src/galaxyOrderCleanup.mjs";
+import { newManualLedgerCurrencyViolations } from "./src/manualLedgerCurrency.mjs";
 import { repairOrderJournalCollisions } from "./src/orderJournalCollisions.mjs";
 import { retainOrdersForOpenParticipants } from "./src/orderParticipantRetention.mjs";
 import {
@@ -24,7 +25,9 @@ import {
   stateDeclaresAnotherWorkspace,
 } from "./src/workspaceIsolation.mjs";
 import {
+  brokerCodeForActor,
   findPendingOrderIntegrityIssues,
+  nextUniqueBrokerCode,
   nextBrokerOrderNumberForActor,
   recoveredOrderMatches,
   removeRecoveredOrderAliases,
@@ -920,6 +923,7 @@ function publicSessionForRecord(db, session) {
       actorRole: membership.actorRole,
       currency: membership.currency,
       workingCurrencies: membership.workingCurrencies || [],
+      brokerCode: membership.brokerCode || "",
     },
   };
 }
@@ -966,6 +970,7 @@ function workspaceActors(db, workspaceId) {
       role: membership.actorRole,
       currency: membership.currency || "USD",
       workingCurrencies: membership.workingCurrencies || [],
+      brokerCode: membership.brokerCode || "",
       active: true,
       transferEnabled: true,
       transferMode: "master",
@@ -982,6 +987,61 @@ function mergeById(existingItems = [], incomingItems = []) {
     merged.set(item.id, { ...(merged.get(item.id) || {}), ...item });
   });
   return Array.from(merged.values());
+}
+
+function actorCanOwnBrokerCode(actor = {}) {
+  return ["Broker", "Special Broker"].includes(String(actor?.role || actor?.actorRole || ""));
+}
+
+function workspaceBrokerCodeReservations(db, workspaceId, state = db.appStates?.[workspaceId] || {}) {
+  const reserved = new Set((Array.isArray(state?.reservedBrokerCodes) ? state.reservedBrokerCodes : [])
+    .map((value) => String(value || "").trim().toUpperCase())
+    .filter(Boolean));
+  const reserveActor = (actor) => {
+    if (!actorCanOwnBrokerCode(actor)) return;
+    reserved.add(brokerCodeForActor({ name: actor?.name || actor?.actorName, brokerCode: actor?.brokerCode }));
+  };
+  (db.memberships || [])
+    .filter((membership) => membership?.workspaceId === workspaceId)
+    .forEach(reserveActor);
+  (state.actors || []).forEach(reserveActor);
+  const orderRecords = [
+    ...(Array.isArray(state.orders) ? state.orders : []),
+    ...(Array.isArray(state.archives) ? state.archives : [])
+      .flatMap((archive) => Array.isArray(archive?.orders) ? archive.orders : []),
+  ];
+  orderRecords.forEach((order) => {
+    if (order?.broker) reserved.add(brokerCodeForActor({ name: order.broker }));
+  });
+  return reserved;
+}
+
+function assignFutureManagedBrokerCodes(db, workspaceId, currentState, nextState, membershipActors) {
+  const currentActorsById = new Map((currentState.actors || []).map((actor) => [String(actor?.id || ""), actor]));
+  const membershipActorsById = new Map((membershipActors || []).map((actor) => [String(actor?.id || ""), actor]));
+  const reserved = workspaceBrokerCodeReservations(db, workspaceId, currentState);
+  nextState.actors = (nextState.actors || []).map((actor) => {
+    const actorId = String(actor?.id || "");
+    const existingActor = currentActorsById.get(actorId);
+    const membershipActor = membershipActorsById.get(actorId);
+    const nextActor = { ...actor };
+    if (!actorCanOwnBrokerCode(nextActor)) {
+      delete nextActor.brokerCode;
+      return nextActor;
+    }
+    if (membershipActor) {
+      if (membershipActor.brokerCode) nextActor.brokerCode = membershipActor.brokerCode;
+      else delete nextActor.brokerCode;
+    } else if (existingActor) {
+      if (existingActor.brokerCode) nextActor.brokerCode = existingActor.brokerCode;
+      else delete nextActor.brokerCode;
+    } else {
+      nextActor.brokerCode = nextUniqueBrokerCode(nextActor.name, reserved);
+    }
+    if (nextActor.brokerCode) reserved.add(nextActor.brokerCode);
+    return nextActor;
+  });
+  nextState.reservedBrokerCodes = Array.from(reserved).sort();
 }
 
 const actorResetTombstoneKeys = ["orders", "receivables", "transfers", "customers", "messages"];
@@ -1604,9 +1664,17 @@ function mergeReceivables(existingItems = [], incomingItems = []) {
 
 function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   const currentState = db.appStates[workspaceId] || {};
+  const membershipActors = workspaceActors(db, workspaceId);
+  const currencyViolations = newManualLedgerCurrencyViolations(currentState, incomingState, membershipActors);
+  if (currencyViolations.length > 0) {
+    const violation = currencyViolations[0];
+    throw httpError(
+      400,
+      `${violation.source === "WITHDRAWAL" ? "Withdrawal" : "Journal"} destination currency for ${violation.actor} must be their base currency (${violation.expectedCurrency}).`
+    );
+  }
   incomingState = resolveIncomingWorkspaceRecordCollisions(currentState, incomingState);
   const nextState = { ...currentState, ...incomingState };
-  const membershipActors = workspaceActors(db, workspaceId);
   const activeActorIds = new Set(membershipActors.map((actor) => actor.id));
   const deletedActorIds = new Set([...(currentState.deletedActorIds || []), ...(incomingState.deletedActorIds || [])]);
   const deletedChatIds = new Set([...(currentState.deletedChatIds || []), ...(incomingState.deletedChatIds || [])]);
@@ -1673,6 +1741,7 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
       };
     });
   nextState.actors = nextState.actors.filter((actor) => activeActorIds.has(actor?.id) || !deletedActorIds.has(actor?.id));
+  assignFutureManagedBrokerCodes(db, workspaceId, currentState, nextState, membershipActors);
   nextState.deletedActorIds = Array.from(new Set([...deletedActorIds, ...(nextState.deletedActorIds || [])]));
   nextState.deletedActorNames = [];
   nextState.deletedChatIds = Array.from(new Set([...deletedChatIds, ...(nextState.deletedChatIds || [])]));
@@ -2233,7 +2302,10 @@ function sanitizeIncomingWorkspaceState(state, session, db) {
   } : {});
   const sanitized = { ...state };
   sanitized._workspaceId = session.workspace.id;
-  const persistedActors = new Map((persistedState.actors || []).map((actor) => [actor?.id, actor]));
+  const persistedActors = new Map(
+    mergeById(persistedState.actors || [], workspaceActors(db, session.workspace.id))
+      .map((actor) => [actor?.id, actor])
+  );
   const persistedOrders = new Map((persistedState.orders || []).map((order) => [order?.id, order]));
   const sessionActor = actorSession ? persistedActors.get(session.membership.actorId) : null;
   const fixedSetting = sessionActor?.orderFixedCommission;
@@ -2627,13 +2699,26 @@ async function handleApi(request, response, url) {
         workingCurrencies: invite.workingCurrencies || [],
         createdAt: new Date().toISOString(),
       };
+      if (actorCanOwnBrokerCode(membership)) {
+        const reservedBrokerCodes = workspaceBrokerCodeReservations(db, workspace.id);
+        membership.brokerCode = nextUniqueBrokerCode(name, reservedBrokerCodes);
+        invite.brokerCode = membership.brokerCode;
+      }
       invite.acceptedAt = new Date().toISOString();
       invite.acceptedByUserId = user.id;
     }
 
+    const expectedWorkspaceRevision = workspaceStateRevision(db, workspace.id);
+    if (membership.brokerCode) {
+      const workspaceState = db.appStates[workspace.id] || {};
+      workspaceState.reservedBrokerCodes = Array.from(new Set([
+        ...(workspaceState.reservedBrokerCodes || []),
+        membership.brokerCode,
+      ])).sort();
+      db.appStates[workspace.id] = workspaceState;
+    }
     db.users.push(user);
     db.memberships.push(membership);
-    const expectedWorkspaceRevision = workspaceStateRevision(db, workspace.id);
     markWorkspaceStateChanged(db, workspace.id);
     clearLoginAttempts(db, email);
     const session = createSession(db, user.id, workspace.id, requestDeviceId(request));

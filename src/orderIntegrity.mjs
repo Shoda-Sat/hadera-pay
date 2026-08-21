@@ -18,6 +18,37 @@ export function actorOrderPrefix(actorName) {
   return `${value}XXX`.slice(0, 3);
 }
 
+export function brokerCodeForActor(actor = {}) {
+  const assignedCode = clean(actor?.brokerCode).toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return assignedCode || actorOrderPrefix(actor?.name || actor?.broker);
+}
+
+function alphabeticSuffix(index) {
+  let value = Math.max(1, Math.floor(Number(index) || 1));
+  let suffix = "";
+  while (value > 0) {
+    value -= 1;
+    suffix = String.fromCharCode(65 + (value % 26)) + suffix;
+    value = Math.floor(value / 26);
+  }
+  return suffix;
+}
+
+export function nextUniqueBrokerCode(actorName, reservedCodes = []) {
+  const base = actorOrderPrefix(actorName);
+  const reserved = new Set((Array.isArray(reservedCodes) ? reservedCodes : Array.from(reservedCodes || []))
+    .map((value) => clean(value).toUpperCase().replace(/[^A-Z0-9]/g, ""))
+    .filter(Boolean));
+  if (!reserved.has(base)) return base;
+  let suffixIndex = 1;
+  let candidate = "";
+  do {
+    candidate = `${base}${alphabeticSuffix(suffixIndex)}`;
+    suffixIndex += 1;
+  } while (reserved.has(candidate));
+  return candidate;
+}
+
 function stableOrderMoment(order = {}) {
   return clean(order?.createdAt || order?.sentAt);
 }
@@ -65,7 +96,7 @@ function allOrderRecords(state = {}, reservedOrders = []) {
 
 export function nextBrokerOrderNumberForActor(state = {}, actor = {}, reservedOrders = []) {
   const actorName = clean(actor?.name);
-  const prefix = actorOrderPrefix(actorName);
+  const prefix = brokerCodeForActor(actor);
   const numberingCycle = Math.max(0, Math.floor(Number(actor?.numberingCycle || 0)));
   const used = new Set();
   allOrderRecords(state, reservedOrders).forEach((order) => {
@@ -162,7 +193,7 @@ export function findPendingOrderIntegrityIssues(workspaceState = {}) {
 
   const issues = [];
   groups.forEach((group) => {
-    const prefix = actorOrderPrefix(group.actorName);
+    const prefix = brokerCodeForActor(actorForOrder(workspaceState, group.orders[0]) || { name: group.actorName });
     const prefixPattern = new RegExp(`^${prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\d+$`, "i");
     const wrongPrefix = !prefixPattern.test(group.orderNumber);
     const duplicate = group.orders.length > 1;

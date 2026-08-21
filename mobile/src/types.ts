@@ -39,6 +39,7 @@ export interface UserSession {
   actorId: string;
   actorName: string;
   actorRole: ActorRole;
+  brokerCode?: string;
   currency: Currency;
   workingCurrencies: Currency[];
   workspaceId: string;
@@ -77,6 +78,7 @@ export interface ApiSession {
     actorId?: string;
     actorName?: string;
     actorRole?: ActorRole;
+    brokerCode?: string;
     currency?: Currency;
     workingCurrencies?: Currency[];
   };
@@ -87,6 +89,7 @@ export interface ActorRecord {
   workspaceId?: string;
   name: string;
   role: ActorRole;
+  brokerCode?: string;
   currency: Currency;
   active?: boolean;
   workingCurrencies?: Currency[];
@@ -453,6 +456,7 @@ export interface WorkspaceState {
   deletedActorIds?: string[];
   deletedChatIds?: string[];
   deletedOrderIds?: string[];
+  reservedBrokerCodes?: string[];
   masterRateDivisorSettings?: Partial<Record<Currency, RateSetting>>;
   buyingRates?: {
     eurToUsd?: number;

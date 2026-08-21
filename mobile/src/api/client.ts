@@ -271,6 +271,7 @@ function normalizeSession(session: ApiSession | null | undefined): UserSession |
     actorId: session.membership.actorId || "",
     actorName: session.membership.actorName || session.user.name || "",
     actorRole,
+    brokerCode: session.membership.brokerCode || "",
     currency: safeCurrency(session.membership.currency),
     workingCurrencies: (session.membership.workingCurrencies || []).map((currency) => safeCurrency(currency)),
     workspaceId: session.workspace.id || "",
@@ -755,7 +756,9 @@ function actorOrderPrefix(name: string): string {
 }
 
 function nextBrokerOrderNumber(session: UserSession, state: WorkspaceState): string {
-  const prefix = actorOrderPrefix(session.actorName);
+  const actor = sessionActor(session, state);
+  const assignedCode = String(actor?.brokerCode || session.brokerCode || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const prefix = assignedCode || actorOrderPrefix(session.actorName);
   const next = nextActorLedgerSequence(state, session.actorName);
   return `${prefix}${String(next).padStart(3, "0")}`;
 }
