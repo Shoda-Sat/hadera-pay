@@ -1020,6 +1020,20 @@ export function TransfersScreen(props: CommonProps) {
     commissionLiability: "" as CommissionLiability | "",
     remarks: ""
   });
+  const journalActors = activeActors(state).filter((item) => item.role !== "Master");
+  const journalActor = journalActors.find((item) => item.id === journal.actorId);
+  const selectManualLedgerActor = (item: ActorRecord) => {
+    setJournal((current) => ({
+      ...current,
+      actorId: item.id,
+      currency: item.currency,
+      amount: current.currency === item.currency
+        ? current.amount
+        : mode === "Journal" && parseAmount(current.sourceAmount) > 0 && Number(current.rate || 0) > 0
+          ? inputAmount(item.currency, parseAmount(current.sourceAmount) * Number(current.rate))
+          : ""
+    }));
+  };
   const targets = transferTargetsFor(session, state);
   const receivingActor = targets.find((target) => target.id === draft.toActorId);
   const payoutCurrencies = actorTransferReceiveCurrencies(receivingActor);
@@ -1220,14 +1234,14 @@ export function TransfersScreen(props: CommonProps) {
       ) : (
         <Panel title={mode}>
           <Text style={styles.fieldLabel}>Actor</Text>
-          <View style={styles.choiceWrap}>{activeActors(state).filter((item) => item.role !== "Master").map((item) => <Pressable key={item.id} onPress={() => setJournal({ ...journal, actorId: item.id })} style={[styles.choice, journal.actorId === item.id && styles.choiceActive]}><Text style={[styles.choiceText, journal.actorId === item.id && styles.choiceTextActive]}>{item.name}</Text></Pressable>)}</View>
+          <View style={styles.choiceWrap}>{journalActors.map((item) => <Pressable key={item.id} onPress={() => selectManualLedgerActor(item)} style={[styles.choice, journal.actorId === item.id && styles.choiceActive]}><Text style={[styles.choiceText, journal.actorId === item.id && styles.choiceTextActive]}>{item.name}</Text></Pressable>)}</View>
           {mode === "Journal" ? <>
             <SelectRow label="Source currency" options={supportedCurrencies} value={journal.sourceCurrency} onChange={(value) => setJournal({ ...journal, sourceCurrency: value })} />
             <Field label="Source amount" value={journal.sourceAmount} onChangeText={(value) => setJournal({ ...journal, sourceAmount: value })} keyboardType="decimal-pad" />
-            <SelectRow label="Ledger currency" options={supportedCurrencies} value={journal.currency} onChange={(value) => setJournal({ ...journal, currency: value })} />
+            <SummaryRow label="Destination currency (Actor base)" value={journalActor?.currency || "Select an Actor"} />
             <Field label="Rate" value={journal.rate} onChangeText={(value) => setJournal({ ...journal, rate: value, amount: inputAmount(journal.currency, parseAmount(journal.sourceAmount) * Number(value || 0)) })} keyboardType="decimal-pad" />
             <Field label="Converted amount" value={journal.amount} onChangeText={(value) => setJournal({ ...journal, amount: value })} keyboardType="decimal-pad" />
-          </> : <><SelectRow label="Currency" options={supportedCurrencies} value={journal.currency} onChange={(value) => setJournal({ ...journal, currency: value })} /><Field label="Amount" value={journal.amount} onChangeText={(value) => setJournal({ ...journal, amount: value })} keyboardType="decimal-pad" /></>}
+          </> : <><SummaryRow label="Destination currency (Actor base)" value={journalActor?.currency || "Select an Actor"} /><Field label="Amount" value={journal.amount} onChangeText={(value) => setJournal({ ...journal, amount: value })} keyboardType="decimal-pad" /></>}
           <Field label="Commission %" value={journal.commissionPercent} onChangeText={(value) => setJournal({ ...journal, commissionPercent: value, commissionLiability: parseDecimalNumber(value || 0) > 0 ? journal.commissionLiability : "" })} keyboardType="decimal-pad" />
           {parseDecimalNumber(journal.commissionPercent || 0) > 0 ? (
             <SelectRow label="Whose liability is the commission?" options={commissionLiabilityOptions} value={journal.commissionLiability as CommissionLiability} onChange={(value) => setJournal({ ...journal, commissionLiability: value })} />

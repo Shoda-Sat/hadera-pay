@@ -1158,6 +1158,18 @@ function ArchiveScreen({
     }
   };
 
+  const confirmReportPdfExport = () => {
+    if (!workspaceState || !filteredArchives.length || pdfExporting || session.subscriptionReadOnly) return;
+    Alert.alert(
+      "Export PDF?",
+      "The exported report may contain sensitive financial information.",
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Export PDF", onPress: () => void exportReportPdf() },
+      ]
+    );
+  };
+
   return (
     <View style={styles.screen}>
       <HeaderTitle title="Report" subtitle="Monthly closed statements" />
@@ -1171,7 +1183,7 @@ function ArchiveScreen({
       <Button
         label="Export report PDF"
         variant="secondary"
-        onPress={exportReportPdf}
+        onPress={confirmReportPdfExport}
         loading={pdfExporting}
         disabled={!filteredArchives.length || session.subscriptionReadOnly === true}
         icon={<FileDown size={17} color={colors.ink} />}

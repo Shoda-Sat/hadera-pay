@@ -153,6 +153,7 @@ export function actingSessionFor(loginSession: UserSession, actor: ActorRecord |
     actorId: actor.id,
     actorName: actor.name,
     actorRole: actor.role,
+    brokerCode: actor.brokerCode || "",
     currency: actor.currency,
     workingCurrencies: actor.workingCurrencies || [actor.currency],
     managedByMaster: true
@@ -1326,6 +1327,11 @@ export async function updateActorOrderSettings(actorId: string, input: {
 export async function postActorJournal(input: { actorId: string; sourceCurrency: Currency; sourceAmount: string; currency: Currency; amount: string; rate: string; commissionPercent: string; commissionLiability: CommissionLiability | ""; remarks: string }): Promise<WorkspaceState> {
   return updateWorkspaceState((state) => {
     const actor = activeActors(state).find((item) => item.id === input.actorId);
+    if (!actor) throw new Error("Choose an actor.");
+    if (input.currency !== actor.currency) {
+      throw new Error(`Journal destination currency must match ${actor.name}'s base currency (${actor.currency}).`);
+    }
+    const destinationCurrency = actor.currency;
     const sourceMajor = parseAmount(input.sourceAmount);
     const rate = Number(input.rate || 0);
     const amountMajor = parseAmount(input.amount) || sourceMajor * rate;
@@ -1333,7 +1339,7 @@ export async function postActorJournal(input: { actorId: string; sourceCurrency:
     const commissionLiability = commissionPercent > 0 && commissionLiabilityOptions.includes(input.commissionLiability as CommissionLiability)
       ? input.commissionLiability as CommissionLiability
       : "";
-    if (!actor || sourceMajor <= 0 || amountMajor <= 0 || rate <= 0 || !Number.isFinite(commissionPercent) || commissionPercent < 0) {
+    if (sourceMajor <= 0 || amountMajor <= 0 || rate <= 0 || !Number.isFinite(commissionPercent) || commissionPercent < 0) {
       throw new Error("Complete the journal actor, amount, currency, rate, and a commission percentage of zero or more.");
     }
     if (commissionPercent > 0 && !commissionLiability) {
@@ -1342,12 +1348,12 @@ export async function postActorJournal(input: { actorId: string; sourceCurrency:
     const journal = nextJournalId(state);
     const postedAt = new Date().toISOString();
     const sourceAmountMinor = minorFromMajor(sourceMajor, input.sourceCurrency);
-    const amountMinor = minorFromMajor(amountMajor, input.currency);
+    const amountMinor = minorFromMajor(amountMajor, destinationCurrency);
     const commissionMinor = minorFromMajor(sourceMajor * commissionPercent / 100, input.sourceCurrency);
     const entryId = `JNL-${journal.replace("JRN-", "")}`;
     const actorLedgerNumber = nextActorLedgerNumber(state, actor.name, entryId);
     const details = [
-      `Journal add ${compactAmount(input.sourceCurrency, sourceMajor)} to ${compactAmount(input.currency, amountMajor)}`,
+      `Journal add ${compactAmount(input.sourceCurrency, sourceMajor)} to ${compactAmount(destinationCurrency, amountMajor)}`,
       `Rate ${rate}`,
       commissionMinor > 0 ? `Commission: ${compactAmount(input.sourceCurrency, majorFromMinor(commissionMinor, input.sourceCurrency))} - Liability: ${commissionLiability}` : "",
       input.remarks ? `Remarks: ${input.remarks}` : ""
@@ -1359,7 +1365,7 @@ export async function postActorJournal(input: { actorId: string; sourceCurrency:
       source: "JOURNAL",
       account: `${actor.name} ACTOR_CLEARING`,
       direction: "Debit",
-      currency: input.currency,
+      currency: destinationCurrency,
       amountMinor,
       sourceCurrency: input.sourceCurrency,
       sourceAmountMinor,
@@ -1384,37 +1390,42 @@ export async function postActorJournal(input: { actorId: string; sourceCurrency:
 export async function postActorWithdrawal(input: { actorId: string; currency: Currency; amount: string; commissionPercent: string; commissionLiability: CommissionLiability | ""; remarks: string }): Promise<WorkspaceState> {
   return updateWorkspaceState((state) => {
     const actor = activeActors(state).find((item) => item.id === input.actorId);
+    if (!actor) throw new Error("Choose an actor.");
+    if (input.currency !== actor.currency) {
+      throw new Error(`Withdrawal destination currency must match ${actor.name}'s base currency (${actor.currency}).`);
+    }
+    const destinationCurrency = actor.currency;
     const amountMajor = parseAmount(input.amount);
     const commissionPercent = parseDecimalNumber(input.commissionPercent || 0);
     const commissionLiability = commissionPercent > 0 && commissionLiabilityOptions.includes(input.commissionLiability as CommissionLiability)
       ? input.commissionLiability as CommissionLiability
       : "";
-    if (!actor || amountMajor <= 0 || !Number.isFinite(commissionPercent) || commissionPercent < 0) {
+    if (amountMajor <= 0 || !Number.isFinite(commissionPercent) || commissionPercent < 0) {
       throw new Error("Choose an actor and enter a withdrawal amount and a commission percentage of zero or more.");
     }
     if (commissionPercent > 0 && !commissionLiability) {
       throw new Error("Choose whether the commission is the Sender's, Master's, or Receiver's liability.");
     }
-    const amountMinor = minorFromMajor(amountMajor, input.currency);
-    const commissionMinor = minorFromMajor(amountMajor * commissionPercent / 100, input.currency);
+    const amountMinor = minorFromMajor(amountMajor, destinationCurrency);
+    const commissionMinor = minorFromMajor(amountMajor * commissionPercent / 100, destinationCurrency);
     const journal = nextJournalId(state);
     const postedAt = new Date().toISOString();
     const entryId = `WDL-${journal.replace("JRN-", "")}`;
     const actorLedgerNumber = nextActorLedgerNumber(state, actor.name, entryId);
     const details = [
-      `Withdrawal ${compactAmount(input.currency, amountMajor)} from ${actor.name}`,
-      commissionMinor > 0 ? `Commission: ${compactAmount(input.currency, majorFromMinor(commissionMinor, input.currency))} - Liability: ${commissionLiability}` : "",
+      `Withdrawal ${compactAmount(destinationCurrency, amountMajor)} from ${actor.name}`,
+      commissionMinor > 0 ? `Commission: ${compactAmount(destinationCurrency, majorFromMinor(commissionMinor, destinationCurrency))} - Liability: ${commissionLiability}` : "",
       input.remarks ? `Remarks: ${input.remarks}` : ""
     ].filter(Boolean).join(" - ");
     state.ledger.unshift(
-      { journal, entryId, actorLedgerNumber, source: "WITHDRAWAL", account: `${actor.name} ACTOR_CLEARING`, direction: "Credit", currency: input.currency, amountMinor, commissionPercent, commissionMinor, commissionLiability: commissionLiability || undefined, details, postedAt },
-      { journal, entryId, source: "WITHDRAWAL", account: "MASTER_FX_CLEARING", direction: "Debit", currency: input.currency, amountMinor, commissionPercent, commissionMinor, commissionLiability: commissionLiability || undefined, details, postedAt }
+      { journal, entryId, actorLedgerNumber, source: "WITHDRAWAL", account: `${actor.name} ACTOR_CLEARING`, direction: "Credit", currency: destinationCurrency, amountMinor, commissionPercent, commissionMinor, commissionLiability: commissionLiability || undefined, details, postedAt },
+      { journal, entryId, source: "WITHDRAWAL", account: "MASTER_FX_CLEARING", direction: "Debit", currency: destinationCurrency, amountMinor, commissionPercent, commissionMinor, commissionLiability: commissionLiability || undefined, details, postedAt }
     );
     if (commissionMinor > 0) {
       const commissionRouting = commissionLedgerRouting(state, commissionLiability || "Sender", actor.name, "Master", true);
       state.ledger.unshift(
-        { journal, entryId, actorLedgerNumber: commissionRouting.debit.actorName ? actorLedgerNumber : "", source: "WITHDRAWAL_COMMISSION", account: commissionRouting.debit.account, direction: "Debit", currency: input.currency, amountMinor: commissionMinor, commissionPercent, commissionLiability, details, postedAt },
-        { journal, entryId, actorLedgerNumber: commissionRouting.credit.actorName ? actorLedgerNumber : "", source: "WITHDRAWAL_COMMISSION", account: commissionRouting.credit.account, direction: "Credit", currency: input.currency, amountMinor: commissionMinor, commissionPercent, commissionLiability, details, postedAt }
+        { journal, entryId, actorLedgerNumber: commissionRouting.debit.actorName ? actorLedgerNumber : "", source: "WITHDRAWAL_COMMISSION", account: commissionRouting.debit.account, direction: "Debit", currency: destinationCurrency, amountMinor: commissionMinor, commissionPercent, commissionLiability, details, postedAt },
+        { journal, entryId, actorLedgerNumber: commissionRouting.credit.actorName ? actorLedgerNumber : "", source: "WITHDRAWAL_COMMISSION", account: commissionRouting.credit.account, direction: "Credit", currency: destinationCurrency, amountMinor: commissionMinor, commissionPercent, commissionLiability, details, postedAt }
       );
     }
     syncMasterBankAccount(state);

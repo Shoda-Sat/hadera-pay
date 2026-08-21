@@ -69,10 +69,12 @@ function actorOrderReferences(
   return references;
 }
 
-function sequenceDetails(reference: string, actorName: string): { value: number; width: number } | null {
+function sequenceDetails(state: WorkspaceState, reference: string, actorName: string): { value: number; width: number } | null {
   const leading = String(reference || "").match(/^(\d+)_/);
   if (leading) return { value: Number(leading[1]), width: leading[1].length };
-  const prefix = actorOrderPrefix(actorName).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const actor = state.actors.find((candidate) => candidate.name === actorName);
+  const assignedCode = String(actor?.brokerCode || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const prefix = (assignedCode || actorOrderPrefix(actorName)).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const broker = String(reference || "").match(new RegExp(`^${prefix}(\\d+)$`, "i"));
   return broker ? { value: Number(broker[1]), width: broker[1].length } : null;
 }
@@ -89,7 +91,7 @@ export function ledgerLineBelongsToActor(line: LedgerLine, actorName: string): b
 export function actorLedgerUsedSequences(state: WorkspaceState, actorName: string): Set<number> {
   const used = new Set<number>();
   actorOrderReferences(state, actorName).forEach(({ reference }) => {
-    const details = sequenceDetails(reference, actorName);
+    const details = sequenceDetails(state, reference, actorName);
     if (details && Number.isFinite(details.value) && details.value > 0) used.add(details.value);
   });
   state.ledger
@@ -117,7 +119,7 @@ export function actorLedgerSequenceWidth(state: WorkspaceState, actorName: strin
     .find((width) => width > 0);
   if (existingLedgerWidth) return existingLedgerWidth;
   const numberedReferences = actorOrderReferences(state, actorName)
-    .map((item) => ({ ...item, details: sequenceDetails(item.reference, actorName) }))
+    .map((item) => ({ ...item, details: sequenceDetails(state, item.reference, actorName) }))
     .filter((item): item is { reference: string; postedAt: string; details: { value: number; width: number } } => Boolean(item.details))
     .sort((left, right) => new Date(right.postedAt || 0).getTime() - new Date(left.postedAt || 0).getTime());
   if (numberedReferences[0]) return Math.max(1, numberedReferences[0].details.width);

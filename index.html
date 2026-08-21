@@ -3098,7 +3098,7 @@
                       <input id="ledgerJournalRate" class="ledger-tool-input" inputmode="decimal" value="1.00">
                     </div>
                     <div class="field">
-                      <label for="ledgerJournalCurrency">Ledger currency</label>
+                      <label for="ledgerJournalCurrency">Destination currency (Actor base)</label>
                       <select id="ledgerJournalCurrency" class="ledger-tool-input"></select>
                     </div>
                     <div class="field">
@@ -3145,7 +3145,7 @@
                       <select id="ledgerWithdrawalActor" class="ledger-tool-input"></select>
                     </div>
                     <div class="field">
-                      <label for="ledgerWithdrawalCurrency">Currency</label>
+                      <label for="ledgerWithdrawalCurrency">Destination currency (Actor base)</label>
                       <select id="ledgerWithdrawalCurrency" class="ledger-tool-input"></select>
                     </div>
                     <div class="field">
@@ -5591,6 +5591,7 @@
       sidebar: document.getElementById("sidebar"),
       drawerShade: document.getElementById("drawerShade"),
       confirmShade: document.getElementById("confirmShade"),
+      confirmTitle: document.getElementById("confirmTitle"),
       confirmMessage: document.getElementById("confirmMessage"),
       confirmYes: document.getElementById("confirmYes"),
       confirmNo: document.getElementById("confirmNo"),
@@ -6434,6 +6435,49 @@
       return `${clean}XXX`.slice(0, 3);
     }
 
+    function brokerCodeForActor(actor) {
+      const assignedCode = String(actor?.brokerCode || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+      return assignedCode || actorOrderPrefix(actor?.name || actor?.broker);
+    }
+
+    function brokerCodeSuffix(index) {
+      let value = Math.max(1, Math.floor(Number(index) || 1));
+      let suffix = "";
+      while (value > 0) {
+        value -= 1;
+        suffix = String.fromCharCode(65 + (value % 26)) + suffix;
+        value = Math.floor(value / 26);
+      }
+      return suffix;
+    }
+
+    function reservedBrokerCodes() {
+      const reserved = new Set((state.reservedBrokerCodes || []).map((value) => String(value || "").toUpperCase()).filter(Boolean));
+      state.actors.filter((actor) => actorCanInitiateOrders(actor.role))
+        .forEach((actor) => reserved.add(brokerCodeForActor(actor)));
+      allOrderRecordsForNumbering().forEach(({ order }) => {
+        if (!order?.broker) return;
+        const actor = state.actors.find((candidate) =>
+          order.brokerActorId ? candidate.id === order.brokerActorId : candidate.name === order.broker
+        );
+        reserved.add(brokerCodeForActor(actor || { name: order.broker }));
+      });
+      return reserved;
+    }
+
+    function nextUniqueBrokerCode(actorName) {
+      const base = actorOrderPrefix(actorName);
+      const reserved = reservedBrokerCodes();
+      if (!reserved.has(base)) return base;
+      let suffixIndex = 1;
+      let candidate = "";
+      do {
+        candidate = `${base}${brokerCodeSuffix(suffixIndex)}`;
+        suffixIndex += 1;
+      } while (reserved.has(candidate));
+      return candidate;
+    }
+
     function actorNumberingCycle(actorName) {
       const actor = state.actors.find((candidate) => candidate.name === actorName);
       return Math.max(0, Math.floor(Number(actor?.numberingCycle || 0)));
@@ -6522,7 +6566,8 @@
     function actorLedgerSequenceDetails(reference, actorName) {
       const leading = String(reference || "").match(/^(\d+)_/);
       if (leading) return { value: Number(leading[1]), width: leading[1].length };
-      const prefix = actorOrderPrefix(actorName).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const actor = state.actors.find((candidate) => candidate.name === actorName);
+      const prefix = brokerCodeForActor(actor || { name: actorName }).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const broker = String(reference || "").match(new RegExp(`^${prefix}(\\d+)$`, "i"));
       return broker ? { value: Number(broker[1]), width: broker[1].length } : null;
     }
@@ -6627,7 +6672,8 @@
     }
 
     function nextBrokerOrderNumber(brokerName) {
-      const prefix = actorOrderPrefix(brokerName);
+      const actor = state.actors.find((candidate) => candidate.name === brokerName);
+      const prefix = brokerCodeForActor(actor || { name: brokerName });
       const next = nextActorLedgerSequence(brokerName);
       return `${prefix}${String(next).padStart(3, "0")}`;
     }
@@ -7010,6 +7056,7 @@
         name: membership.actorName,
         role: membership.actorRole,
         currency: membership.currency || "USD",
+        brokerCode: membership.brokerCode || "",
         workingCurrencies: actorHasSpecialPayout(membership.actorRole)
           ? normalizedWorkingCurrenciesForRole(membership.actorRole, membership.currency || "USD", membership.workingCurrencies || [])
           : [],
@@ -7315,6 +7362,22 @@
       return activeActors().filter((actor) => actor.role !== "Master");
     }
 
+    function ledgerToolActorBaseCurrency(actorName) {
+      const actor = ledgerToolActors().find((item) => item.name === actorName);
+      return supportedCurrencies.includes(actor?.currency) ? actor.currency : "";
+    }
+
+    function setLedgerDestinationCurrency(select, actorName) {
+      const currency = ledgerToolActorBaseCurrency(actorName);
+      select.innerHTML = currency ? `<option>${currency}</option>` : "";
+      select.value = currency;
+      select.disabled = true;
+      select.title = currency
+        ? `Locked to ${actorName}'s base currency`
+        : "Select an Actor to set the destination currency";
+      return currency;
+    }
+
     function renderLedgerToolControls() {
       if (!els.ledgerJournalActor || !els.ledgerWithdrawalActor) return;
       const actors = ledgerToolActors();
@@ -7323,22 +7386,18 @@
       const previousJournalActor = els.ledgerJournalActor.value;
       const previousWithdrawalActor = els.ledgerWithdrawalActor.value;
       const previousJournalSourceCurrency = els.ledgerJournalSourceCurrency.value || "USD";
-      const previousJournalCurrency = els.ledgerJournalCurrency.value || "USD";
-      const previousWithdrawalCurrency = els.ledgerWithdrawalCurrency.value || "USD";
 
       els.ledgerJournalActor.innerHTML = actorOptions;
       els.ledgerWithdrawalActor.innerHTML = actorOptions;
       els.ledgerJournalSourceCurrency.innerHTML = currencyOptions;
-      els.ledgerJournalCurrency.innerHTML = currencyOptions;
-      els.ledgerWithdrawalCurrency.innerHTML = currencyOptions;
 
       if (actors.some((actor) => actor.name === previousJournalActor)) els.ledgerJournalActor.value = previousJournalActor;
       if (!els.ledgerJournalActor.value && actors[0]) els.ledgerJournalActor.value = actors[0].name;
       if (actors.some((actor) => actor.name === previousWithdrawalActor)) els.ledgerWithdrawalActor.value = previousWithdrawalActor;
       if (!els.ledgerWithdrawalActor.value && actors[0]) els.ledgerWithdrawalActor.value = actors[0].name;
       els.ledgerJournalSourceCurrency.value = supportedCurrencies.includes(previousJournalSourceCurrency) ? previousJournalSourceCurrency : "USD";
-      els.ledgerJournalCurrency.value = supportedCurrencies.includes(previousJournalCurrency) ? previousJournalCurrency : "USD";
-      els.ledgerWithdrawalCurrency.value = supportedCurrencies.includes(previousWithdrawalCurrency) ? previousWithdrawalCurrency : "USD";
+      setLedgerDestinationCurrency(els.ledgerJournalCurrency, els.ledgerJournalActor.value);
+      setLedgerDestinationCurrency(els.ledgerWithdrawalCurrency, els.ledgerWithdrawalActor.value);
       updateJournalConversion("rate", false);
       updateCommissionLiabilityVisibility(els.ledgerJournalPercent, els.ledgerJournalCommissionLiabilityField, els.ledgerJournalCommissionLiability);
       updateCommissionLiabilityVisibility(els.ledgerWithdrawalPercent, els.ledgerWithdrawalCommissionLiabilityField, els.ledgerWithdrawalCommissionLiability);
@@ -7391,6 +7450,10 @@
     }
 
     function postActorJournal({ actorName, sourceCurrency, sourceAmountMinor, currency, amountMinor, rate, commissionPercent, commissionMinor, commissionLiability, remarks }) {
+      const destinationCurrency = ledgerToolActorBaseCurrency(actorName);
+      if (!destinationCurrency || currency !== destinationCurrency) {
+        throw new Error(`Journal destination currency must match ${actorName}'s base currency (${destinationCurrency || "unknown"}).`);
+      }
       const journalId = nextJournalId();
       const postedAt = new Date().toISOString();
       const entryId = nextManualJournalEntryId();
@@ -7433,6 +7496,10 @@
     }
 
     function postActorWithdrawal({ actorName, currency, amountMinor, commissionPercent, commissionMinor, commissionLiability, remarks }) {
+      const destinationCurrency = ledgerToolActorBaseCurrency(actorName);
+      if (!destinationCurrency || currency !== destinationCurrency) {
+        throw new Error(`Withdrawal destination currency must match ${actorName}'s base currency (${destinationCurrency || "unknown"}).`);
+      }
       const journalId = nextJournalId();
       const postedAt = new Date().toISOString();
       const entryId = nextWithdrawalEntryId();
@@ -14520,7 +14587,14 @@
       }
     });
 
-    els.logoutButton.addEventListener("click", () => endAuthSession());
+    els.logoutButton.addEventListener("click", () => {
+      confirmAction(
+        "Log out now? You will need to sign in again to continue.",
+        () => endAuthSession(),
+        () => {},
+        { title: "Confirm logout", yes: "Log out", no: "Stay logged in", cancel: false }
+      );
+    });
 
     ["pointerdown", "keydown", "input", "touchstart", "scroll"].forEach((eventName) => {
       window.addEventListener(eventName, noteUserActivity, { passive: true, capture: true });
@@ -14726,9 +14800,11 @@
     function closeConfirmation() {
       pendingConfirmation = null;
       els.confirmShade.classList.remove("open");
+      els.confirmTitle.textContent = "Confirm action";
       els.confirmYes.textContent = "Yes";
       els.confirmNo.textContent = "No";
       els.confirmCancel.textContent = "Cancel";
+      els.confirmCancel.hidden = false;
     }
 
     function closePasswordReset() {
@@ -14747,11 +14823,27 @@
 
     function confirmAction(message, onYes, onNo = () => {}, labels = {}) {
       pendingConfirmation = { onYes, onNo };
+      els.confirmTitle.textContent = labels.title || "Confirm action";
       els.confirmMessage.textContent = message;
       els.confirmYes.textContent = labels.yes || "Yes";
       els.confirmNo.textContent = labels.no || "No";
       els.confirmCancel.textContent = labels.cancel || "Cancel";
+      els.confirmCancel.hidden = labels.cancel === false;
       els.confirmShade.classList.add("open");
+    }
+
+    function confirmFileExport(format, subject, exportAction) {
+      confirmAction(
+        `Export ${subject} to ${format}? The downloaded file may contain sensitive financial information.`,
+        exportAction,
+        () => {},
+        {
+          title: `Confirm ${format} export`,
+          yes: `Export ${format}`,
+          no: "Go back",
+          cancel: false
+        }
+      );
     }
 
     function rejectVoidRequest(order, actorName = "Master") {
@@ -15207,7 +15299,10 @@
     });
 
     els.ledgerJournalActor.addEventListener("change", () => {
+      journalConversionTouches = [];
+      setLedgerDestinationCurrency(els.ledgerJournalCurrency, els.ledgerJournalActor.value);
       els.ledgerJournalError.classList.remove("visible");
+      updateJournalConversion("rate", false);
     });
 
     els.ledgerWithdrawalForm.addEventListener("input", (event) => {
@@ -15218,6 +15313,11 @@
     });
 
     els.ledgerWithdrawalForm.addEventListener("change", () => {
+      els.ledgerWithdrawalError.classList.remove("visible");
+    });
+
+    els.ledgerWithdrawalActor.addEventListener("change", () => {
+      setLedgerDestinationCurrency(els.ledgerWithdrawalCurrency, els.ledgerWithdrawalActor.value);
       els.ledgerWithdrawalError.classList.remove("visible");
     });
 
@@ -15843,12 +15943,14 @@
         .filter((currency) => supportedCurrencies.includes(currency));
       const workingCurrencies = normalizedWorkingCurrenciesForRole(roleInput.value, currencyInput.value, selectedWorkingCurrencies);
       const hasSpecialPayout = actorHasSpecialPayout(roleInput.value);
+      const brokerCode = actorCanInitiateOrders(roleInput.value) ? nextUniqueBrokerCode(name) : "";
       state.actors.push({
         id: nextManagedActorId(),
         workspaceId: currentAuth?.workspace?.id || "",
         name,
         role: roleInput.value,
         currency: currencyInput.value,
+        brokerCode: brokerCode || undefined,
         active: true,
         managedByMaster: true,
         transferEnabled: true,
@@ -16210,7 +16312,9 @@
       updateJournalConversion("submit", false);
       const actorName = els.ledgerJournalActor.value;
       const sourceCurrency = els.ledgerJournalSourceCurrency.value;
-      const currency = els.ledgerJournalCurrency.value;
+      const selectedCurrency = els.ledgerJournalCurrency.value;
+      const destinationCurrency = ledgerToolActorBaseCurrency(actorName);
+      const currency = destinationCurrency;
       const sourceAmountMinor = parseMoney(els.ledgerJournalSourceAmount.value, sourceCurrency);
       const amountMinor = parseMoney(els.ledgerJournalAmount.value, currency);
       const rate = Number(els.ledgerJournalRate.value) || 0;
@@ -16220,9 +16324,12 @@
         ? els.ledgerJournalCommissionLiability.value
         : "";
       const remarks = els.ledgerJournalRemarks.value.trim();
-      const invalid = !actorName || !sourceCurrency || !currency || sourceAmountMinor <= 0 || amountMinor <= 0 || rate <= 0 || commissionPercent < 0 || (commissionPercent > 0 && !commissionLiability);
+      const currencyMismatch = !destinationCurrency || selectedCurrency !== destinationCurrency;
+      const invalid = !actorName || !sourceCurrency || currencyMismatch || sourceAmountMinor <= 0 || amountMinor <= 0 || rate <= 0 || commissionPercent < 0 || (commissionPercent > 0 && !commissionLiability);
       els.ledgerJournalError.textContent = invalid
-        ? commissionPercent > 0 && !commissionLiability
+        ? currencyMismatch
+          ? `The destination currency must be ${actorName}'s base currency (${destinationCurrency || "not set"}).`
+          : commissionPercent > 0 && !commissionLiability
           ? "Choose whether the commission is the Sender's, Master's, or Receiver's liability."
           : "Choose an actor, currencies, rate, amount, and a commission percentage of zero or more."
         : "";
@@ -16281,7 +16388,9 @@
       const actor = selectedActor();
       if (actor?.role !== "Master") return;
       const actorName = els.ledgerWithdrawalActor.value;
-      const currency = els.ledgerWithdrawalCurrency.value;
+      const selectedCurrency = els.ledgerWithdrawalCurrency.value;
+      const destinationCurrency = ledgerToolActorBaseCurrency(actorName);
+      const currency = destinationCurrency;
       const amountMinor = parseMoney(els.ledgerWithdrawalAmount.value, currency);
       const commissionPercent = Number(els.ledgerWithdrawalPercent.value) || 0;
       const commissionMinor = Math.round(amountMinor * commissionPercent / 100);
@@ -16289,9 +16398,12 @@
         ? els.ledgerWithdrawalCommissionLiability.value
         : "";
       const remarks = els.ledgerWithdrawalRemarks.value.trim();
-      const invalid = !actorName || !currency || amountMinor <= 0 || commissionPercent < 0 || (commissionPercent > 0 && !commissionLiability);
+      const currencyMismatch = !destinationCurrency || selectedCurrency !== destinationCurrency;
+      const invalid = !actorName || currencyMismatch || amountMinor <= 0 || commissionPercent < 0 || (commissionPercent > 0 && !commissionLiability);
       els.ledgerWithdrawalError.textContent = invalid
-        ? commissionPercent > 0 && !commissionLiability
+        ? currencyMismatch
+          ? `The destination currency must be ${actorName}'s base currency (${destinationCurrency || "not set"}).`
+          : commissionPercent > 0 && !commissionLiability
           ? "Choose whether the commission is the Sender's, Master's, or Receiver's liability."
           : "Choose an actor, currency, withdrawal amount, and a commission percentage of zero or more."
         : "";
@@ -17181,10 +17293,10 @@
       renderAll();
     });
 
-    els.exportLedgerExcelButton.addEventListener("click", exportLedgerExcel);
-    els.exportLedgerPdfButton.addEventListener("click", exportLedgerPdf);
-    els.exportArchiveExcelButton.addEventListener("click", exportArchiveExcel);
-    els.exportArchivePdfButton.addEventListener("click", exportArchivePdf);
+    els.exportLedgerExcelButton.addEventListener("click", () => confirmFileExport("Excel", "the current ledger", exportLedgerExcel));
+    els.exportLedgerPdfButton.addEventListener("click", () => confirmFileExport("PDF", "the current ledger", exportLedgerPdf));
+    els.exportArchiveExcelButton.addEventListener("click", () => confirmFileExport("Excel", "the selected report", exportArchiveExcel));
+    els.exportArchivePdfButton.addEventListener("click", () => confirmFileExport("PDF", "the selected report", exportArchivePdf));
 
     els.closeMasterTransactionsButton.addEventListener("click", () => {
       if (selectedActor()?.role !== "Master") return;
