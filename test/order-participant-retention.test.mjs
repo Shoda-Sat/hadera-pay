@@ -85,7 +85,12 @@ test("keeps a completed live order until every distinct participant has an archi
   const state = baseState();
   const live = paidOrder({ id: "ORD-341-REWRITTEN", internalOrderId: "ORD-341-REWRITTEN" });
   state.orders = [live];
-  state.archives = [archive("PPP", "ACT-PPP", "ARC-PPP", brokerClose, [paidOrder({ actor: "PPP", archivedAt: brokerClose })])];
+  state.archives = [archive("PPP", "ACT-PPP", "ARC-PPP", brokerClose, [paidOrder({
+    id: "ORD-341-REWRITTEN",
+    internalOrderId: "ORD-341-REWRITTEN",
+    actor: "PPP",
+    archivedAt: brokerClose,
+  })])];
   state.ledger = [
     paymentLine("PPP", "Debit", true, brokerClose),
     paymentLine("Dekemhare", "Credit", true, agentClose),
@@ -122,7 +127,7 @@ test("keeps a completed live order until every distinct participant has an archi
   assert.deepEqual(complete.removedOrderIds, ["ORD-341-REWRITTEN"]);
 });
 
-test("recovers a missing paid order for an open participant by journal despite a remapped hidden ID", () => {
+test("does not recover a missing paid order by journal when stable IDs disagree", () => {
   const state = baseState();
   const brokerSnapshot = paidOrder({ actor: "PPP", archivedAt: brokerClose });
   state.archives = [archive("PPP", "ACT-PPP", "ARC-PPP", brokerClose, [brokerSnapshot])];
@@ -133,23 +138,15 @@ test("recovers a missing paid order for an open participant by journal despite a
   ];
   const before = structuredClone(state);
 
-  const resolved = resolveParticipantOrderForLedgerLine(state.ledger[1], [], state.archives);
+  const resolved = resolveParticipantOrderForLedgerLine(state.ledger[1], [], state.archives, state);
   assert.equal(resolved.conflict, false);
-  assert.equal(resolved.order, brokerSnapshot);
+  assert.equal(resolved.order, null);
+  assert.equal(resolved.reason, "not-found");
   const result = retainOrdersForOpenParticipants(state);
-  assert.equal(result.recoveredCount, 1);
-  assert.deepEqual(result.recoveredOrderIds, ["ORD-341-REWRITTEN"]);
-  assert.equal(result.orders.length, 1);
-  assert.equal(result.orders[0].id, "ORD-341-REWRITTEN");
-  assert.equal(result.orders[0].internalOrderId, "ORD-341-REWRITTEN");
-  assert.equal(result.orders[0].collisionSourceOrderId, "ORD-341-OLD");
-  assert.equal(result.orders[0].journal, "JRN-1768");
-  assert.equal("archivedAt" in result.orders[0], false);
-  assert.equal("actor" in result.orders[0], false);
-  assert.equal("locked" in result.orders[0], false);
-  assert.equal(orderHasOpenParticipantLine(result.orders[0], state), true);
+  assert.equal(result.recoveredCount, 0);
+  assert.deepEqual(result.recoveredOrderIds, []);
+  assert.deepEqual(result.orders, []);
   assert.deepEqual(state, before, "Orders, ledger, settlements, and all accounting state must remain immutable.");
-  assert.equal(result.orders.includes(brokerSnapshot), false, "A recovered live record must be a clone, not the archive object.");
 });
 
 test("does not recover a historically missing row after every matching Actor line is closed", () => {
@@ -172,8 +169,8 @@ test("uses stable participant IDs before legacy names and supports a genuine leg
   state.orders = [live];
   state.ledger = [];
   state.archives = [
-    archive("PPP", "ACT-PPP", "ARC-PPP", brokerClose, [paidOrder()]),
-    archive("Dekemhare", "ACT-OTHER", "ARC-WRONG-DEKEMHARE", agentClose, [paidOrder()]),
+    archive("PPP", "ACT-PPP", "ARC-PPP", brokerClose, [paidOrder({ id: "ORD-341-REWRITTEN", internalOrderId: "ORD-341-REWRITTEN" })]),
+    archive("Dekemhare", "ACT-OTHER", "ARC-WRONG-DEKEMHARE", agentClose, [paidOrder({ id: "ORD-341-REWRITTEN", internalOrderId: "ORD-341-REWRITTEN" })]),
   ];
   assert.equal(participantArchiveCoverage(live, state).complete, false, "A reused name cannot override conflicting stable IDs.");
   assert.deepEqual(retainOrdersForOpenParticipants(state).orders, [live]);
@@ -233,7 +230,7 @@ test("rejects conflicting archive snapshots instead of recovering or pruning", (
     archive("PPP", "ACT-PPP", "ARC-PPP-A", brokerClose, [source]),
     archive("PPP", "ACT-PPP", "ARC-PPP-B", brokerClose, [conflicting]),
   ];
-  state.ledger = [paymentLine("Dekemhare", "Credit", false)];
+  state.ledger = [{ ...paymentLine("Dekemhare", "Credit", false), orderId: "ORD-341-OLD" }];
   const before = structuredClone(state);
 
   const result = retainOrdersForOpenParticipants(state);
@@ -251,8 +248,8 @@ test("rejects conflicting archive snapshots instead of recovering or pruning", (
 test("preserves a pending ID collision instead of overwriting it with recovered history", () => {
   const state = baseState();
   const pending = {
-    id: "ORD-341-REWRITTEN",
-    internalOrderId: "ORD-341-REWRITTEN",
+    id: "ORD-341-OLD",
+    internalOrderId: "ORD-341-OLD",
     brokerActorId: "ACT-OTHER",
     broker: "Other Broker",
     brokerOrderNumber: "OTH001",
@@ -266,7 +263,7 @@ test("preserves a pending ID collision instead of overwriting it with recovered 
   };
   state.orders = [pending];
   state.archives = [archive("PPP", "ACT-PPP", "ARC-PPP", brokerClose, [paidOrder()])];
-  state.ledger = [paymentLine("Dekemhare", "Credit", false)];
+  state.ledger = [{ ...paymentLine("Dekemhare", "Credit", false), orderId: "ORD-341-OLD" }];
 
   const result = retainOrdersForOpenParticipants(state);
   assert.deepEqual(result.orders, [pending]);
@@ -275,7 +272,7 @@ test("preserves a pending ID collision instead of overwriting it with recovered 
   assert.equal(result.skippedConflicts[0].reason, "live-order-identity-conflict");
 });
 
-test("falls back to stable order IDs only when a journal is unavailable", () => {
+test("stable order IDs continue to match when a journal is unavailable or renamed", () => {
   const state = baseState();
   const noJournal = paidOrder({ journal: "" });
   state.archives = [archive("PPP", "ACT-PPP", "ARC-PPP", brokerClose, [noJournal])];
@@ -290,7 +287,7 @@ test("falls back to stable order IDs only when a journal is unavailable", () => 
 
   state.archives[0].orders[0] = paidOrder({ journal: "JRN-SOURCE" });
   state.ledger[0].journal = "JRN-DIFFERENT";
-  assert.equal(retainOrdersForOpenParticipants(state).recoveredCount, 0, "Two present mismatching journals must not fall back to the ID.");
+  assert.equal(retainOrdersForOpenParticipants(state).recoveredCount, 1, "A renamed journal must not defeat an exact stable order ID.");
 });
 
 test("deduplicates a Special Broker acting as both order participants", () => {

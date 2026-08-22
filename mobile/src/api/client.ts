@@ -402,7 +402,9 @@ function normalizeState(state: Partial<WorkspaceState> | null | undefined): Work
       archives,
       Array.isArray(state?.ledger) ? state.ledger : [],
       Array.isArray(state?.actors) ? state.actors : [],
-      deletedOrderIds
+      deletedOrderIds,
+      Array.isArray(state?.orderParticipantIdentityLinks) ? state.orderParticipantIdentityLinks : [],
+      String(state?._workspaceId || "")
     ),
     receivables: Array.isArray(state?.receivables) ? state.receivables : [],
     savedCustomers: Array.isArray(state?.savedCustomers) ? state.savedCustomers : [],

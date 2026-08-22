@@ -429,7 +429,6 @@ test("workspace revision checks stay read-only and detect saved changes", async 
     const originalCollisionOrder = collisionFixtureState.orders.find((order) => order.id === "ORD-FIXED-COMMISSION");
     assert.ok(originalCollisionOrder);
     originalCollisionOrder.brokerOrderNumber = "FIX001";
-    originalCollisionOrder.journal = "JRN-COLLISION-ORIGINAL";
     originalCollisionOrder.updatedAt = new Date(Date.now() + 5_000).toISOString();
     collisionFixtureState.receivables = [
       {
@@ -450,7 +449,7 @@ test("workspace revision checks stay read-only and detect saved changes", async 
       {
         journal: "JRN-COLLISION-ORIGINAL",
         orderId: "ORD-FIXED-COMMISSION",
-        source: "ORDER_PAYMENT",
+        source: "ORDER_REFERENCE",
         account: "Fixed Commission Broker ACTOR_CLEARING",
         direction: "Debit",
         currency: "USD",
@@ -526,7 +525,7 @@ test("workspace revision checks stay read-only and detect saved changes", async 
       {
         journal: "JRN-COLLISION-NEW",
         orderId: "ORD-FIXED-COMMISSION",
-        source: "ORDER_PAYMENT",
+        source: "ORDER_REFERENCE",
         account: "Spoofed Collision Broker ACTOR_CLEARING",
         direction: "Debit",
         currency: "USD",
@@ -598,15 +597,17 @@ test("workspace revision checks stay read-only and detect saved changes", async 
     const stateWithForwardingTerms = structuredClone(repeatedCollisionSave.data.state);
     const forwardingOrder = {
       id: "ORD-SYNC-FORWARDING",
-      broker: "Galaxy Broker",
-      agent: "Galaxy Payer",
+      brokerActorId: fixedCommissionActor.id,
+      broker: fixedCommissionActor.name,
+      agentActorId: "",
+      agent: "Unassigned",
       sourceCurrency: "USD",
       payoutCurrency: "ETB",
       sourceAmountMinor: 10_000,
       payoutAmountMinor: 1_000_000,
       commissionMinor: 1_550,
       commissionPercent: 15.5,
-      state: "Assigned",
+      state: "Pending Forward",
       createdAt: new Date(Date.now() + 30_000).toISOString(),
       updatedAt: new Date(Date.now() + 60_000).toISOString(),
       forwardedPayoutDivider: 2,
@@ -651,6 +652,10 @@ test("workspace revision checks stay read-only and detect saved changes", async 
     });
 
     const collisionBaseState = structuredClone(reloadedClearedState.data.state);
+    collisionBaseState.actors.push(
+      { id: "ACT-GOITOM", name: "Goitom", role: "Broker", currency: "EUR", active: true, managedByMaster: true },
+      { id: "ACT-LAM", name: "LAM Broker", role: "Broker", currency: "EUR", active: true, managedByMaster: true },
+    );
     const goitomCreatedAt = "2026-08-06T16:30:48.000Z";
     const goitomState = structuredClone(collisionBaseState);
     goitomState.orders = [
@@ -764,7 +769,9 @@ test("workspace revision checks stay read-only and detect saved changes", async 
       body: { state: staleLamState, expectedRevision: savedGoitomState.data.revision },
     });
     const recoveredGoitomOrder = recoveredCollision.data.state.orders.find((order) => order.brokerOrderNumber === "GOI001");
-    const recoveredLamOrder = recoveredCollision.data.state.orders.find((order) => order.brokerOrderNumber === "LAM007");
+    const recoveredLamOrder = recoveredCollision.data.state.orders.find((order) =>
+      order.brokerActorId === "ACT-LAM" && order.collisionSourceOrderId === "ORD-900"
+    );
     assert.ok(recoveredGoitomOrder);
     assert.ok(recoveredLamOrder);
     assert.equal(recoveredGoitomOrder.id, "ORD-900");
@@ -774,15 +781,19 @@ test("workspace revision checks stay read-only and detect saved changes", async 
     assert.equal(recoveredGoitomOrder.accountNumber, "GOITOM-ACCOUNT");
     assert.equal(recoveredLamOrder.receiverName, "LAM Receiver");
     assert.equal(recoveredLamOrder.accountNumber, "LAM-ACCOUNT");
+    assert.notEqual(recoveredLamOrder.brokerOrderNumber, "LAM007");
 
     const recoveredGoitomReceivable = recoveredCollision.data.state.receivables.find((item) => item.brokerOrderNumber === "GOI001");
-    const recoveredLamReceivable = recoveredCollision.data.state.receivables.find((item) => item.brokerOrderNumber === "LAM007");
+    const recoveredLamReceivable = recoveredCollision.data.state.receivables.find((item) =>
+      item.orderId === recoveredLamOrder.id
+    );
     assert.ok(recoveredGoitomReceivable);
     assert.ok(recoveredLamReceivable);
     assert.equal(recoveredGoitomReceivable.id, "REC-900");
     assert.equal(recoveredGoitomReceivable.orderId, recoveredGoitomOrder.id);
     assert.match(recoveredLamReceivable.id, /^REC-\d+-[A-F0-9]{20}$/);
     assert.equal(recoveredLamReceivable.orderId, recoveredLamOrder.id);
+    assert.equal(recoveredLamReceivable.brokerOrderNumber, recoveredLamOrder.brokerOrderNumber);
     assert.equal(recoveredLamReceivable.borrower, "LAM Broker");
     assert.equal(
       recoveredCollision.data.state.ledger.find((line) => line.entryId === "COLLISION-LINE-LAM")?.orderId,

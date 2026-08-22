@@ -162,6 +162,7 @@ export interface OrderRecord {
   fundingType: FundingType;
   state: OrderState;
   journal: string;
+  journalCollisionBase?: string;
   createdAt: string;
   sentAt: string;
   paidAt: string;
@@ -261,6 +262,8 @@ export interface LedgerLine {
   entryId?: string;
   transferId?: string;
   orderId?: string;
+  actorId?: string;
+  participantRole?: "broker" | "agent";
   actorLedgerNumber?: string;
   source?: string;
   account: string;
@@ -443,6 +446,7 @@ export interface ArchiveRecord {
 
 export interface WorkspaceState {
   _syncRevision?: string;
+  _workspaceId?: string;
   actors: ActorRecord[];
   orders: OrderRecord[];
   receivables: ReceivableRecord[];
@@ -457,6 +461,18 @@ export interface WorkspaceState {
   deletedChatIds?: string[];
   deletedOrderIds?: string[];
   reservedBrokerCodes?: string[];
+  orderParticipantIdentityLinks?: Array<{
+    repairId: string;
+    workspace: string;
+    workspaceId?: string;
+    journal: string;
+    orderIds: string[];
+    role: "broker" | "agent";
+    actorId: string;
+    actorName: string;
+    participantName: string;
+    legacyActorId: string;
+  }>;
   masterRateDivisorSettings?: Partial<Record<Currency, RateSetting>>;
   buyingRates?: {
     eurToUsd?: number;

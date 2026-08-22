@@ -133,6 +133,54 @@ test("does not remove a (1) order when any order detail or amount differs", () =
   assert.deepEqual(state, before);
 });
 
+test("does not remove a distinct order whose journal suffix was assigned by the server", () => {
+  const original = paidOrder("ORD-FIRST", "JRN-1750");
+  const distinct = paidOrder("ORD-SECOND", "JRN-1750 (1)", {
+    journalCollisionBase: "JRN-1750",
+  });
+  const state = {
+    actors: [],
+    orders: [original, distinct],
+    archives: [],
+    ledger: paymentLines(distinct.id, distinct.journal),
+    receivables: [],
+    settlements: [],
+    deletedOrderIds: [],
+  };
+  const before = structuredClone(state);
+
+  assert.equal(removeExactDuplicateOrders(state).removedCount, 0);
+  assert.deepEqual(state, before);
+});
+
+test("a marked live order remains protected after an unmarked first-participant archive snapshot", () => {
+  const original = paidOrder("ORD-FIRST", "JRN-1751");
+  const distinct = paidOrder("ORD-SECOND", "JRN-1751 (1)", {
+    journalCollisionBase: "JRN-1751",
+  });
+  const unmarkedSnapshot = structuredClone(distinct);
+  delete unmarkedSnapshot.journalCollisionBase;
+  const state = {
+    actors: [],
+    orders: [distinct],
+    archives: [
+      { id: "ARC-ORIGINAL", actor: "Nahom", orders: [original] },
+      { id: "ARC-FIRST-PARTICIPANT", actor: "Nahom", orders: [unmarkedSnapshot] },
+    ],
+    ledger: paymentLines(distinct.id, distinct.journal),
+    receivables: [],
+    settlements: [],
+    deletedOrderIds: [],
+  };
+  const before = structuredClone(state);
+
+  const result = removeExactDuplicateOrders(state);
+
+  assert.equal(result.removedCount, 0);
+  assert.equal(result.removedLedgerLineCount, 0);
+  assert.deepEqual(state, before);
+});
+
 test("cleans an open ledger duplicate recoverable only from immutable reports", () => {
   const original = paidOrder("ORD-BASE", "JRN-1900");
   const duplicate = paidOrder("ORD-HISTORIC-DUP", "JRN-1900 (1)");

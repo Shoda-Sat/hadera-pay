@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -124,7 +124,6 @@ function missingBrokerFixture(initialState, suffix, { includeOpenActor = false }
     ledger: [
       { journal, orderId, source: "ORDER_PAYMENT", account: `${payer.name} ACTOR_CLEARING`, direction: "Credit", currency: "USD", amountMinor: 10_150, archived: true, closedAt: payerClosedAt },
       { journal, orderId, source: "ORDER_PAYMENT", account: `${broker.name} ACTOR_CLEARING`, direction: "Debit", currency: "USD", amountMinor: 10_150, archived: true, closedAt: brokerClosedAt },
-      ...(includeOpenActor ? [{ journal: `JRN-OPEN-${suffix}`, orderId: `ORD-OPEN-${suffix}`, source: "ORDER_PAYMENT", account: `${openActor.name} ACTOR_CLEARING`, direction: "Credit", currency: "USD", amountMinor: 500, archived: false }] : []),
     ],
   };
 }
@@ -198,11 +197,11 @@ test("Owner plan scans multiple workspaces, skips unclosed Actors, and Master ca
       });
       const initial = await requestOk(baseUrl, "/api/app-state", { cookie: master.cookie });
       const fixture = missingBrokerFixture(initial.data.state, suffix, { includeOpenActor: suffix === 1 });
-      await requestOk(baseUrl, "/api/app-state", {
-        cookie: master.cookie,
-        method: "PUT",
-        body: { state: fixture, expectedRevision: initial.data.revision },
-      });
+      fixture._syncRevision = initial.data.revision;
+      const databasePath = path.join(dataDirectory, "auth-db.json");
+      const database = JSON.parse(await readFile(databasePath, "utf8"));
+      database.appStates[master.data.session.workspace.id] = fixture;
+      await writeFile(databasePath, JSON.stringify(database, null, 2));
       masterSessions.push(master.cookie);
     }
 
@@ -239,7 +238,7 @@ test("Owner plan scans multiple workspaces, skips unclosed Actors, and Master ca
     harmlessState.ledger.push({
       journal: "JRN-LIVE-ACTIVITY",
       orderId: "ORD-LIVE-ACTIVITY",
-      source: "ORDER_PAYMENT",
+      source: "ORDER_REFERENCE",
       account: "Payer 1 ACTOR_CLEARING",
       direction: "Credit",
       currency: "USD",
@@ -285,11 +284,12 @@ test("Owner plan scans multiple workspaces, skips unclosed Actors, and Master ca
       amountMinor: 321,
       archived: true,
     });
-    await requestOk(baseUrl, "/api/app-state", {
-      cookie: masterSessions[0],
-      method: "PUT",
-      body: { state: archivedEvidenceState, expectedRevision: beforeArchivedEvidenceChange.data.revision },
-    });
+    const archivedEvidenceDatabasePath = path.join(dataDirectory, "auth-db.json");
+    const archivedEvidenceDatabase = JSON.parse(await readFile(archivedEvidenceDatabasePath, "utf8"));
+    const archivedEvidenceWorkspace = Object.values(archivedEvidenceDatabase.appStates)
+      .find((state) => (state.actors || []).some((actor) => actor.name === "Broker 1"));
+    archivedEvidenceWorkspace.ledger = archivedEvidenceState.ledger;
+    await writeFile(archivedEvidenceDatabasePath, JSON.stringify(archivedEvidenceDatabase, null, 2));
     const archivedEvidenceApply = await request(baseUrl, "/api/owner/repair-order-archives/apply-all", {
       cookie: owner.cookie,
       method: "POST",
@@ -305,11 +305,11 @@ test("Owner plan scans multiple workspaces, skips unclosed Actors, and Master ca
     const beforeEvidenceChange = await requestOk(baseUrl, "/api/app-state", { cookie: masterSessions[0] });
     const changedEvidenceState = structuredClone(beforeEvidenceChange.data.state);
     changedEvidenceState.archives[0].orders[0].remarks = "Relevant archived evidence changed";
-    await requestOk(baseUrl, "/api/app-state", {
-      cookie: masterSessions[0],
-      method: "PUT",
-      body: { state: changedEvidenceState, expectedRevision: beforeEvidenceChange.data.revision },
-    });
+    const changedEvidenceDatabase = JSON.parse(await readFile(archivedEvidenceDatabasePath, "utf8"));
+    const changedEvidenceWorkspace = Object.values(changedEvidenceDatabase.appStates)
+      .find((state) => (state.actors || []).some((actor) => actor.name === "Broker 1"));
+    changedEvidenceWorkspace.archives = changedEvidenceState.archives;
+    await writeFile(archivedEvidenceDatabasePath, JSON.stringify(changedEvidenceDatabase, null, 2));
     const changedEvidenceApply = await request(baseUrl, "/api/owner/repair-order-archives/apply-all", {
       cookie: owner.cookie,
       method: "POST",

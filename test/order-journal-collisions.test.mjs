@@ -69,3 +69,38 @@ test("does not rewrite conflicting copies that have one hidden order ID", () => 
   assert.equal(result.repairedCount, 0);
   assert.equal(state.archives[1].orders[0].journal, "JRN-1552");
 });
+
+test("keeps a renamed void journal linked to its exact reversal rows", () => {
+  const original = order("ORD-ORIGINAL", "JRN-COLLIDE", "2026-08-16T08:00:00.000Z");
+  const voided = order("ORD-VOIDED", "JRN-VOIDED-PAYMENT", "2026-08-16T09:00:00.000Z", {
+    state: "Voided",
+    voidJournal: "JRN-COLLIDE",
+    voidedAt: "2026-08-16T10:00:00.000Z",
+  });
+  const state = {
+    orders: [original, voided],
+    archives: [],
+    receivables: [{ id: "REC-VOIDED", orderId: voided.id, voidJournal: "JRN-COLLIDE" }],
+    ledger: [
+      { source: "ORDER_PAYMENT", journal: "JRN-COLLIDE", orderId: original.id, direction: "Debit", currency: "USD", amountMinor: 10_000 },
+      { source: "ORDER_PAYMENT", journal: "JRN-VOIDED-PAYMENT", orderId: voided.id, direction: "Debit", currency: "USD", amountMinor: 10_000 },
+      { source: "ORDER_VOID", journal: "JRN-COLLIDE", orderId: voided.id, direction: "Credit", currency: "USD", amountMinor: 10_000 },
+    ],
+  };
+  const financialBefore = state.ledger.map(({ direction, currency, amountMinor }) => ({ direction, currency, amountMinor }));
+
+  const result = repairOrderJournalCollisions(state);
+
+  assert.equal(result.repairedCount, 1);
+  assert.equal(original.journal, "JRN-COLLIDE");
+  assert.equal(voided.journal, "JRN-VOIDED-PAYMENT");
+  assert.equal(voided.voidJournal, "JRN-COLLIDE (1)");
+  assert.equal(state.receivables[0].voidJournal, "JRN-COLLIDE (1)");
+  assert.equal(state.ledger.find((line) => line.source === "ORDER_PAYMENT" && line.orderId === original.id).journal, "JRN-COLLIDE");
+  assert.equal(state.ledger.find((line) => line.source === "ORDER_VOID" && line.orderId === voided.id).journal, "JRN-COLLIDE (1)");
+  assert.deepEqual(
+    state.ledger.map(({ direction, currency, amountMinor }) => ({ direction, currency, amountMinor })),
+    financialBefore,
+    "Journal repair must not change any balance-affecting field.",
+  );
+});

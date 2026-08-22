@@ -8,6 +8,11 @@ import {
   galaxyLedgerOnlyOrderJournals,
   removeGalaxySpecifiedOpenOrders,
 } from "./galaxyOrderCleanup.mjs";
+import {
+  applyApprovedOrderParticipantIdentityRepair,
+  orderParticipantIdentityLinkFor,
+  orderParticipantIdentityLinkMatches,
+} from "./orderParticipantIdentity.mjs";
 
 const supportedCurrencies = ["USD", "ETB", "EUR", "ERN", "SSP", "SDG", "LYD"];
 const currencyDecimalPlaces = { USD: 2, ETB: 0, EUR: 2, ERN: 0, SSP: 2, SDG: 2, LYD: 3 };
@@ -37,7 +42,11 @@ function actorForOrderParticipant(state, order, role) {
   const participantId = cleanText(role === "broker" ? order?.brokerActorId : order?.agentActorId);
   const participantName = cleanText(role === "broker" ? order?.broker : order?.agent);
   const actors = activeActors(state);
-  if (participantId) return actors.find((actor) => cleanText(actor?.id) === participantId) || null;
+  if (participantId) {
+    const direct = actors.find((actor) => cleanText(actor?.id) === participantId);
+    if (direct) return direct;
+    return actors.find((actor) => orderParticipantIdentityLinkMatches(state, order, actor, role)) || null;
+  }
   return actors.find((actor) => cleanText(actor?.name) === participantName) || null;
 }
 
@@ -106,11 +115,14 @@ function selectActor(state, actorId, actorName) {
   return actors.find((actor) => cleanText(actor?.name) === requestedName) || null;
 }
 
-function participantMatchesActor(order, actor, role) {
+function participantMatchesActor(state, order, actor, role) {
   const participantId = cleanText(role === "broker" ? order?.brokerActorId : order?.agentActorId);
   const participantName = cleanText(role === "broker" ? order?.broker : order?.agent);
   const actorId = cleanText(actor?.id);
-  if (actorId && participantId) return actorId === participantId;
+  if (actorId && participantId) {
+    return actorId === participantId
+      || orderParticipantIdentityLinkMatches(state, order, actor, role);
+  }
   return Boolean(cleanText(actor?.name) && cleanText(actor?.name) === participantName);
 }
 
@@ -125,16 +137,27 @@ function orderIdentityValues(order) {
   return Array.from(new Set([
     order?.id,
     order?.internalOrderId,
+    order?.collisionSourceOrderId,
     order?.journal,
   ].map(cleanText).filter(Boolean)));
 }
 
+function orderStableIdentityValues(order) {
+  return Array.from(new Set([
+    order?.id,
+    order?.internalOrderId,
+    order?.collisionSourceOrderId,
+  ].map(cleanText).filter(Boolean)));
+}
+
 function ordersReferToSameRecord(left, right) {
+  const leftIds = orderStableIdentityValues(left);
+  const rightIds = new Set(orderStableIdentityValues(right));
+  if (leftIds.length && rightIds.size) return leftIds.some((value) => rightIds.has(value));
   const leftJournal = cleanText(left?.journal);
   const rightJournal = cleanText(right?.journal);
   if (leftJournal && rightJournal) return leftJournal === rightJournal;
-  const rightValues = new Set(orderIdentityValues(right));
-  return orderIdentityValues(left).some((value) => rightValues.has(value));
+  return false;
 }
 
 function uniqueOrders(orders) {
@@ -151,26 +174,28 @@ function orderForLedgerLine(state, line) {
   const liveOrders = asArray(state.orders);
   const archivedOrders = asArray(state.archives).flatMap((archive) => asArray(archive?.orders));
   if (cleanText(line.source) === "ORDER_PAYMENT") {
-    const resolved = resolveParticipantOrderForLedgerLine(line, liveOrders, state.archives);
+    const resolved = resolveParticipantOrderForLedgerLine(line, liveOrders, state.archives, state);
     return resolved.conflict ? null : resolved.order;
   }
+  const allOrders = [...liveOrders, ...archivedOrders];
+  const lineOrderId = cleanText(line.orderId);
+  if (lineOrderId) {
+    const exact = allOrders.find((order) => orderStableIdentityValues(order).includes(lineOrderId));
+    if (exact) return exact;
+    const evidenceJournal = cleanText(line.journal);
+    if (!evidenceJournal) return null;
+    const legacyMatches = allOrders.filter((order) =>
+      !orderStableIdentityValues(order).length
+      && (cleanText(order?.journal) === evidenceJournal || cleanText(order?.voidJournal) === evidenceJournal)
+    );
+    return legacyMatches.length === 1 ? legacyMatches[0] : null;
+  }
   const evidenceJournal = cleanText(line.journal);
-  if (evidenceJournal) {
-    return liveOrders.find((order) =>
-      cleanText(order?.journal) === evidenceJournal || cleanText(order?.voidJournal) === evidenceJournal
-    ) || archivedOrders.find((order) =>
-      cleanText(order?.journal) === evidenceJournal || cleanText(order?.voidJournal) === evidenceJournal
-    ) || null;
-  }
-  if (line.orderId) {
-    return liveOrders.find((order) => cleanText(order?.id) === cleanText(line.orderId))
-      || archivedOrders.find((order) =>
-        cleanText(order?.id) === cleanText(line.orderId)
-        || cleanText(order?.internalOrderId) === cleanText(line.orderId)
-      )
-      || null;
-  }
-  return null;
+  if (!evidenceJournal) return null;
+  const journalMatches = allOrders.filter((order) =>
+    cleanText(order?.journal) === evidenceJournal || cleanText(order?.voidJournal) === evidenceJournal
+  );
+  return journalMatches.length === 1 ? journalMatches[0] : null;
 }
 
 function orderArchivedForActor(state, order, actor) {
@@ -190,7 +215,7 @@ function completedOrdersForActorClose(state, actor, actorLines) {
   ]);
   return candidates.filter((order) =>
     (order?.state === "Paid" || order?.state === "Voided")
-    && (participantMatchesActor(order, actor, "broker") || participantMatchesActor(order, actor, "agent"))
+    && (participantMatchesActor(state, order, actor, "broker") || participantMatchesActor(state, order, actor, "agent"))
     && !orderArchivedForActor(state, order, actor)
   );
 }
@@ -200,12 +225,12 @@ function orderPaymentIssueForActorClose(state, actor, actorLines) {
   for (const line of actorLines) {
     if (line?.source !== "ORDER_PAYMENT") continue;
     if (line?.voided === true || line?.excludedFromCalculations === true) continue;
-    const resolved = resolveParticipantOrderForLedgerLine(line, liveOrders, state.archives);
+    const resolved = resolveParticipantOrderForLedgerLine(line, liveOrders, state.archives, state);
     if (resolved.conflict) return { line, reason: "conflicting archived records" };
     if (!resolved.order) return { line, reason: "no recoverable order record" };
     if (
-      !participantMatchesActor(resolved.order, actor, "broker")
-      && !participantMatchesActor(resolved.order, actor, "agent")
+      !participantMatchesActor(state, resolved.order, actor, "broker")
+      && !participantMatchesActor(state, resolved.order, actor, "agent")
     ) {
       return { line, reason: "an Actor identity conflict" };
     }
@@ -215,7 +240,7 @@ function orderPaymentIssueForActorClose(state, actor, actorLines) {
 
 function cancelledOrdersForActorClose(state, actor) {
   return uniqueOrders(asArray(state.orders).filter((order) =>
-    order?.state === "Cancelled" && participantMatchesActor(order, actor, "broker")
+    order?.state === "Cancelled" && participantMatchesActor(state, order, actor, "broker")
   ));
 }
 
@@ -356,7 +381,7 @@ function normalizedOrderCommissionLiability(order = {}) {
 }
 
 function payerStatementForArchive(state, order, actor) {
-  if (!participantMatchesActor(order, actor, "agent")) return null;
+  if (!participantMatchesActor(state, order, actor, "agent")) return null;
   const payerLine = asArray(state.ledger).find((line) =>
     line?.source === "ORDER_PAYMENT"
     && line?.journal === order?.journal
@@ -378,20 +403,22 @@ function payerStatementForArchive(state, order, actor) {
 function archiveOrderSnapshot(state, order, actor, closedAt, forceExcluded = false) {
   const payerStatement = payerStatementForArchive(state, order, actor);
   const frozenProfit = finiteStoredNumber(order?.incomeProfitMinor);
+  const linkedBrokerIdentity = orderParticipantIdentityLinkMatches(state, order, actor, "broker");
+  const linkedAgentIdentity = orderParticipantIdentityLinkMatches(state, order, actor, "agent");
   return {
     id: order.id || order.internalOrderId,
     internalOrderId: order.internalOrderId || order.id,
     brokerOrderNumber: order.brokerOrderNumber || order.id || "",
     brokerOrderNumberCycle: Number(order.brokerOrderNumberCycle || 0),
-    brokerActorId: order.brokerActorId || "",
-    agentActorId: order.agentActorId || "",
+    brokerActorId: linkedBrokerIdentity ? actor.id : order.brokerActorId || "",
+    agentActorId: linkedAgentIdentity ? actor.id : order.agentActorId || "",
     agentOrderNumber: order.agentOrderNumbers?.[order.agent] || order.agentOrderNumber || "",
     agentOrderActor: order.agentOrderActor || order.agent || "",
     agentOrderNumbers: order.agentOrderNumbers && typeof order.agentOrderNumbers === "object" ? { ...order.agentOrderNumbers } : {},
     agentOrderNumberCycles: order.agentOrderNumberCycles && typeof order.agentOrderNumberCycles === "object" ? { ...order.agentOrderNumberCycles } : {},
     actor: actor.name,
-    broker: order.broker,
-    agent: order.agent,
+    broker: linkedBrokerIdentity ? actor.name : order.broker,
+    agent: linkedAgentIdentity ? actor.name : order.agent,
     senderName: order.senderName || "",
     receiverName: order.receiverName || "",
     receiverCity: order.receiverCity || "",
@@ -430,6 +457,7 @@ function archiveOrderSnapshot(state, order, actor, closedAt, forceExcluded = fal
     state: order.state,
     fundingType: order.fundingType || "cash",
     journal: order.journal || "",
+    journalCollisionBase: order.journalCollisionBase || "",
     voidJournal: order.voidJournal || "",
     excludedFromCalculations: forceExcluded || orderRecordIsVoided(order),
     locked: true,
@@ -635,6 +663,40 @@ function calculatedIncomeStatementForOrder(state, order, journalLines) {
   return { baseAmountMinor, profitMinor };
 }
 
+export function deriveOrderIncomeSnapshot(state, order, journalLines = []) {
+  const calculated = calculatedIncomeStatementForOrder(state, order, journalLines);
+  const collected = masterCollectedAmountForOrder(state, order, journalLines);
+  if (!Number.isFinite(calculated.baseAmountMinor) || !Number.isFinite(calculated.profitMinor)) {
+    throw new RangeError(`Income profit could not be calculated safely for paid order ${cleanText(order?.id || order?.internalOrderId || order?.journal)}.`);
+  }
+  const payoutCurrency = order?.payoutCurrency || order?.sourceCurrency || "USD";
+  const payingActor = actorForOrderParticipant(state, order, "agent");
+  const snapshot = {
+    incomeBaseCurrency: "USD",
+    incomeBaseAmountMinor: calculated.baseAmountMinor,
+    incomeCollectedCurrency: collected.collectedCurrency,
+    incomeCollectedOriginalMinor: collected.collectedOriginalMinor,
+    incomeCollectedEurMinor: collected.collectedEurMinor,
+    incomeCollectedUsdMinor: collected.collectedUsdMinor,
+    incomeProfitMinor: calculated.profitMinor,
+    incomeSnapshotAt: order?.paidAt || new Date().toISOString(),
+    incomeMasterRateSnapshot: {
+      ...normalizedRateSetting(state?.masterRateDivisorSettings?.[payoutCurrency]),
+      payoutCurrency,
+    },
+  };
+  if (payoutCurrency === "USD" && payingActor?.role === "Agent" && payingActor?.currency === "USD") {
+    const setting = usdAgentIncomeSettingFor(payingActor);
+    snapshot.incomeUsdAgentRateSnapshot = {
+      actorId: payingActor.id,
+      actorName: payingActor.name,
+      divider: setting.divider,
+      percent: setting.percent,
+    };
+  }
+  return snapshot;
+}
+
 function frozenIncomeProfitMinor(state, actorLines) {
   const journals = Array.from(new Set(actorLines
     .filter((line) => line?.source === "ORDER_PAYMENT")
@@ -745,21 +807,45 @@ export function closeActorBalance(workspaceState, options = {}) {
   if (!requestedArchiveId) throw new TypeError("archiveId is required.");
 
   const state = cloneWorkspaceState(workspaceState);
-  repairOrderJournalCollisions(state);
+  const immutableClosedArchives = cloneWorkspaceState({ archives: asArray(state.archives) }).archives;
   removeExactDuplicateOrders(state, {
     preserveOrderJournals: galaxyLedgerOnlyOrderJournals(options.workspaceName),
   });
+  repairOrderJournalCollisions(state);
   removeGalaxySpecifiedOpenOrders(state, options.workspaceName);
+  state.archives = immutableClosedArchives;
   const actor = selectActor(state, options.actorId, options.actorName);
   const resultActorName = actor?.name || cleanText(options.actorName);
   if (!actor || actor.role === "Master") {
     return closeResult(state, false, resultActorName, requestedArchiveId, 0, policy);
   }
+  const actorNameKey = cleanText(actor.name).toLocaleLowerCase();
+  const activeActorsWithName = activeActors(state).filter((candidate) =>
+    candidate?.role !== "Master"
+    && cleanText(candidate?.name).toLocaleLowerCase() === actorNameKey
+  );
+  if (!actorNameKey || activeActorsWithName.length !== 1 || cleanText(activeActorsWithName[0]?.id) !== cleanText(actor.id)) {
+    return closeResult(
+      state,
+      false,
+      resultActorName,
+      requestedArchiveId,
+      0,
+      policy,
+      `Actor ${resultActorName || "identity"} is not uniquely identified. Resolve the Actor identity conflict before closing the balance.`
+    );
+  }
+  applyApprovedOrderParticipantIdentityRepair(state, {
+    workspaceName: options.workspaceName,
+    workspaceId: options.workspaceId,
+    actorId: actor.id,
+    actorName: actor.name,
+  });
 
   const cancelledOrders = cancelledOrdersForActorClose(state, actor);
   const unresolvedVoid = asArray(state.orders).find((order) =>
     order?.state === "Void Requested"
-    && (participantMatchesActor(order, actor, "broker") || participantMatchesActor(order, actor, "agent"))
+    && (participantMatchesActor(state, order, actor, "broker") || participantMatchesActor(state, order, actor, "agent"))
   );
   if (unresolvedVoid) {
     const orderNumber = cleanText(unresolvedVoid.brokerOrderNumber || unresolvedVoid.orderNumber || unresolvedVoid.id);
@@ -775,11 +861,49 @@ export function closeActorBalance(workspaceState, options = {}) {
   }
 
   const previousCloseDetails = `Previous Close for ${actor.name}`;
-  const closesWithActor = (line) =>
-    line?.account === actor.name
-    || line?.account === `${actor.name} ACTOR_CLEARING`
-    || (line?.source === "PREVIOUS_CLOSE" && line?.account === "MASTER_PREVIOUS_CLOSE" && line?.details === previousCloseDetails);
+  const accountNamesActor = (line) =>
+    line?.account === actor.name || line?.account === `${actor.name} ACTOR_CLEARING`;
+  const approvedLegacyPaymentLineBelongsToActor = (line) => {
+    if (line?.source !== "ORDER_PAYMENT" || !accountNamesActor(line) || !cleanText(line?.actorId)) return false;
+    const resolved = resolveParticipantOrderForLedgerLine(line, state.orders, state.archives, state);
+    if (resolved.conflict || !resolved.order) return false;
+    return ["broker", "agent"].some((role) => {
+      const link = orderParticipantIdentityLinkFor(state, resolved.order, actor, role);
+      return Boolean(link && cleanText(link.legacyActorId) === cleanText(line.actorId));
+    });
+  };
+  const mismatchedPaymentLine = asArray(state.ledger).find((line) =>
+    line?.archived !== true
+    && line?.source === "ORDER_PAYMENT"
+    && accountNamesActor(line)
+    && cleanText(line?.actorId)
+    && cleanText(line.actorId) !== cleanText(actor.id)
+    && !approvedLegacyPaymentLineBelongsToActor(line)
+  );
+  if (mismatchedPaymentLine) {
+    const journal = cleanText(mismatchedPaymentLine.journal);
+    return closeResult(
+      state,
+      false,
+      actor.name,
+      requestedArchiveId,
+      cancelledOrders.length,
+      policy,
+      `${journal ? `Order journal ${journal}` : "An order payment"} has an Actor identity conflict. Review it before closing ${actor.name}'s balance.`
+    );
+  }
+  const closesWithActor = (line) => {
+    if (line?.source === "ORDER_PAYMENT" && cleanText(line?.actorId)) {
+      return accountNamesActor(line) && (
+        cleanText(line.actorId) === cleanText(actor.id)
+        || approvedLegacyPaymentLineBelongsToActor(line)
+      );
+    }
+    return accountNamesActor(line)
+      || (line?.source === "PREVIOUS_CLOSE" && line?.account === "MASTER_PREVIOUS_CLOSE" && line?.details === previousCloseDetails);
+  };
   const actorLines = asArray(state.ledger).filter((line) => line?.archived !== true && closesWithActor(line));
+  const closingLedgerLines = new Set(actorLines);
   const openTransactionLines = actorLines.filter((line) => line?.source !== "PREVIOUS_CLOSE");
   const orderPaymentIssue = orderPaymentIssueForActorClose(state, actor, actorLines);
   if (orderPaymentIssue) {
@@ -850,7 +974,7 @@ export function closeActorBalance(workspaceState, options = {}) {
   });
 
   state.ledger = state.ledger.map((line) =>
-    closesWithActor(line) && line?.archived !== true ? { ...line, archived: true, closedAt } : line
+    closingLedgerLines.has(line) && line?.archived !== true ? { ...line, archived: true, closedAt } : line
   );
 
   const tombstones = new Set(asArray(state.deletedOrderIds).map(cleanText).filter(Boolean));

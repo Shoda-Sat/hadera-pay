@@ -112,36 +112,46 @@ function nextDuplicateJournal(base, used) {
   return candidate;
 }
 
-function lineBelongsToOrderGroup(line, orderIds) {
-  if (clean(line?.source) !== "ORDER_PAYMENT") return false;
+function lineBelongsToOrderGroup(line, orderIds, source) {
+  if (clean(line?.source) !== source) return false;
   const orderId = clean(line?.orderId);
   return Boolean(orderId && orderIds.has(orderId));
 }
 
 function renameOrderGroup(state, group, duplicateJournal, replacement) {
-  const groupOrders = group.map((entry) => entry.order);
-  const orderIds = new Set(groupOrders.flatMap((order) => [...stableOrderIds(order)]));
-  const belongsToGroup = (order) => groupOrders.some((source) => sameOrderRecord(source, order));
+  const entriesForField = (field) => group.filter((entry) => entry.field === field);
+  const sourceOrdersForField = (field) => entriesForField(field).map((entry) => entry.order);
+  const orderIdsForField = (field) => new Set(sourceOrdersForField(field)
+    .flatMap((order) => [...stableOrderIds(order)]));
+  const paymentOrderIds = orderIdsForField("journal");
+  const voidOrderIds = orderIdsForField("voidJournal");
   let changed = 0;
 
   allOrders(state).forEach((order) => {
-    if (!belongsToGroup(order)) return;
     ["journal", "voidJournal"].forEach((field) => {
+      if (!sourceOrdersForField(field).some((source) => sameOrderRecord(source, order))) return;
       if (clean(order?.[field]) !== duplicateJournal) return;
       order[field] = replacement;
+      if (field === "journal") order.journalCollisionBase = journalBase(duplicateJournal);
       changed += 1;
     });
   });
   allReceivables(state).forEach((receivable) => {
-    if (!orderIds.has(clean(receivable?.orderId))) return;
-    ["journal", "voidJournal"].forEach((field) => {
-      if (clean(receivable?.[field]) !== duplicateJournal) return;
+    const orderId = clean(receivable?.orderId);
+    [
+      ["journal", paymentOrderIds],
+      ["voidJournal", voidOrderIds],
+    ].forEach(([field, orderIds]) => {
+      if (!orderIds.has(orderId) || clean(receivable?.[field]) !== duplicateJournal) return;
       receivable[field] = replacement;
       changed += 1;
     });
   });
   allLedger(state).forEach((line) => {
-    if (clean(line?.journal) !== duplicateJournal || !lineBelongsToOrderGroup(line, orderIds)) return;
+    if (clean(line?.journal) !== duplicateJournal) return;
+    const belongsToPayment = lineBelongsToOrderGroup(line, paymentOrderIds, "ORDER_PAYMENT");
+    const belongsToVoid = lineBelongsToOrderGroup(line, voidOrderIds, "ORDER_VOID");
+    if (!belongsToPayment && !belongsToVoid) return;
     line.journal = replacement;
     changed += 1;
   });

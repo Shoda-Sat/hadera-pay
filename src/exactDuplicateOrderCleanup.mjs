@@ -95,6 +95,13 @@ function baseJournalForDuplicate(journal) {
   return match ? clean(match[1]) : "";
 }
 
+function orderHasServerResolvedJournalCollision(order, baseJournal) {
+  return Boolean(
+    clean(order?.journalCollisionBase)
+    && clean(order.journalCollisionBase) === clean(baseJournal)
+  );
+}
+
 function allOrderRecords(state = {}) {
   return [
     ...asArray(state.orders).map((order) => ({ order, live: true })),
@@ -119,7 +126,7 @@ function orderIsVoided(order) {
 function lineIsForVoidedOrder(state, line) {
   if (line?.voided === true || line?.excludedFromCalculations === true) return true;
   if (clean(line?.source) !== "ORDER_PAYMENT") return false;
-  const resolved = resolveParticipantOrderForLedgerLine(line, state.orders, state.archives);
+  const resolved = resolveParticipantOrderForLedgerLine(line, state.orders, state.archives, state);
   return !resolved.conflict && orderIsVoided(resolved.order);
 }
 
@@ -180,13 +187,20 @@ function duplicateGroups(state) {
     const baseJournal = baseJournalForDuplicate(duplicateJournal);
     if (!baseJournal) return;
     const originals = recordsByJournal.get(baseJournal) || [];
-    const candidate = candidates.find(({ order }) =>
+    const protectedOrderIds = new Set(candidates
+      .filter(({ order }) => orderHasServerResolvedJournalCollision(order, baseJournal))
+      .flatMap(({ order }) => [...ownOrderIds(order)]));
+    const removableCandidates = candidates.filter(({ order }) =>
+      !orderHasServerResolvedJournalCollision(order, baseJournal)
+      && !valuesOverlap(ownOrderIds(order), protectedOrderIds)
+    );
+    const candidate = removableCandidates.find(({ order }) =>
       originals.some(({ order: original }) => orderDetailsExactlyMatch(order, original))
     );
     if (!candidate) return;
     const original = originals.find(({ order }) => orderDetailsExactlyMatch(candidate.order, order));
     if (!original) return;
-    const matchingCandidates = candidates.filter(({ order }) => orderDetailsExactlyMatch(order, original.order));
+    const matchingCandidates = removableCandidates.filter(({ order }) => orderDetailsExactlyMatch(order, original.order));
     groups.push({
       duplicateJournal,
       baseJournal,

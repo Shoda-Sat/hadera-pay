@@ -227,7 +227,7 @@ test("a paid shared order closes once for each participant while a cancellation 
   assert.equal(repeat.state.archives.length, payerClose.state.archives.length);
 });
 
-test("the second participant closes a journal-matched archived order after its hidden ID was remapped", () => {
+test("a mismatched stable ledger order ID cannot recover an archived order by journal alone", () => {
   const state = baseState();
   state.archives = [{
     id: "ARC-PPP-FIRST",
@@ -253,6 +253,7 @@ test("the second participant closes a journal-matched archived order after its h
     orderId: line.account === "PPP ACTOR_CLEARING" ? "ORD-OLD-HIDDEN-ID" : "ORD-NEW-HIDDEN-ID",
     ...(line.account === "PPP ACTOR_CLEARING" ? { archived: true, closedAt } : {}),
   }));
+  const before = structuredClone(state);
 
   const result = closeActorBalance(state, {
     actorId: "ACT-WALTA",
@@ -261,17 +262,13 @@ test("the second participant closes a journal-matched archived order after its h
     archiveId: "ARC-WALTA-SECOND",
   });
 
-  assert.equal(result.closed, true);
-  const payerArchive = result.state.archives.find((archive) => archive.id === "ARC-WALTA-SECOND");
-  assert.equal(payerArchive.orders.length, 1);
-  assert.equal(payerArchive.orders[0].journal, "JRN-1826");
-  assert.equal(payerArchive.orders[0].actor, "Walta");
-  assert.equal(payerArchive.orders[0].payerCurrency, "ETB");
-  assert.equal(payerArchive.orders[0].payerAmountMinor, 1_970_000);
-  assert.equal(payerArchive.balances.ETB, -1_970_000);
+  assert.equal(result.closed, false);
+  assert.match(result.error, /JRN-1826.*no recoverable order record/i);
+  assert.deepEqual(result.state, before);
+  assert.deepEqual(state, before);
 });
 
-test("conflicting archived snapshots block the second participant close without touching accounting", () => {
+test("mismatched stable IDs block before conflicting same-journal snapshots can be selected", () => {
   const state = baseState();
   const source = paidOrder({
     id: "ORD-OLD-HIDDEN-ID",
@@ -317,12 +314,12 @@ test("conflicting archived snapshots block the second participant close without 
   });
 
   assert.equal(result.closed, false);
-  assert.match(result.error, /JRN-1826.*conflicting archived records/i);
+  assert.match(result.error, /JRN-1826.*no recoverable order record/i);
   assert.deepEqual(result.state, before);
   assert.deepEqual(state, before);
 });
 
-test("a distinct archived journal collision is renamed before the affected balance closes", () => {
+test("a distinct archived journal collision cannot be used to recover a mismatched stable ID", () => {
   const state = baseState();
   const source = paidOrder({
     id: "ORD-OLD-HIDDEN-ID",
@@ -369,6 +366,7 @@ test("a distinct archived journal collision is renamed before the affected balan
     orderId: line.account === "PPP ACTOR_CLEARING" ? "ORD-OLD-HIDDEN-ID" : "ORD-NEW-HIDDEN-ID",
     ...(line.account === "PPP ACTOR_CLEARING" ? { archived: true, closedAt } : {}),
   }));
+  const before = structuredClone(state);
 
   const result = closeActorBalance(state, {
     actorId: "ACT-WALTA",
@@ -377,10 +375,10 @@ test("a distinct archived journal collision is renamed before the affected balan
     archiveId: "ARC-WALTA-REPAIRED",
   });
 
-  assert.equal(result.closed, true);
-  assert.equal(result.state.archives.find((archive) => archive.id === "ARC-PPP-FIRST").orders[0].journal, "JRN-1826");
-  assert.equal(result.state.archives.find((archive) => archive.id === "ARC-OTHER").orders[0].journal, "JRN-1826 (1)");
-  assert.equal(result.state.archives.find((archive) => archive.id === "ARC-WALTA-REPAIRED").orders[0].journal, "JRN-1826");
+  assert.equal(result.closed, false);
+  assert.match(result.error, /JRN-1826.*no recoverable order record/i);
+  assert.deepEqual(result.state, before, "A refused close must not rename either closed report.");
+  assert.deepEqual(state, before);
 });
 
 test("a recreated same-name Actor cannot inherit an old participant's payment balance", () => {

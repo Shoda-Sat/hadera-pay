@@ -8,7 +8,7 @@ import {
   backfillAllClosedActorOrderSnapshots,
   backfillClosedParticipantOrderSnapshots,
 } from "./src/archiveParticipantBackfill.mjs";
-import { closeActorBalance } from "./src/closeActorBalance.mjs";
+import { closeActorBalance, deriveOrderIncomeSnapshot } from "./src/closeActorBalance.mjs";
 import {
   recalculateSettlementsFromLedger,
   removeExactDuplicateOrders,
@@ -55,6 +55,7 @@ if (typeof ownerPassword !== "string" || ownerPassword.length < 12) {
 const maxJsonBodyBytes = 12 * 1024 * 1024;
 const supportedCurrencies = ["USD", "ETB", "EUR", "ERN", "SSP", "SDG", "LYD"];
 const supportedCurrencySet = new Set(supportedCurrencies);
+const currencyDecimalPlaces = { USD: 2, ETB: 0, EUR: 2, ERN: 0, SSP: 2, SDG: 2, LYD: 3 };
 const r2AccountId = String(process.env.R2_ACCOUNT_ID || "").trim();
 const r2BucketName = String(process.env.R2_BUCKET_NAME || "").trim();
 const r2AccessKeyId = String(process.env.R2_ACCESS_KEY_ID || "").trim();
@@ -209,7 +210,8 @@ function mergeAppStates(existingStates = {}, incomingStates = {}) {
         archives,
         deletedOrderIds,
         effectiveState.ledger,
-        effectiveState.actors
+        effectiveState.actors,
+        effectiveState.orderParticipantIdentityLinks
       );
       return [
         workspaceId,
@@ -980,6 +982,111 @@ function workspaceActors(db, workspaceId) {
     }));
 }
 
+function workspaceReservedActorNames(db, workspaceId) {
+  const state = db.appStates?.[workspaceId] || {};
+  const names = new Set();
+  const reserve = (value) => {
+    const name = normalizedActorName(value);
+    if (name) names.add(name);
+  };
+  const reserveAccount = (value) => {
+    const account = String(value || "").trim();
+    if (!account || account.startsWith("MASTER_")) return;
+    reserve(account.endsWith(" ACTOR_CLEARING")
+      ? account.slice(0, -" ACTOR_CLEARING".length)
+      : account);
+  };
+  workspaceActors(db, workspaceId).forEach((actor) => reserve(actor?.name));
+  (Array.isArray(state.actors) ? state.actors : []).forEach((actor) => reserve(actor?.name));
+  (Array.isArray(state.deletedActorNames) ? state.deletedActorNames : []).forEach(reserve);
+  (Array.isArray(state.reservedActorNames) ? state.reservedActorNames : []).forEach(reserve);
+  const orderRecords = [
+    ...(Array.isArray(state.orders) ? state.orders : []),
+    ...(Array.isArray(state.archives) ? state.archives : [])
+      .flatMap((archive) => Array.isArray(archive?.orders) ? archive.orders : []),
+  ];
+  orderRecords.forEach((order) => {
+    reserve(order?.broker);
+    if (!["Unassigned", "Cancelled"].includes(String(order?.agent || ""))) reserve(order?.agent);
+  });
+  const ledgerRecords = [
+    ...(Array.isArray(state.ledger) ? state.ledger : []),
+    ...(Array.isArray(state.archives) ? state.archives : [])
+      .flatMap((archive) => Array.isArray(archive?.ledger) ? archive.ledger : []),
+  ];
+  ledgerRecords.forEach((line) => reserveAccount(line?.account));
+  (Array.isArray(state.archives) ? state.archives : []).forEach((archive) => reserve(archive?.actor));
+  (Array.isArray(state.transfers) ? state.transfers : []).forEach((transfer) => {
+    reserve(transfer?.from);
+    reserve(transfer?.to);
+  });
+  (Array.isArray(state.receivables) ? state.receivables : []).forEach((receivable) => reserve(receivable?.borrower));
+  (Array.isArray(state.settlements) ? state.settlements : []).forEach((settlement) => reserve(settlement?.actor));
+  return names;
+}
+
+function workspaceReservedActorIds(db, workspaceId) {
+  const state = db.appStates?.[workspaceId] || {};
+  const actorIds = new Set();
+  const reserve = (value) => {
+    const actorId = String(value || "").trim();
+    if (actorId && actorId !== "ACT-0") actorIds.add(actorId);
+  };
+  const reserveParticipantIds = (record) => {
+    reserve(record?.actorId);
+    reserve(record?.brokerActorId);
+    reserve(record?.agentActorId);
+    reserve(record?.borrowerActorId);
+    reserve(record?.fromActorId);
+    reserve(record?.toActorId);
+  };
+
+  (db.memberships || [])
+    .filter((membership) => membership?.workspaceId === workspaceId && membership?.role !== "Master")
+    .forEach((membership) => reserve(membership?.actorId));
+  (Array.isArray(state.actors) ? state.actors : []).forEach((actor) => {
+    if (String(actor?.role || "") !== "Master") reserve(actor?.id);
+  });
+  (Array.isArray(state.deletedActorIds) ? state.deletedActorIds : []).forEach(reserve);
+  (Array.isArray(state.reservedActorIds) ? state.reservedActorIds : []).forEach(reserve);
+
+  const archives = Array.isArray(state.archives) ? state.archives : [];
+  [
+    ...(Array.isArray(state.orders) ? state.orders : []),
+    ...archives.flatMap((archive) => Array.isArray(archive?.orders) ? archive.orders : []),
+    ...(Array.isArray(state.receivables) ? state.receivables : []),
+    ...archives.flatMap((archive) => Array.isArray(archive?.receivables) ? archive.receivables : []),
+    ...(Array.isArray(state.transfers) ? state.transfers : []),
+    ...archives.flatMap((archive) => Array.isArray(archive?.transfers) ? archive.transfers : []),
+  ].forEach(reserveParticipantIds);
+  archives.forEach((archive) => reserve(archive?.actorId));
+  [
+    ...(Array.isArray(state.ledger) ? state.ledger : []),
+    ...archives.flatMap((archive) => Array.isArray(archive?.ledger) ? archive.ledger : []),
+  ].forEach((line) => reserve(line?.actorId));
+  (Array.isArray(state.orderParticipantIdentityLinks) ? state.orderParticipantIdentityLinks : [])
+    .forEach((link) => {
+      reserve(link?.actorId);
+      reserve(link?.legacyActorId);
+      reserve(link?.sourceActorId);
+      reserve(link?.targetActorId);
+    });
+  return actorIds;
+}
+
+function nextWorkspaceActorId(db, workspaceId) {
+  const reserved = workspaceReservedActorIds(db, workspaceId);
+  (db.invites || [])
+    .filter((invite) => invite?.workspaceId === workspaceId)
+    .forEach((invite) => {
+      const actorId = String(invite?.actorId || "").trim();
+      if (actorId) reserved.add(actorId);
+    });
+  let actorId = "";
+  do actorId = id("act"); while (reserved.has(actorId));
+  return actorId;
+}
+
 function mergeById(existingItems = [], incomingItems = []) {
   const merged = new Map();
   [...existingItems, ...incomingItems].forEach((item) => {
@@ -1545,6 +1652,20 @@ function mergeByKey(existingItems = [], incomingItems = [], keyForItem) {
   return Array.from(merged.values());
 }
 
+function workspaceLedgerLineKey(line = {}) {
+  return [
+    line.journal,
+    line.source,
+    line.account,
+    line.direction,
+    line.currency,
+    line.amountMinor,
+    line.postedAt,
+    line.orderId || "",
+    line.paymentComponent || line.entryId || line.id || "",
+  ].join(":");
+}
+
 function archiveSnapshotItemKey(type, item = {}) {
   if (type === "orders") {
     return [item.id || item.brokerOrderNumber, item.createdAt || item.sentAt, item.broker, item.agent, item.sourceCurrency, item.sourceAmountMinor, item.payoutCurrency, item.payoutAmountMinor, item.journal].join(":");
@@ -1622,13 +1743,217 @@ function mergeArchiveSnapshots(existingArchives = [], incomingArchives = []) {
   return normalizeArchiveSnapshots(archives);
 }
 
-function removeOrdersAlreadyArchived(orders = [], archives = [], deletedOrderIds = [], ledger = [], actors = []) {
+function closedArchiveKey(archive = {}) {
+  return String(archive?.id || [archive?.actor, archive?.closedAt, archive?.closedBy].join(":"));
+}
+
+function masterTransactionArchiveIsValid(archive, submittedState = {}) {
+  const archiveId = String(archive?.id || "").trim();
+  const closedAt = String(archive?.closedAt || "").trim();
+  if (
+    !Array.isArray(archive?.orders)
+    || !Array.isArray(archive?.receivables)
+    || !Array.isArray(archive?.ledger)
+    || !Array.isArray(archive?.transfers)
+  ) return false;
+  const orders = archive.orders;
+  const receivables = archive.receivables;
+  const ledger = archive.ledger;
+  const transfers = archive.transfers;
+  if (orders.length || receivables.length) return false;
+  if (!ledger.length && !transfers.length) return false;
+  if (String(archive?.actor || "") !== "Transfer Transactions" || String(archive?.actorId || "").trim()) return false;
+  if (Object.values(archive?.balances || {}).some((value) => Number(value || 0) !== 0)) return false;
+
+  const submittedLedger = Array.isArray(submittedState?.ledger) ? submittedState.ledger : [];
+  const allowedLedgerSources = new Set(["JOURNAL", "WITHDRAWAL", "JOURNAL_COMMISSION", "WITHDRAWAL_COMMISSION"]);
+  const activeActorAccounts = new Set((Array.isArray(submittedState?.actors) ? submittedState.actors : [])
+    .filter((actor) => actor?.active !== false && String(actor?.name || "").trim())
+    .flatMap((actor) => [String(actor?.name || "").trim(), `${String(actor?.name || "").trim()} ACTOR_CLEARING`])
+    .filter(Boolean));
+  const lineHasActorAccount = (line) => {
+    const account = String(line?.account || "").trim();
+    return activeActorAccounts.has(account);
+  };
+  const reportableLedgerLine = (line) => {
+    const source = String(line?.source || "");
+    return source === "JOURNAL"
+      || (source === "WITHDRAWAL" && String(line?.direction || "") === "Credit" && lineHasActorAccount(line))
+      || (["JOURNAL_COMMISSION", "WITHDRAWAL_COMMISSION"].includes(source) && lineHasActorAccount(line));
+  };
+  const ledgerShapeKey = (line) => JSON.stringify([
+    String(line?.journal || ""),
+    String(line?.entryId || ""),
+    String(line?.actorLedgerNumber || ""),
+    String(line?.transferId || ""),
+    String(line?.transferRecordKey || ""),
+    String(line?.orderId || ""),
+    String(line?.source || ""),
+    String(line?.account || ""),
+    String(line?.direction || ""),
+    String(line?.currency || ""),
+    Number(line?.amountMinor),
+    Number(line?.masterTransactionCycle || 0),
+    String(line?.masterTransactionClosedAt || ""),
+    String(line?.postedAt || ""),
+  ]);
+  const expectedLedger = submittedLedger.filter((line) =>
+    String(line?.masterTransactionArchiveId || "") === archiveId
+    && String(line?.masterTransactionClosedAt || "") === closedAt
+    && reportableLedgerLine(line)
+  );
+  const validLedgerRows = [...ledger, ...expectedLedger].every((line) => {
+    if (
+      !allowedLedgerSources.has(String(line?.source || ""))
+      || String(line?.orderId || "").trim()
+      || String(line?.actorId || "").trim()
+      || String(line?.masterTransactionClosedAt || "") !== closedAt
+      || !supportedCurrencySet.has(String(line?.currency || ""))
+      || !["Debit", "Credit"].includes(String(line?.direction || ""))
+      || !Number.isSafeInteger(Number(line?.amountMinor))
+      || Number(line.amountMinor) <= 0
+    ) return false;
+    return true;
+  });
+  if (
+    !validLedgerRows
+    || ledger.some((snapshot) => String(snapshot?.actor || "") !== "Transfer Transactions" || String(snapshot?.archivedAt || "") !== closedAt)
+    || JSON.stringify(ledger.map(ledgerShapeKey).sort()) !== JSON.stringify(expectedLedger.map(ledgerShapeKey).sort())
+  ) return false;
+
+  const submittedTransfers = Array.isArray(submittedState?.transfers) ? submittedState.transfers : [];
+  const canonicalTransferCommissionPercent = (transfer) => {
+    const percent = Number(transfer?.commissionPercent);
+    return Number.isFinite(percent) && percent >= 0 ? percent : 0;
+  };
+  const canonicalTransferCommissionMinor = (transfer) => {
+    const stored = Number(transfer?.commissionMinor);
+    if (Number.isFinite(stored) && stored >= 0) return Math.round(stored);
+    return Math.round(
+      Number(transfer?.sourceAmountMinor || transfer?.amountMinor || 0)
+      * canonicalTransferCommissionPercent(transfer)
+      / 100
+    );
+  };
+  const canonicalTransferCommissionLiability = (transfer) => {
+    const liability = String(transfer?.commissionLiability || "").trim();
+    if (["Sender", "Receiver", "Master"].includes(liability)) return liability;
+    return canonicalTransferCommissionMinor(transfer) > 0 ? "Sender" : "";
+  };
+  const transferShapeKey = (transfer) => JSON.stringify([
+    String(transfer?.id || ""),
+    transferIdentity(transfer),
+    Number(transfer?.masterTransactionCycle || 0),
+    String(transfer?.from || ""),
+    String(transfer?.to || ""),
+    String(transfer?.initiatedBy || transfer?.from || ""),
+    String(transfer?.sourceCurrency || transfer?.currency || ""),
+    Number(transfer?.sourceAmountMinor || transfer?.amountMinor || 0),
+    String(transfer?.currency || transfer?.sourceCurrency || ""),
+    Number(transfer?.amountMinor || 0),
+    String(transfer?.rate || "1"),
+    canonicalTransferCommissionPercent(transfer),
+    canonicalTransferCommissionMinor(transfer),
+    canonicalTransferCommissionLiability(transfer),
+    String(transfer?.remarks || ""),
+    String(transfer?.state || ""),
+    String(transfer?.journal || ""),
+    String(transfer?.reversalJournal || ""),
+    String(transfer?.createdAt || ""),
+    String(transfer?.sentAt || ""),
+    String(transfer?.approvedAt || ""),
+    String(transfer?.paidOutAt || ""),
+    String(transfer?.reversedAt || ""),
+    String(transfer?.reversedBy || ""),
+    String(transfer?.masterTransactionClosedAt || ""),
+  ]);
+  const expectedTransfers = submittedTransfers.filter((transfer) =>
+    String(transfer?.masterTransactionArchiveId || "") === archiveId
+    && String(transfer?.masterTransactionClosedAt || "") === closedAt
+  );
+  const validTransferRows = [...transfers, ...expectedTransfers].every((transfer) => {
+    if (
+      String(transfer?.masterTransactionClosedAt || "") !== closedAt
+      || !["Approved", "Reversed", "Rejected", "Cancelled"].includes(String(transfer?.state || ""))
+      || !supportedCurrencySet.has(String(transfer?.sourceCurrency || transfer?.currency || ""))
+      || !supportedCurrencySet.has(String(transfer?.currency || transfer?.sourceCurrency || ""))
+      || !Number.isSafeInteger(Number(transfer?.sourceAmountMinor || transfer?.amountMinor || 0))
+      || !Number.isSafeInteger(Number(transfer?.amountMinor || 0))
+    ) return false;
+    return true;
+  });
+  return validTransferRows
+    && transfers.every((snapshot) => String(snapshot?.actor || "") === "Transfer Transactions" && String(snapshot?.archivedAt || "") === closedAt)
+    && JSON.stringify(transfers.map(transferShapeKey).sort()) === JSON.stringify(expectedTransfers.map(transferShapeKey).sort());
+}
+
+function archivesForOrdinaryAppStateSave(persistedArchives = [], submittedArchives = [], session = {}, submittedState = {}) {
+  const existing = Array.isArray(persistedArchives) ? persistedArchives : [];
+  const existingKeys = new Set(existing.map(closedArchiveKey).filter(Boolean));
+  const acceptedKeys = new Set(existingKeys);
+  const additions = [];
+  if (session?.membership?.role === "Master") {
+    (Array.isArray(submittedArchives) ? submittedArchives : []).forEach((archive) => {
+      const archiveId = String(archive?.id || "").trim();
+      const archiveKey = closedArchiveKey(archive);
+      const actor = String(archive?.actor || "").trim();
+      const closedAt = new Date(archive?.closedAt || 0).getTime();
+      const validMasterTransactionArchive = (
+        !archiveId
+        ? false
+        : archive?.kind === "master-transactions"
+          && String(archive?.actorRole || "") === "Master"
+          && actor === "Transfer Transactions"
+          && Number.isFinite(closedAt)
+          && closedAt > 0
+          && masterTransactionArchiveIsValid(archive, submittedState)
+      );
+      if (acceptedKeys.has(archiveKey)) return;
+      if (!validMasterTransactionArchive) {
+        throw httpError(409, "Archived Actor reports can only be created through the protected balance-close action.");
+      }
+      additions.push(structuredClone(archive));
+      acceptedKeys.add(archiveKey);
+    });
+  } else if ((Array.isArray(submittedArchives) ? submittedArchives : []).some((archive) =>
+    !existingKeys.has(closedArchiveKey(archive))
+  )) {
+    throw httpError(409, "Closed reports cannot be created or changed through an ordinary workspace save.");
+  }
+  return [...additions, ...structuredClone(existing)];
+}
+
+function mergeImmutableClosedArchives(existingArchives = [], incomingArchives = []) {
+  const existing = Array.isArray(existingArchives) ? existingArchives : [];
+  const existingIds = new Set(existing.map(closedArchiveKey).filter(Boolean));
+  const additions = [];
+  const addedIds = new Set();
+  (Array.isArray(incomingArchives) ? incomingArchives : []).forEach((archive) => {
+    const archiveId = closedArchiveKey(archive);
+    if (!archiveId || existingIds.has(archiveId) || addedIds.has(archiveId)) return;
+    additions.push(structuredClone(archive));
+    addedIds.add(archiveId);
+  });
+  return [...additions, ...structuredClone(existing)];
+}
+
+function removeOrdersAlreadyArchived(
+  orders = [],
+  archives = [],
+  deletedOrderIds = [],
+  ledger = [],
+  actors = [],
+  orderParticipantIdentityLinks = []
+) {
   return retainOrdersForOpenParticipants({
     orders: Array.isArray(orders) ? orders : [],
     archives: normalizeArchiveSnapshots(archives),
     deletedOrderIds: Array.isArray(deletedOrderIds) ? deletedOrderIds : [],
     ledger: Array.isArray(ledger) ? ledger : [],
     actors: Array.isArray(actors) ? actors : [],
+    orderParticipantIdentityLinks: Array.isArray(orderParticipantIdentityLinks)
+      ? orderParticipantIdentityLinks
+      : [],
   }).orders;
 }
 
@@ -1664,7 +1989,40 @@ function mergeReceivables(existingItems = [], incomingItems = []) {
 
 function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   const currentState = db.appStates[workspaceId] || {};
+  const reservedActorNames = workspaceReservedActorNames(db, workspaceId);
+  const reservedActorIds = workspaceReservedActorIds(db, workspaceId);
   const membershipActors = workspaceActors(db, workspaceId);
+  const membershipActorIds = new Set(membershipActors.map((actor) => String(actor?.id || "")));
+  const existingActorsById = new Map(mergeById(currentState.actors || [], membershipActors)
+    .map((actor) => [String(actor?.id || ""), actor]));
+  const incomingActorNames = new Map();
+  const incomingActorIds = new Map();
+  (Array.isArray(incomingState.actors) ? incomingState.actors : []).forEach((actor) => {
+    if (!actor || String(actor?.role || "") === "Master") return;
+    const actorId = String(actor?.id || "").trim();
+    const actorName = normalizedActorName(actor?.name);
+    if (!actorId || !actorName) throw httpError(409, "Every Actor must have a permanent ID and a unique name.");
+    const submittedNameForId = incomingActorIds.get(actorId);
+    if (submittedNameForId && submittedNameForId !== actorName) {
+      throw httpError(409, "Actor IDs must be unique and cannot be reassigned to another Actor.");
+    }
+    incomingActorIds.set(actorId, actorName);
+    const existingActor = existingActorsById.get(actorId);
+    if (existingActor && !membershipActorIds.has(actorId) && normalizedActorName(existingActor?.name) !== actorName) {
+      throw httpError(409, "Actor names cannot be changed after creation because balances and reports use that identity.");
+    }
+    if (!existingActor && reservedActorIds.has(actorId)) {
+      throw httpError(409, "That Actor ID belongs to an earlier Actor or transaction. Refresh before creating the Actor again.");
+    }
+    if (!existingActor && reservedActorNames.has(actorName)) {
+      throw httpError(409, "That Actor name has already been used in this workspace. Choose a unique name so earlier balances and reports stay separate.");
+    }
+    const otherActorId = incomingActorNames.get(actorName);
+    if (otherActorId && otherActorId !== actorId) {
+      throw httpError(409, "Actor names must be unique in this workspace.");
+    }
+    incomingActorNames.set(actorName, actorId);
+  });
   const currencyViolations = newManualLedgerCurrencyViolations(currentState, incomingState, membershipActors);
   if (currencyViolations.length > 0) {
     const violation = currencyViolations[0];
@@ -1696,18 +2054,18 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   nextState.savedCustomers = mergeById(currentState.savedCustomers, incomingState.savedCustomers);
   nextState.receivables = mergeReceivables(currentState.receivables, incomingState.receivables);
   nextState.transfers = mergeTransfers(currentState.transfers, incomingState.transfers);
-  nextState.ledger = mergeByKey(currentState.ledger, incomingState.ledger, (line) =>
-    [line.journal, line.source, line.account, line.direction, line.currency, line.amountMinor, line.postedAt].join(":")
-  );
+  nextState.ledger = mergeByKey(currentState.ledger, incomingState.ledger, workspaceLedgerLineKey);
   nextState.masterBankEntries = mergeById(currentState.masterBankEntries, incomingState.masterBankEntries);
-  nextState.archives = mergeArchiveSnapshots(currentState.archives, incomingState.archives);
+  nextState.archives = mergeImmutableClosedArchives(currentState.archives, incomingState.archives);
+  const immutableClosedArchives = structuredClone(nextState.archives);
   nextState.deletedOrderIds = Array.from(deletedOrderIds);
   nextState.orders = removeOrdersAlreadyArchived(
     nextState.orders,
     nextState.archives,
     nextState.deletedOrderIds,
     nextState.ledger,
-    nextState.actors
+    nextState.actors,
+    nextState.orderParticipantIdentityLinks
   );
   nextState.chatConversations = mergeChatConversations(currentState.chatConversations, incomingState.chatConversations)
     .filter((chat) => !deletedChatIds.has(chat?.id))
@@ -1741,6 +2099,13 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
       };
     });
   nextState.actors = nextState.actors.filter((actor) => activeActorIds.has(actor?.id) || !deletedActorIds.has(actor?.id));
+  nextState.actors.forEach((actor) => reservedActorNames.add(normalizedActorName(actor?.name)));
+  nextState.actors.forEach((actor) => {
+    if (String(actor?.role || "") !== "Master") reservedActorIds.add(String(actor?.id || "").trim());
+  });
+  deletedActorIds.forEach((actorId) => reservedActorIds.add(String(actorId || "").trim()));
+  nextState.reservedActorNames = Array.from(reservedActorNames).filter(Boolean).sort();
+  nextState.reservedActorIds = Array.from(reservedActorIds).filter(Boolean).sort();
   assignFutureManagedBrokerCodes(db, workspaceId, currentState, nextState, membershipActors);
   nextState.deletedActorIds = Array.from(new Set([...deletedActorIds, ...(nextState.deletedActorIds || [])]));
   nextState.deletedActorNames = [];
@@ -1767,12 +2132,13 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
       : transfer
   );
   nextState.journalCounter = Math.max(Number(currentState.journalCounter || 0), Number(incomingState.journalCounter || 0), nextJournalNumberFromLedger(nextState.ledger) - 1);
-  repairOrderJournalCollisions(nextState);
   const workspaceName = db.workspaces?.find((workspace) => workspace?.id === workspaceId)?.name || "";
   removeExactDuplicateOrders(nextState, {
     preserveOrderJournals: galaxyLedgerOnlyOrderJournals(workspaceName),
   });
+  repairOrderJournalCollisions(nextState);
   removeGalaxySpecifiedOpenOrders(nextState, workspaceName);
+  nextState.archives = immutableClosedArchives;
   if (isolationRepair.repaired) recalculateSettlementsFromLedger(nextState);
   nextState._workspaceId = workspaceId;
   if (isolationRepair.repaired) {
@@ -2265,6 +2631,7 @@ async function applyActorBalanceClose(session, input = {}) {
       actorId: String(input.actorId || "").trim(),
       actorName: String(input.actorName || "").trim(),
       workspaceName: session.workspace.name,
+      workspaceId: session.workspace.id,
       cancelledOrderPolicy,
       closedAt: new Date().toISOString(),
       archiveId: `ARC-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`,
@@ -2288,6 +2655,875 @@ async function applyActorBalanceClose(session, input = {}) {
   });
 }
 
+function normalizedActorName(value) {
+  return String(value || "").trim().toLocaleLowerCase();
+}
+
+function orderParticipantIdentityIsFrozen(order = {}) {
+  return Boolean(
+    String(order?.journal || "").trim()
+    || String(order?.paidAt || "").trim()
+    || ["Paid", "Void Requested", "Voided"].includes(String(order?.state || "").trim())
+  );
+}
+
+function orderIdentityValues(order = {}) {
+  return new Set([
+    order?.id,
+    order?.internalOrderId,
+    order?.collisionSourceOrderId,
+  ].map((value) => String(value || "").trim()).filter(Boolean));
+}
+
+function orderHasClosedArchiveSnapshot(order, persistedState) {
+  const orderIds = orderIdentityValues(order);
+  const journal = String(order?.journal || "").trim();
+  return (Array.isArray(persistedState?.archives) ? persistedState.archives : []).some((archive) =>
+    (Array.isArray(archive?.orders) ? archive.orders : []).some((snapshot) => {
+      const snapshotIds = orderIdentityValues(snapshot);
+      if (orderIds.size && snapshotIds.size) {
+        return Array.from(snapshotIds).some((id) => orderIds.has(id));
+      }
+      const snapshotJournal = String(snapshot?.journal || "").trim();
+      if (journal && snapshotJournal) return journal === snapshotJournal;
+      return false;
+    })
+  );
+}
+
+function activeOrderAgent(order, persistedActors) {
+  const actorId = String(order?.agentActorId || "").trim();
+  const actorName = normalizedActorName(order?.agent);
+  const actors = Array.from(persistedActors.values()).filter((actor) =>
+    actor?.active !== false
+    && ["Agent", "Special Agent", "Special Broker"].includes(String(actor?.role || ""))
+  );
+  if (actorId) return actors.find((actor) => String(actor?.id || "") === actorId) || null;
+  const byName = actors.filter((actor) => normalizedActorName(actor?.name) === actorName);
+  return byName.length === 1 ? byName[0] : null;
+}
+
+function activeOrderBroker(order, persistedActors) {
+  const actorId = String(order?.brokerActorId || "").trim();
+  const actorName = normalizedActorName(order?.broker);
+  const actors = Array.from(persistedActors.values()).filter((actor) =>
+    actor?.active !== false && ["Broker", "Special Broker"].includes(String(actor?.role || ""))
+  );
+  if (actorId) return actors.find((actor) => String(actor?.id || "") === actorId) || null;
+  const byName = actors.filter((actor) => normalizedActorName(actor?.name) === actorName);
+  return byName.length === 1 ? byName[0] : null;
+}
+
+function actorSessionMatchesOrderAgent(session, order, persistedActors) {
+  if (session?.membership?.role !== "Actor") return false;
+  if (!["Agent", "Special Agent", "Special Broker"].includes(String(session?.membership?.actorRole || ""))) return false;
+  const payer = activeOrderAgent(order, persistedActors);
+  return Boolean(payer && String(payer.id || "") === String(session?.membership?.actorId || ""));
+}
+
+function sessionMayRequestOrderVoid(session, order, persistedActors) {
+  if (session?.membership?.role === "Master") return true;
+  return actorSessionMatchesOrderAgent(session, order, persistedActors);
+}
+
+function canonicalizeActorPaymentTransition(order, persistedOrder, persistedActors) {
+  const journal = String(order?.journal || "").trim();
+  if (!journal) throw httpError(409, "The payment journal is missing. Refresh and mark the order as paid again.");
+  const paidAt = transitionTimestampAfter(persistedOrder?.updatedAt, persistedOrder?.assignedAt);
+  const next = structuredClone(persistedOrder);
+  const allowedFields = [
+    "paymentProof",
+  ];
+  allowedFields.forEach((field) => {
+    if (Object.prototype.hasOwnProperty.call(order, field)) next[field] = structuredClone(order[field]);
+  });
+  next.state = "Paid";
+  next.journal = journal;
+  next.paidAt = paidAt;
+  next.updatedAt = paidAt;
+  next.returnedBy = "";
+  next.returnedReason = "";
+  next.returnedAt = "";
+  const broker = activeOrderBroker(persistedOrder, persistedActors);
+  if (broker) {
+    next.brokerActorId = broker.id;
+    next.broker = broker.name;
+  }
+  const payer = activeOrderAgent(persistedOrder, persistedActors);
+  if (payer) {
+    next.agentActorId = payer.id;
+    next.agent = payer.name;
+  }
+  return next;
+}
+
+function actorSessionOwnsOrderBroker(session, order) {
+  if (session?.membership?.role !== "Actor") return false;
+  if (!["Broker", "Special Broker"].includes(String(session?.membership?.actorRole || ""))) return false;
+  const brokerActorId = String(order?.brokerActorId || "").trim();
+  if (brokerActorId) return brokerActorId === String(session?.membership?.actorId || "");
+  return normalizedActorName(order?.broker) === normalizedActorName(session?.membership?.actorName);
+}
+
+function canonicalizeActorReturnTransition(order, persistedOrder, session) {
+  const reason = String(order?.returnedReason || "").trim().slice(0, 500);
+  if (!reason) throw httpError(409, "Enter a reason before returning this order.");
+  const returnedAt = transitionTimestampAfter(persistedOrder?.updatedAt, persistedOrder?.assignedAt);
+  return {
+    ...structuredClone(persistedOrder),
+    state: "Returned",
+    agent: "Unassigned",
+    agentActorId: "",
+    returnedBy: String(session?.membership?.actorName || persistedOrder?.agent || ""),
+    returnedReason: reason,
+    returnedAt,
+    updatedAt: returnedAt,
+  };
+}
+
+function canonicalizeActorCancellation(persistedOrder, session) {
+  const cancelledAt = transitionTimestampAfter(persistedOrder?.updatedAt, persistedOrder?.returnedAt);
+  return {
+    ...structuredClone(persistedOrder),
+    state: "Cancelled",
+    agent: "Cancelled",
+    agentActorId: "",
+    cancelledBy: String(session?.membership?.actorName || persistedOrder?.broker || ""),
+    cancelledAt,
+    updatedAt: cancelledAt,
+  };
+}
+
+function transitionTimestampAfter(...values) {
+  const minimum = Math.max(...values.map((value) => new Date(value || 0).getTime()).filter(Number.isFinite), 0) + 1;
+  return new Date(Math.max(Date.now(), minimum)).toISOString();
+}
+
+function workspaceJournalValues(state) {
+  const journals = new Set();
+  const records = [
+    ...(Array.isArray(state?.orders) ? state.orders : []),
+    ...(Array.isArray(state?.receivables) ? state.receivables : []),
+    ...(Array.isArray(state?.transfers) ? state.transfers : []),
+    ...(Array.isArray(state?.ledger) ? state.ledger : []),
+    ...(Array.isArray(state?.archives) ? state.archives : []).flatMap((archive) => [
+      ...(Array.isArray(archive?.orders) ? archive.orders : []),
+      ...(Array.isArray(archive?.receivables) ? archive.receivables : []),
+      ...(Array.isArray(archive?.transfers) ? archive.transfers : []),
+      ...(Array.isArray(archive?.ledger) ? archive.ledger : []),
+    ]),
+  ];
+  records.forEach((record) => [record?.journal, record?.voidJournal, record?.reversalJournal]
+    .forEach((value) => {
+      const journal = String(value || "").trim();
+      if (journal) journals.add(journal);
+    }));
+  return journals;
+}
+
+function workspaceJournalIsUsed(state, journal) {
+  const requested = String(journal || "").trim();
+  return Boolean(requested && workspaceJournalValues(state).has(requested));
+}
+
+function nextAvailableDuplicateJournal(journal, usedJournals) {
+  const base = String(journal || "").trim().replace(/\s+\(\d+\)$/, "");
+  let suffix = 1;
+  let candidate = `${base} (${suffix})`;
+  while (usedJournals.has(candidate)) candidate = `${base} (${++suffix})`;
+  return candidate;
+}
+
+function canonicalizeFrozenOrderTransition(order, persistedOrder, session, persistedState, persistedActors) {
+  const baseline = structuredClone(persistedOrder);
+  const persistedStatus = String(persistedOrder?.state || "");
+  const submittedStatus = String(order?.state || "");
+  const archived = orderHasClosedArchiveSnapshot(persistedOrder, persistedState);
+  const payer = activeOrderAgent(persistedOrder, persistedActors);
+
+  if (persistedStatus === "Paid") {
+    const requestsVoid = submittedStatus === "Void Requested" || order?.voidRequested === true;
+    if (requestsVoid) {
+      if (archived) throw httpError(409, "This order cannot be voided because an Actor balance containing it is already closed.");
+      if (!sessionMayRequestOrderVoid(session, persistedOrder, persistedActors) || !payer) {
+        throw httpError(403, "Only the assigned payer can request a void for this order.");
+      }
+      const requestedAt = transitionTimestampAfter(persistedOrder?.voidRejectedAt, persistedOrder?.updatedAt);
+      return {
+        ...baseline,
+        state: "Void Requested",
+        voidRequested: true,
+        voidRequestedBy: String(payer.name || persistedOrder.agent || ""),
+        voidRequestedAt: requestedAt,
+        excludedFromCalculations: false,
+        updatedAt: requestedAt,
+      };
+    }
+    if (
+      ["Cancelled", "Voided"].includes(submittedStatus)
+      || String(order?.voidJournal || "").trim()
+      || String(order?.cancelledAt || "").trim()
+      || String(order?.voidedAt || "").trim()
+    ) {
+      throw httpError(409, "A paid order must go through a Master-approved void request before it can be excluded.");
+    }
+    return baseline;
+  }
+
+  if (persistedStatus === "Void Requested") {
+    if (session?.membership?.role !== "Master") return baseline;
+    if (archived) throw httpError(409, "This order cannot be changed because an Actor balance containing it is already closed.");
+    if (submittedStatus === "Paid" && (order?.voidRequested === false || String(order?.voidRejectedAt || "").trim())) {
+      const rejectedAt = transitionTimestampAfter(persistedOrder?.voidRequestedAt, persistedOrder?.updatedAt);
+      return {
+        ...baseline,
+        state: "Paid",
+        voidRequested: false,
+        voidRejectedBy: String(session?.membership?.actorName || "Master"),
+        voidRejectedAt: rejectedAt,
+        excludedFromCalculations: false,
+        updatedAt: rejectedAt,
+      };
+    }
+    if (submittedStatus === "Voided") {
+      const voidJournal = String(order?.voidJournal || "").trim();
+      if (!voidJournal || voidJournal === String(persistedOrder?.journal || "").trim()) {
+        throw httpError(409, "The approved void is missing its reversal journal.");
+      }
+      if (workspaceJournalIsUsed(persistedState, voidJournal)) {
+        throw httpError(409, "That reversal journal is already in use. Refresh and approve the void again.");
+      }
+      const voidedAt = transitionTimestampAfter(persistedOrder?.voidRequestedAt, persistedOrder?.updatedAt);
+      return {
+        ...baseline,
+        state: "Voided",
+        voidJournal,
+        voidRequested: false,
+        voidedAt,
+        voidedBy: String(session?.membership?.actorName || "Master"),
+        excludedFromCalculations: true,
+        updatedAt: voidedAt,
+      };
+    }
+    if (submittedStatus === "Void Requested") return baseline;
+    throw httpError(409, "Only Master can approve or reject this pending void request.");
+  }
+
+  return baseline;
+}
+
+function canonicalizeChangedOrderAgentIdentity(order, persistedOrder, persistedActors) {
+  const next = { ...order };
+  const actorId = String(next.agentActorId || "").trim();
+  const actorName = String(next.agent || "").trim();
+  const normalizedName = normalizedActorName(actorName);
+  if (["", "unassigned", "cancelled"].includes(normalizedName)) {
+    next.agentActorId = "";
+    if (!actorName) next.agent = "Unassigned";
+    return next;
+  }
+
+  const persistedId = String(persistedOrder?.agentActorId || "").trim();
+  const persistedName = String(persistedOrder?.agent || "").trim();
+  if (
+    persistedOrder
+    && actorId === persistedId
+    && normalizedName === normalizedActorName(persistedName)
+  ) {
+    return next;
+  }
+
+  const actors = Array.from(persistedActors.values()).filter((actor) =>
+    actor?.active !== false
+    && ["Agent", "Special Agent", "Special Broker"].includes(String(actor?.role || ""))
+  );
+  const actorById = actorId ? actors.find((actor) => String(actor?.id || "") === actorId) : null;
+  const actorsByName = actors.filter((actor) => normalizedActorName(actor?.name) === normalizedName);
+  if (actorById) {
+    if (actorsByName.length && !actorsByName.some((actor) => actor.id === actorById.id)) {
+      throw httpError(409, "The selected Actor identity conflicts with another Actor. Refresh and assign the order again.");
+    }
+    next.agentActorId = actorById.id;
+    next.agent = actorById.name;
+    return next;
+  }
+  if (!actorId && actorsByName.length === 1) {
+    next.agentActorId = actorsByName[0].id;
+    next.agent = actorsByName[0].name;
+    return next;
+  }
+  throw httpError(409, "The selected Actor is no longer available. Refresh and assign the order again.");
+}
+
+function canonicalizeNewOrderBrokerIdentity(order, persistedActors) {
+  const next = { ...order };
+  const actorId = String(next.brokerActorId || "").trim();
+  const actorName = String(next.broker || "").trim();
+  const normalizedName = normalizedActorName(actorName);
+  const brokers = Array.from(persistedActors.values()).filter((actor) =>
+    actor?.active !== false && ["Broker", "Special Broker"].includes(String(actor?.role || ""))
+  );
+  const actorById = actorId ? brokers.find((actor) => String(actor?.id || "") === actorId) : null;
+  const actorsByName = brokers.filter((actor) => normalizedActorName(actor?.name) === normalizedName);
+  if (actorById) {
+    if (actorsByName.length && !actorsByName.some((actor) => actor.id === actorById.id)) {
+      throw httpError(409, "The Broker identity conflicts with another Actor. Refresh and create the order again.");
+    }
+    next.brokerActorId = actorById.id;
+    next.broker = actorById.name;
+    return next;
+  }
+  if (!actorId && actorsByName.length === 1) {
+    next.brokerActorId = actorsByName[0].id;
+    next.broker = actorsByName[0].name;
+    return next;
+  }
+  throw httpError(409, "The selected Broker is no longer available. Refresh and create the order again.");
+}
+
+const actorCreatedOrderServerOwnedFields = [
+  "agentActorId",
+  "assignedAgentUserId",
+  "agentOrderNumber",
+  "agentOrderActor",
+  "agentOrderNumbers",
+  "agentOrderNumberCycles",
+  "payingAgent",
+  "payoutAgent",
+  "payoutAgentName",
+  "assignedAt",
+  "assignedBy",
+  "journal",
+  "paidJournalEntryId",
+  "paidAt",
+  "paidBy",
+  "postedAt",
+  "payerCurrency",
+  "payerAmountMinor",
+  "paymentProof",
+  "voidableUntil",
+  "returnedAt",
+  "returnedBy",
+  "returnedReason",
+  "cancelledAt",
+  "cancelledBy",
+  "voidJournal",
+  "voidRequested",
+  "voidRequestedAt",
+  "voidRequestedBy",
+  "voidRejectedAt",
+  "voidRejectedBy",
+  "voided",
+  "voidedAt",
+  "voidedBy",
+  "excludedFromCalculations",
+  "archivedAt",
+  "archiveId",
+  "locked",
+  "lastReminderAt",
+  "lastReminderBy",
+  "forwardedPayoutDivider",
+  "forwardedPayoutPercent",
+  "manualSpecialPayoutDivider",
+  "manualSpecialPayoutPercent",
+  "manualMasterRateDivider",
+  "manualMasterRatePercent",
+  "incomeBaseCurrency",
+  "incomeBaseAmountMinor",
+  "incomeCollectedCurrency",
+  "incomeCollectedOriginalMinor",
+  "incomeCollectedEurMinor",
+  "incomeCollectedUsdMinor",
+  "incomeProfitMinor",
+  "incomeSnapshotAt",
+  "incomeMasterRateSnapshot",
+  "incomeUsdAgentRateSnapshot",
+];
+
+function sanitizeActorCreatedPendingOrder(order = {}) {
+  const pending = { ...order };
+  actorCreatedOrderServerOwnedFields.forEach((field) => delete pending[field]);
+  pending.state = "Pending Forward";
+  pending.agent = "Unassigned";
+  pending.agentActorId = "";
+  return pending;
+}
+
+function orderForPaymentLedgerLine(line, orders) {
+  const orderId = String(line?.orderId || "").trim();
+  if (orderId) {
+    const byId = orders.filter((order) =>
+      [order?.id, order?.internalOrderId, order?.collisionSourceOrderId]
+        .some((value) => String(value || "").trim() === orderId)
+    );
+    if (byId.length === 1) return byId[0];
+    return null;
+  }
+  const journal = String(line?.journal || "").trim();
+  const byJournal = journal ? orders.filter((order) => String(order?.journal || "").trim() === journal) : [];
+  return byJournal.length === 1 ? byJournal[0] : null;
+}
+
+function canonicalPaymentLineParticipant(line, order, actorsById) {
+  const account = String(line?.account || "").trim();
+  const participants = ["broker", "agent"].map((role) => {
+    const actorId = String(role === "broker" ? order?.brokerActorId || "" : order?.agentActorId || "").trim();
+    const actorName = normalizedActorName(role === "broker" ? order?.broker : order?.agent);
+    const eligible = Array.from(actorsById.values()).filter((actor) =>
+      actor?.active !== false
+      && (role === "broker"
+        ? ["Broker", "Special Broker"].includes(String(actor?.role || ""))
+        : ["Agent", "Special Agent", "Special Broker"].includes(String(actor?.role || "")))
+    );
+    const actor = actorId
+      ? eligible.find((candidate) => String(candidate?.id || "") === actorId)
+      : eligible.filter((candidate) => normalizedActorName(candidate?.name) === actorName).length === 1
+        ? eligible.find((candidate) => normalizedActorName(candidate?.name) === actorName)
+        : null;
+    return actor && account === `${actor.name} ACTOR_CLEARING` ? { role, actor } : null;
+  }).filter(Boolean);
+  const roles = participants.map((participant) => participant.role);
+  const submittedRole = String(line?.participantRole || "").trim().toLocaleLowerCase();
+  const role = roles.includes(submittedRole) ? submittedRole : roles.length === 1 ? roles[0] : "";
+  if (!role) return null;
+  const participant = participants.find((candidate) => candidate.role === role);
+  return participant ? { actorId: participant.actor.id, participantRole: role } : null;
+}
+
+function paymentMinorFromMajor(value, currency) {
+  return Math.round(Number(value || 0) * (10 ** (currencyDecimalPlaces[currency] ?? 0)));
+}
+
+function paymentMajorFromMinor(value, currency) {
+  return Number(value || 0) / (10 ** (currencyDecimalPlaces[currency] ?? 0));
+}
+
+function forwardedPayoutPercentForOrder(order) {
+  if (!Object.prototype.hasOwnProperty.call(order || {}, "forwardedPayoutPercent")) return null;
+  const raw = order?.forwardedPayoutPercent;
+  if (raw === null || raw === undefined || String(raw).trim() === "") return null;
+  const percent = Number(raw);
+  return Number.isFinite(percent) && percent >= 0 ? percent : null;
+}
+
+function paymentPayerStatement(order, persistedActors) {
+  const actor = activeOrderAgent(order, persistedActors);
+  if (!actor) throw httpError(409, "The assigned payout Actor identity is unavailable. Refresh and assign the order again.");
+  const payoutCurrency = String(order?.payoutCurrency || order?.sourceCurrency || "").trim();
+  const payoutAmountMinor = Number(order?.payoutAmountMinor || order?.sourceAmountMinor || 0);
+  const forwardedDivider = Number(order?.forwardedPayoutDivider);
+  const forwardedPercent = forwardedPayoutPercentForOrder(order);
+  const hasForwardedDivider = Number.isFinite(forwardedDivider) && forwardedDivider > 0;
+  const hasForwardedPercent = forwardedPercent !== null;
+  const applyForwardedTerms = (amountMinor, currency) => {
+    let major = paymentMajorFromMinor(amountMinor, currency);
+    if (hasForwardedDivider) major /= forwardedDivider;
+    if (hasForwardedPercent) major *= 1 + forwardedPercent / 100;
+    return paymentMinorFromMajor(major, currency);
+  };
+  if (!["Special Agent", "Special Broker"].includes(String(actor?.role || ""))) {
+    return {
+      actor,
+      currency: payoutCurrency,
+      amountMinor: hasForwardedDivider || hasForwardedPercent
+        ? applyForwardedTerms(payoutAmountMinor, payoutCurrency)
+        : payoutAmountMinor,
+    };
+  }
+  const baseCurrency = String(actor?.currency || "").trim();
+  const setting = actor?.specialPayoutSettings?.[payoutCurrency] || {};
+  const specialDivider = Number(setting?.divider) > 0 ? Number(setting.divider) : 1;
+  const specialPercent = Number(setting?.percent) > 0 ? Number(setting.percent) : 0;
+  const finishSpecial = (baseMajor, fallbackPercent) => ({
+    actor,
+    currency: baseCurrency,
+    amountMinor: paymentMinorFromMajor(
+      baseMajor * (1 + (hasForwardedPercent ? forwardedPercent : fallbackPercent) / 100),
+      baseCurrency
+    ),
+  });
+  if (hasForwardedDivider) {
+    return finishSpecial(paymentMajorFromMinor(payoutAmountMinor, payoutCurrency) / forwardedDivider, 0);
+  }
+  if (setting?.enabled === true) {
+    return finishSpecial(paymentMajorFromMinor(payoutAmountMinor, payoutCurrency) / specialDivider, specialPercent);
+  }
+  const manualDivider = Number(order?.manualSpecialPayoutDivider || 0);
+  const manualPercent = Number(order?.manualSpecialPayoutPercent || 0);
+  if ((Number.isFinite(manualDivider) && manualDivider > 0) || (Number.isFinite(manualPercent) && manualPercent > 0)) {
+    const divider = Number.isFinite(manualDivider) && manualDivider > 0 ? manualDivider : 1;
+    const percent = Number.isFinite(manualPercent) && manualPercent > 0 ? manualPercent : 0;
+    return finishSpecial(paymentMajorFromMinor(payoutAmountMinor, payoutCurrency) / divider, percent);
+  }
+  if (baseCurrency === payoutCurrency) {
+    return {
+      actor,
+      currency: baseCurrency,
+      amountMinor: hasForwardedDivider || hasForwardedPercent
+        ? applyForwardedTerms(payoutAmountMinor, baseCurrency)
+        : payoutAmountMinor,
+    };
+  }
+  if (baseCurrency === String(order?.sourceCurrency || "")) {
+    const sourceAmountMinor = Number(order?.sourceAmountMinor || 0);
+    return {
+      actor,
+      currency: baseCurrency,
+      amountMinor: hasForwardedDivider || hasForwardedPercent
+        ? applyForwardedTerms(sourceAmountMinor, baseCurrency)
+        : sourceAmountMinor,
+    };
+  }
+  const rate = Number(order?.rate || 1) || 1;
+  const baseAmountMinor = paymentMinorFromMajor(
+    paymentMajorFromMinor(payoutAmountMinor, payoutCurrency) / rate,
+    baseCurrency
+  );
+  return {
+    actor,
+    currency: baseCurrency,
+    amountMinor: hasForwardedDivider || hasForwardedPercent
+      ? applyForwardedTerms(baseAmountMinor, baseCurrency)
+      : baseAmountMinor,
+  };
+}
+
+function orderPaymentCommissionTerms(order) {
+  const sourceAmountMinor = Number(order?.sourceAmountMinor);
+  const storedMinor = Number(order?.commissionMinor);
+  const percent = Number(order?.commissionPercent);
+  const amountMinor = Number.isFinite(storedMinor) && storedMinor !== 0
+    ? Math.abs(Math.round(storedMinor))
+    : Number.isFinite(sourceAmountMinor) && Number.isFinite(percent)
+      ? Math.abs(Math.round(sourceAmountMinor * percent / 100))
+      : 0;
+  const liability = (Number.isFinite(percent) && percent < 0) || (Number.isFinite(storedMinor) && storedMinor < 0)
+    ? "Master"
+    : String(order?.orderCommissionLiability || "") === "Master" ? "Master" : "Broker";
+  return liability === "Master"
+    ? { amountMinor, brokerDirection: "Credit", masterDirection: "Debit", masterAccount: "MASTER_COMMISSION_EXPENSE" }
+    : { amountMinor, brokerDirection: "Debit", masterDirection: "Credit", masterAccount: "MASTER_FEE_REVENUE" };
+}
+
+function expectedOrderPaymentLines(order, persistedActors) {
+  const broker = activeOrderBroker(order, persistedActors);
+  if (!broker) throw httpError(409, "The order's Broker identity is unavailable. Refresh before posting payment.");
+  const payer = paymentPayerStatement(order, persistedActors);
+  const sourceCurrency = String(order?.sourceCurrency || "").trim();
+  const sourceAmountMinor = Number(order?.sourceAmountMinor);
+  const commission = orderPaymentCommissionTerms(order);
+  if (
+    !supportedCurrencySet.has(sourceCurrency)
+    || !supportedCurrencySet.has(payer.currency)
+    || !Number.isSafeInteger(sourceAmountMinor)
+    || sourceAmountMinor <= 0
+    || !Number.isSafeInteger(payer.amountMinor)
+    || payer.amountMinor <= 0
+    || !Number.isSafeInteger(commission.amountMinor)
+    || commission.amountMinor < 0
+  ) {
+    throw httpError(409, "The order payment amounts or currencies are invalid. Refresh before posting payment.");
+  }
+  return [
+    { paymentComponent: "brokerPrincipal", actorId: broker.id, participantRole: "broker", account: `${broker.name} ACTOR_CLEARING`, direction: "Debit", currency: sourceCurrency, amountMinor: sourceAmountMinor },
+    { paymentComponent: "brokerCommission", actorId: broker.id, participantRole: "broker", account: `${broker.name} ACTOR_CLEARING`, direction: commission.brokerDirection, currency: sourceCurrency, amountMinor: commission.amountMinor },
+    { paymentComponent: "masterPrincipal", account: "MASTER_FX_CLEARING", direction: "Credit", currency: sourceCurrency, amountMinor: sourceAmountMinor },
+    { paymentComponent: "masterCommission", account: commission.masterAccount, direction: commission.masterDirection, currency: sourceCurrency, amountMinor: commission.amountMinor },
+    { paymentComponent: "masterPayout", account: "MASTER_FX_CLEARING", direction: "Debit", currency: payer.currency, amountMinor: payer.amountMinor },
+    { paymentComponent: "agentPayout", actorId: payer.actor.id, participantRole: "agent", account: `${payer.actor.name} ACTOR_CLEARING`, direction: "Credit", currency: payer.currency, amountMinor: payer.amountMinor },
+  ].filter((line) => line.amountMinor > 0);
+}
+
+function paymentLineShapeKey(line) {
+  return JSON.stringify([
+    String(line?.account || "").trim(),
+    String(line?.direction || "").trim(),
+    String(line?.currency || "").trim(),
+    Number(line?.amountMinor),
+    String(line?.actorId || "").trim(),
+    String(line?.participantRole || "").trim(),
+  ]);
+}
+
+function protectAndCanonicalizeOrderPaymentLedger(state, persistedState, persistedActors, session) {
+  const persistedOrdersById = new Map((Array.isArray(persistedState.orders) ? persistedState.orders : [])
+    .map((order) => [String(order?.id || ""), order]));
+  const submittedOrders = Array.isArray(state.orders) ? state.orders : [];
+  const newlyPaidTransitions = submittedOrders.filter((order) => {
+    const persisted = persistedOrdersById.get(String(order?.id || ""));
+    return order?.state === "Paid" && (!persisted || !orderParticipantIdentityIsFrozen(persisted));
+  });
+  const approvedVoidTransitions = submittedOrders.filter((order) => {
+    const persisted = persistedOrdersById.get(String(order?.id || ""));
+    return persisted?.state === "Void Requested" && order?.state === "Voided";
+  });
+  const hasFinancialOrderTransition = newlyPaidTransitions.length > 0 || approvedVoidTransitions.length > 0;
+  if (!Array.isArray(state.ledger)) {
+    if (hasFinancialOrderTransition) {
+      throw httpError(409, "A payment or approved void must be saved together with its complete ledger journal.");
+    }
+    return;
+  }
+  const newlyPaidOrderIds = new Set(newlyPaidTransitions.flatMap((order) => [order?.id, order?.internalOrderId])
+    .map((value) => String(value || "").trim()).filter(Boolean));
+  const approvedVoidOrderIdsForReservation = new Set(approvedVoidTransitions
+    .map((order) => String(order?.id || order?.internalOrderId || "").trim()).filter(Boolean));
+  const incomingReservedJournals = new Set();
+  const reserveIncomingJournal = (value) => {
+    const journal = String(value || "").trim();
+    if (journal) incomingReservedJournals.add(journal);
+  };
+  submittedOrders.forEach((order) => {
+    const orderId = String(order?.id || order?.internalOrderId || "").trim();
+    if (!newlyPaidOrderIds.has(orderId)) reserveIncomingJournal(order?.journal);
+    if (!approvedVoidOrderIdsForReservation.has(orderId)) reserveIncomingJournal(order?.voidJournal);
+  });
+  (Array.isArray(state.receivables) ? state.receivables : []).forEach((receivable) => {
+    if (newlyPaidOrderIds.has(String(receivable?.orderId || "").trim())) return;
+    reserveIncomingJournal(receivable?.journal);
+    reserveIncomingJournal(receivable?.voidJournal);
+  });
+  (Array.isArray(state.transfers) ? state.transfers : []).forEach((transfer) => {
+    reserveIncomingJournal(transfer?.journal);
+    reserveIncomingJournal(transfer?.reversalJournal);
+  });
+  (Array.isArray(state.ledger) ? state.ledger : []).forEach((line) => {
+    const source = String(line?.source || "").trim();
+    const orderId = String(line?.orderId || "").trim();
+    if (source === "ORDER_PAYMENT" && newlyPaidOrderIds.has(orderId)) return;
+    if (source === "ORDER_VOID" && approvedVoidOrderIdsForReservation.has(orderId)) return;
+    reserveIncomingJournal(line?.journal);
+  });
+  (Array.isArray(state.archives) ? state.archives : []).forEach((archive) => {
+    for (const record of [
+      ...(Array.isArray(archive?.orders) ? archive.orders : []),
+      ...(Array.isArray(archive?.receivables) ? archive.receivables : []),
+      ...(Array.isArray(archive?.transfers) ? archive.transfers : []),
+      ...(Array.isArray(archive?.ledger) ? archive.ledger : []),
+    ]) {
+      reserveIncomingJournal(record?.journal);
+      reserveIncomingJournal(record?.voidJournal);
+      reserveIncomingJournal(record?.reversalJournal);
+    }
+  });
+  const usedJournals = new Set([
+    ...workspaceJournalValues(persistedState),
+    ...incomingReservedJournals,
+  ]);
+  const claimedJournals = new Set();
+  newlyPaidTransitions.forEach((order) => {
+    const originalJournal = String(order?.journal || "").trim();
+    if (!originalJournal) return;
+    const journal = usedJournals.has(originalJournal) || claimedJournals.has(originalJournal)
+      ? nextAvailableDuplicateJournal(originalJournal, new Set([...usedJournals, ...claimedJournals]))
+      : originalJournal;
+    if (journal !== originalJournal) {
+      const orderIds = new Set([order?.id, order?.internalOrderId]
+        .map((value) => String(value || "").trim()).filter(Boolean));
+      state.ledger.forEach((line) => {
+        if (
+          String(line?.source || "") === "ORDER_PAYMENT"
+          && orderIds.has(String(line?.orderId || "").trim())
+          && String(line?.journal || "").trim() === originalJournal
+        ) line.journal = journal;
+      });
+      (Array.isArray(state.receivables) ? state.receivables : []).forEach((receivable) => {
+        if (
+          orderIds.has(String(receivable?.orderId || "").trim())
+          && String(receivable?.journal || "").trim() === originalJournal
+        ) receivable.journal = journal;
+      });
+      order.journal = journal;
+      order.journalCollisionBase = originalJournal.replace(/\s+\(\d+\)$/, "");
+    }
+    claimedJournals.add(journal);
+  });
+  approvedVoidTransitions.forEach((order) => {
+    const journal = String(order?.voidJournal || "").trim();
+    if (!journal) return;
+    if (usedJournals.has(journal) || claimedJournals.has(journal)) {
+      throw httpError(409, "That reversal journal is already in use. Refresh and approve the void again.");
+    }
+    claimedJournals.add(journal);
+  });
+  const persistedLines = new Map((persistedState.ledger || []).map((line) => [workspaceLedgerLineKey(line), line]));
+  const actorsById = new Map(Array.from(persistedActors.values()).map((actor) => [String(actor?.id || ""), actor]));
+  const persistedOrderRecords = [
+    ...(Array.isArray(persistedState.orders) ? persistedState.orders : []),
+    ...(Array.isArray(persistedState.archives) ? persistedState.archives : [])
+      .flatMap((archive) => Array.isArray(archive?.orders) ? archive.orders : []),
+  ];
+  const orders = [
+    ...(Array.isArray(state.orders) ? state.orders : []),
+    ...(Array.isArray(state.archives) ? state.archives : [])
+      .flatMap((archive) => Array.isArray(archive?.orders) ? archive.orders : []),
+  ];
+  const approvedVoids = (Array.isArray(state.orders) ? state.orders : [])
+    .map((order) => ({ order, persisted: persistedOrdersById.get(String(order?.id || "")) }))
+    .filter(({ order, persisted }) => persisted?.state === "Void Requested" && order?.state === "Voided");
+  const approvedVoidJournals = new Set(approvedVoids.map(({ order }) => String(order?.voidJournal || "").trim()).filter(Boolean));
+  const approvedVoidOrderIds = new Set(approvedVoids.map(({ order }) => String(order?.id || "").trim()).filter(Boolean));
+  const incomingLedger = state.ledger.map((line) => ({ ...line }));
+  const canonicalVoidLines = [];
+  const canonicalVoidedPaymentLines = [];
+  const persistedArchiveKeys = new Set((Array.isArray(persistedState.archives) ? persistedState.archives : [])
+    .map(closedArchiveKey).filter(Boolean));
+  const newMasterTransactionArchives = new Map((Array.isArray(state.archives) ? state.archives : [])
+    .filter((archive) => archive?.kind === "master-transactions" && !persistedArchiveKeys.has(closedArchiveKey(archive)))
+    .map((archive) => [String(archive?.id || "").trim(), archive]));
+  const validatedMasterTransactionMarker = (line) => {
+    const archiveId = String(line?.masterTransactionArchiveId || "").trim();
+    const closedAt = String(line?.masterTransactionClosedAt || "").trim();
+    const archive = newMasterTransactionArchives.get(archiveId);
+    if (!archive || !closedAt || String(archive?.closedAt || "") !== closedAt) return null;
+    const source = String(line?.source || "");
+    if (["JOURNAL", "WITHDRAWAL", "JOURNAL_COMMISSION", "WITHDRAWAL_COMMISSION"].includes(source)) {
+      const linked = (archive.ledger || []).some((snapshot) =>
+        String(snapshot?.journal || "") === String(line?.journal || "")
+        && (
+          (String(snapshot?.entryId || "") && String(snapshot.entryId) === String(line?.entryId || ""))
+          || (!String(snapshot?.entryId || "") && !String(line?.entryId || ""))
+        )
+        && Number(snapshot?.masterTransactionCycle || 0) === Number(line?.masterTransactionCycle || 0)
+      );
+      return linked ? { masterTransactionArchiveId: archiveId, masterTransactionClosedAt: closedAt } : null;
+    }
+    if (["TRANSFER", "TRANSFER_REVERSAL"].includes(source)) {
+      const linked = (archive.transfers || []).some((transfer) =>
+        (String(line?.transferRecordKey || "") && String(transfer?.recordKey || "") === String(line.transferRecordKey))
+        || [transfer?.journal, transfer?.reversalJournal].map((value) => String(value || "")).includes(String(line?.journal || ""))
+      );
+      return linked ? { masterTransactionArchiveId: archiveId, masterTransactionClosedAt: closedAt } : null;
+    }
+    return null;
+  };
+
+  approvedVoids.forEach(({ order, persisted }) => {
+    const paidLines = (Array.isArray(persistedState.ledger) ? persistedState.ledger : []).filter((line) =>
+      line?.archived !== true
+      && String(line?.source || "") === "ORDER_PAYMENT"
+      && orderForPaymentLedgerLine(line, [persisted]) === persisted
+    );
+    const submitted = incomingLedger.filter((line) =>
+      String(line?.source || "") === "ORDER_VOID"
+      && String(line?.journal || "").trim() === String(order?.voidJournal || "").trim()
+      && (!String(line?.orderId || "").trim() || String(line.orderId).trim() === String(order?.id || "").trim())
+    );
+    const remaining = [...submitted];
+    const matched = paidLines.map((paidLine) => {
+      const index = remaining.findIndex((line) =>
+        String(line?.account || "") === String(paidLine?.account || "")
+        && String(line?.direction || "") === (String(paidLine?.direction || "") === "Debit" ? "Credit" : "Debit")
+        && String(line?.currency || "") === String(paidLine?.currency || "")
+        && Number(line?.amountMinor || 0) === Number(paidLine?.amountMinor || 0)
+      );
+      if (index < 0) return null;
+      return remaining.splice(index, 1)[0];
+    });
+    if (!paidLines.length || matched.some((line) => !line) || remaining.length) {
+      throw httpError(409, "The void reversal does not exactly match the original payment journal. Refresh and approve it again.");
+    }
+    paidLines.forEach((paidLine, index) => {
+      canonicalVoidedPaymentLines.push({
+        ...paidLine,
+        orderId: String(order.id || persisted.id || paidLine.orderId || ""),
+        voided: true,
+        excludedFromCalculations: true,
+        voidedAt: order.voidedAt,
+      });
+      canonicalVoidLines.push({
+        ...paidLine,
+        journal: order.voidJournal,
+        orderId: String(order.id || persisted.id || paidLine.orderId || ""),
+        source: "ORDER_VOID",
+        direction: String(paidLine.direction || "") === "Debit" ? "Credit" : "Debit",
+        details: String(matched[index]?.details || `Void of ${persisted.brokerOrderNumber || persisted.id || "order"}`),
+        voided: true,
+        excludedFromCalculations: true,
+        voidedAt: order.voidedAt,
+        postedAt: order.voidedAt,
+      });
+    });
+  });
+
+  state.ledger = incomingLedger.flatMap((line) => {
+    const next = { ...line };
+    const exactPersisted = persistedLines.get(workspaceLedgerLineKey(next));
+    if (String(next.source || "") === "ORDER_VOID") {
+      const belongsToApprovedVoid = approvedVoidJournals.has(String(next.journal || "").trim())
+        || approvedVoidOrderIds.has(String(next.orderId || "").trim());
+      if (belongsToApprovedVoid) return [];
+      if (exactPersisted) return [{ ...exactPersisted }];
+      throw httpError(409, "A new order void must come from a pending request approved by Master.");
+    }
+    if (String(next.source || "") === "ORDER_PAYMENT") {
+      const persistedOrder = orderForPaymentLedgerLine(next, persistedOrderRecords);
+      if (persistedOrder && orderParticipantIdentityIsFrozen(persistedOrder)) return [];
+      const order = orderForPaymentLedgerLine(next, orders);
+      if (!order) {
+        if (exactPersisted) return [{ ...exactPersisted }];
+        throw httpError(409, "An order payment row has no unique order record. Refresh and post the payment again.");
+      }
+      if (String(order?.state || "") !== "Paid") {
+        throw httpError(409, "Order payment rows can only be posted with a paid order.");
+      }
+      next.orderId = String(order.id || order.internalOrderId || next.orderId || "");
+      if (String(order.journal || "").trim()) next.journal = order.journal;
+      if (String(order.paidAt || "").trim()) next.postedAt = order.paidAt;
+    }
+    const persisted = persistedLines.get(workspaceLedgerLineKey(next));
+    if (persisted) {
+      const masterTransactionMarker = validatedMasterTransactionMarker(next);
+      return [{ ...persisted, ...(masterTransactionMarker || {}) }];
+    }
+    if (String(next.source || "") !== "ORDER_PAYMENT") return [next];
+    const order = orderForPaymentLedgerLine(next, orders);
+    const account = String(next?.account || "").trim();
+    const participant = canonicalPaymentLineParticipant(next, order, actorsById);
+    if (participant) {
+      next.actorId = participant.actorId;
+      next.participantRole = participant.participantRole;
+    } else if (account.startsWith("MASTER_")) {
+      delete next.actorId;
+      delete next.participantRole;
+    } else {
+      throw httpError(409, "An order payment Actor account does not match the order's Broker or assigned payer.");
+    }
+    return [next];
+  });
+  state.ledger.push(...canonicalVoidedPaymentLines, ...canonicalVoidLines);
+
+  const newlyPaidOrders = newlyPaidTransitions;
+  newlyPaidOrders.forEach((order) => {
+    const journal = String(order?.journal || "").trim();
+    const lines = state.ledger.filter((line) =>
+      String(line?.source || "") === "ORDER_PAYMENT"
+      && String(line?.journal || "").trim() === journal
+      && String(line?.orderId || "").trim() === String(order?.id || order?.internalOrderId || "").trim()
+    );
+    const expectedLines = expectedOrderPaymentLines(order, persistedActors);
+    const remaining = [...lines];
+    const exact = expectedLines.every((expected) => {
+      const key = paymentLineShapeKey(expected);
+      const index = remaining.findIndex((line) => paymentLineShapeKey(line) === key);
+      if (index < 0) return false;
+      const [matchedLine] = remaining.splice(index, 1);
+      matchedLine.paymentComponent = expected.paymentComponent;
+      return true;
+    });
+    if (!journal || !exact || remaining.length > 0 || lines.length !== expectedLines.length) {
+      throw httpError(409, "The new order payment journal is incomplete or unbalanced. Refresh and mark the order as paid again.");
+    }
+    Object.assign(order, deriveOrderIncomeSnapshot({
+      ...persistedState,
+      ...state,
+      actors: Array.from(persistedActors.values()),
+      orders: state.orders,
+      ledger: state.ledger,
+    }, order, lines));
+  });
+}
+
 function sanitizeIncomingWorkspaceState(state, session, db) {
   if (!state || typeof state !== "object") return {};
   if (stateDeclaresAnotherWorkspace(state, session.workspace.id)) {
@@ -2303,10 +3539,16 @@ function sanitizeIncomingWorkspaceState(state, session, db) {
   const sanitized = { ...state };
   sanitized._workspaceId = session.workspace.id;
   const persistedActors = new Map(
-    mergeById(persistedState.actors || [], workspaceActors(db, session.workspace.id))
+    mergeById(
+      mergeById(persistedState.actors || [], workspaceActors(db, session.workspace.id)),
+      session?.membership?.role === "Master" && Array.isArray(state.actors) ? state.actors : []
+    )
       .map((actor) => [actor?.id, actor])
   );
   const persistedOrders = new Map((persistedState.orders || []).map((order) => [order?.id, order]));
+  sanitized.orderParticipantIdentityLinks = structuredClone(persistedState.orderParticipantIdentityLinks || []);
+  sanitized.reservedActorNames = structuredClone(persistedState.reservedActorNames || []);
+  sanitized.reservedActorIds = structuredClone(persistedState.reservedActorIds || []);
   const sessionActor = actorSession ? persistedActors.get(session.membership.actorId) : null;
   const fixedSetting = sessionActor?.orderFixedCommission;
   const rawFixedPercent = fixedSetting?.percent;
@@ -2322,17 +3564,41 @@ function sanitizeIncomingWorkspaceState(state, session, db) {
       : [];
   }
   if (session?.membership?.role !== "Master") delete sanitized.chatHistoryResetAt;
+  if (session?.membership?.role !== "Master") {
+    for (const field of ["buyingRates", "eurToUsdDivider", "masterRateDivisorSettings"]) {
+      if (Object.prototype.hasOwnProperty.call(persistedState, field)) sanitized[field] = structuredClone(persistedState[field]);
+      else delete sanitized[field];
+    }
+  }
   if (Array.isArray(state.actors) && session?.membership?.role !== "Master") {
     sanitized.actors = state.actors.map((actor) => {
       const persistedActor = persistedActors.get(actor?.id);
-      if (!persistedActor) return actor;
+      if (!persistedActor) return null;
       const protectedActor = { ...actor };
       for (const field of ["orderFixedRates", "orderFixedCommission"]) {
         if (Object.prototype.hasOwnProperty.call(persistedActor, field)) protectedActor[field] = structuredClone(persistedActor[field]);
         else delete protectedActor[field];
       }
+      for (const field of ["specialPayoutSettings", "incomeUsdPayoutSetting"]) {
+        if (Object.prototype.hasOwnProperty.call(persistedActor, field)) protectedActor[field] = structuredClone(persistedActor[field]);
+        else delete protectedActor[field];
+      }
+      for (const field of [
+        "id",
+        "workspaceId",
+        "name",
+        "role",
+        "currency",
+        "workingCurrencies",
+        "brokerCode",
+        "active",
+        "managedByMaster",
+      ]) {
+        if (Object.prototype.hasOwnProperty.call(persistedActor, field)) protectedActor[field] = structuredClone(persistedActor[field]);
+        else delete protectedActor[field];
+      }
       return protectedActor;
-    });
+    }).filter(Boolean);
   }
   if (Array.isArray(state.receivables)) {
     sanitized.receivables = state.receivables.map((receivable) => {
@@ -2343,6 +3609,13 @@ function sanitizeIncomingWorkspaceState(state, session, db) {
   }
   if (session?.membership?.role !== "Master") {
     sanitized.archives = structuredClone(persistedState.archives || []);
+  } else {
+    sanitized.archives = archivesForOrdinaryAppStateSave(
+      persistedState.archives,
+      state.archives,
+      session,
+      state
+    );
   }
   const storedFiles = new Map((db?.files || [])
     .filter((file) => file?.workspaceId === session?.workspace?.id && file?.status === "active")
@@ -2373,10 +3646,67 @@ function sanitizeIncomingWorkspaceState(state, session, db) {
       );
       const isReturnedResubmission = persistedBelongsToSessionActor && persistedOrder.state === "Returned" && allowedOrder?.state === "Pending Forward";
       if (persistedOrder) {
+        const submittedJournal = String(allowedOrder?.journal || "").trim();
+        const actorSubmitsAssignedPayment = actorSession && persistedOrder?.state === "Assigned" && (
+          allowedOrder?.state === "Paid"
+          || Boolean(submittedJournal)
+          || Boolean(String(allowedOrder?.paidAt || "").trim())
+        );
         const protectedOrder = { ...allowedOrder };
-        for (const field of ["brokerActorId", "broker", "brokerOrderNumber", "brokerOrderNumberCycle", "collisionSourceOrderId"]) {
+        for (const field of [
+          "brokerActorId",
+          "broker",
+          "brokerOrderNumber",
+          "brokerOrderNumberCycle",
+          "collisionSourceOrderId",
+          "journalCollisionBase",
+        ]) {
           if (Object.prototype.hasOwnProperty.call(persistedOrder, field)) protectedOrder[field] = persistedOrder[field];
           else delete protectedOrder[field];
+        }
+        if (actorSession) {
+          for (const field of ["agentActorId", "agent"]) {
+            if (Object.prototype.hasOwnProperty.call(persistedOrder, field)) protectedOrder[field] = persistedOrder[field];
+            else delete protectedOrder[field];
+          }
+          if (!actorSubmitsAssignedPayment) {
+            if (Object.prototype.hasOwnProperty.call(persistedOrder, "journal")) protectedOrder.journal = persistedOrder.journal;
+            else delete protectedOrder.journal;
+          }
+        }
+        if (orderParticipantIdentityIsFrozen(persistedOrder)) {
+          return canonicalizeFrozenOrderTransition(
+            protectedOrder,
+            persistedOrder,
+            session,
+            persistedState,
+            persistedActors
+          );
+        }
+        if (actorSession) {
+          const submitsPayment = protectedOrder?.state === "Paid"
+            || Boolean(String(protectedOrder?.journal || "").trim())
+            || Boolean(String(protectedOrder?.paidAt || "").trim());
+          const submitsReturn = persistedOrder?.state === "Assigned" && protectedOrder?.state === "Returned";
+          if ((submitsPayment || submitsReturn) && !actorSessionMatchesOrderAgent(session, persistedOrder, persistedActors)) {
+            throw httpError(403, "Only the assigned payer can pay or return this order.");
+          }
+          if (submitsPayment) {
+            if (persistedOrder?.state !== "Assigned") {
+              throw httpError(409, "Only an assigned order can be marked as paid.");
+            }
+            return canonicalizeActorPaymentTransition(protectedOrder, persistedOrder, persistedActors);
+          }
+          if (submitsReturn) {
+            return canonicalizeActorReturnTransition(protectedOrder, persistedOrder, session);
+          }
+          const submitsCancellation = persistedOrder?.state === "Returned" && protectedOrder?.state === "Cancelled";
+          if (submitsCancellation) {
+            if (!actorSessionOwnsOrderBroker(session, persistedOrder)) {
+              throw httpError(403, "Only the order's Broker can cancel a returned order.");
+            }
+            return canonicalizeActorCancellation(persistedOrder, session);
+          }
         }
         if (actorSession && !isReturnedResubmission) {
           for (const field of ["commissionPercent", "commissionMinor", "grossMinor", "orderCommissionLiability"]) {
@@ -2384,7 +3714,26 @@ function sanitizeIncomingWorkspaceState(state, session, db) {
             else delete protectedOrder[field];
           }
         }
-        if (!actorSession || !isReturnedResubmission) return protectedOrder;
+        if (!actorSession) {
+          const canonicalOrder = canonicalizeChangedOrderAgentIdentity(protectedOrder, persistedOrder, persistedActors);
+          const submittedJournal = String(canonicalOrder?.journal || "").trim();
+          const persistedJournal = String(persistedOrder?.journal || "").trim();
+          const addsJournal = Boolean(submittedJournal && submittedJournal !== persistedJournal);
+          const submitsPayment = canonicalOrder?.state === "Paid"
+            || Boolean(String(canonicalOrder?.paidAt || "").trim())
+            || (persistedOrder?.state === "Assigned" && addsJournal);
+          if (submitsPayment) {
+            if (persistedOrder?.state !== "Assigned") {
+              throw httpError(409, "Only an assigned order can be marked as paid.");
+            }
+            return canonicalizeActorPaymentTransition(canonicalOrder, persistedOrder, persistedActors);
+          }
+          if (addsJournal) {
+            throw httpError(409, "A journal can only be added while an assigned order is being marked as paid.");
+          }
+          return canonicalOrder;
+        }
+        if (!isReturnedResubmission) return structuredClone(persistedOrder);
         allowedOrder = protectedOrder;
       }
       if (actorSession) {
@@ -2395,8 +3744,16 @@ function sanitizeIncomingWorkspaceState(state, session, db) {
           broker: isReturnedResubmission ? persistedOrder.broker || session.membership.actorName : session.membership.actorName,
         };
       }
-      const brokerActor = actorSession ? sessionActor : submittedBrokerActor || persistedBrokerActor;
       const isNewOrder = !persistedOrder;
+      if (isNewOrder) delete allowedOrder.journalCollisionBase;
+      if (actorSession && isNewOrder && allowedOrder?.state !== "Pending Forward") {
+        throw httpError(409, "A new Broker order must be submitted for forwarding before it can change state.");
+      }
+      if (actorSession && isNewOrder) allowedOrder = sanitizeActorCreatedPendingOrder(allowedOrder);
+      if (isNewOrder) allowedOrder = canonicalizeNewOrderBrokerIdentity(allowedOrder, persistedActors);
+      const brokerActor = actorSession
+        ? sessionActor
+        : persistedActors.get(allowedOrder?.brokerActorId) || submittedBrokerActor || persistedBrokerActor;
       if (isNewOrder && brokerActor && ["Broker", "Special Broker"].includes(String(brokerActor.role || ""))) {
         const previousNumber = String(allowedOrder.brokerOrderNumber || "");
         const canonicalNumber = nextBrokerOrderNumberForActor(persistedState, brokerActor, canonicalizedNewOrders);
@@ -2413,6 +3770,7 @@ function sanitizeIncomingWorkspaceState(state, session, db) {
       } else if (!persistedOrder) {
         delete allowedOrder.collisionSourceOrderId;
       }
+      allowedOrder = canonicalizeChangedOrderAgentIdentity(allowedOrder, persistedOrder, persistedActors);
       if (!actorSession || !Number.isFinite(fixedPercent)) return allowedOrder;
       const sourceAmountMinor = Math.round(Number(allowedOrder.sourceAmountMinor || 0));
       const commissionMinor = Math.round(sourceAmountMinor * fixedPercent / 100);
@@ -2474,6 +3832,20 @@ function sanitizeIncomingWorkspaceState(state, session, db) {
       }),
     }));
   }
+  if (Array.isArray(sanitized.orders)) {
+    sanitized.orders = removeOrdersAlreadyArchived(
+      sanitized.orders,
+      sanitized.archives,
+      Array.from(new Set([
+        ...(Array.isArray(persistedState.deletedOrderIds) ? persistedState.deletedOrderIds : []),
+        ...(Array.isArray(sanitized.deletedOrderIds) ? sanitized.deletedOrderIds : []),
+      ])),
+      persistedState.ledger,
+      Array.from(persistedActors.values()),
+      sanitized.orderParticipantIdentityLinks
+    );
+  }
+  protectAndCanonicalizeOrderPaymentLedger(sanitized, persistedState, persistedActors, session);
   return sanitized;
 }
 
@@ -2504,6 +3876,11 @@ function resetWorkspaceState(db, workspaceId, scope = "data") {
     ledger: [],
     masterBankEntries: [],
     archives: [],
+    orderParticipantIdentityLinks: [],
+    reservedActorNames: scope === "wipe"
+      ? []
+      : Array.from(workspaceReservedActorNames(db, workspaceId)).sort(),
+    reservedActorIds: Array.from(workspaceReservedActorIds(db, workspaceId)).sort(),
     deletedOrderIds: [],
     actorResetTombstones: normalizeActorResetTombstones(),
     chatConversations: scope === "wipe"
@@ -2687,12 +4064,23 @@ async function handleApi(request, response, url) {
       if (subscription.accessDenied) {
         return sendJson(response, 402, { error: "This workspace's 30-day viewing period has ended. Renew the subscription to regain access." });
       }
+      if (workspaceReservedActorNames(db, workspace.id).has(normalizedActorName(name))) {
+        return sendJson(response, 409, {
+          error: "That Actor name has already been used in this workspace. Choose a unique name so earlier balances and reports stay separate.",
+        });
+      }
+      const inviteActorId = String(invite.actorId || "").trim();
+      if (inviteActorId && workspaceReservedActorIds(db, workspace.id).has(inviteActorId)) {
+        return sendJson(response, 409, {
+          error: "This invite's Actor ID belongs to earlier workspace history. Ask Master to create a new invite.",
+        });
+      }
       membership = {
         id: id("mem"),
         userId: user.id,
         workspaceId: workspace.id,
         role: "Actor",
-        actorId: invite.actorId || id("act"),
+        actorId: inviteActorId || nextWorkspaceActorId(db, workspace.id),
         actorName: name,
         actorRole: invite.actorRole || "Agent",
         currency: invite.currency || "USD",
@@ -3372,7 +4760,7 @@ async function handleApi(request, response, url) {
       actorRole,
       currency,
       workingCurrencies: ["Special Agent", "Special Broker"].includes(actorRole) ? specialWorkingCurrencies : [],
-      actorId: id("act"),
+      actorId: nextWorkspaceActorId(db, session.workspace.id),
       createdByUserId: session.user.id,
       createdAt: new Date().toISOString(),
       acceptedAt: "",

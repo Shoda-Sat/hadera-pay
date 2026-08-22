@@ -1,3 +1,8 @@
+import {
+  orderParticipantIdentityLinkForLedgerLine,
+  orderParticipantIdentityLinkMatches,
+} from "./orderParticipantIdentity.mjs";
+
 const completedOrderStates = new Set(["Paid", "Voided"]);
 
 function clean(value) {
@@ -34,19 +39,26 @@ function orderJournal(order) {
 }
 
 function recordsMatchOrder(left, right) {
+  const leftIds = orderStableIds(left);
+  const rightIds = orderStableIds(right);
+  if (leftIds.size && rightIds.size) return Array.from(leftIds).some((id) => rightIds.has(id));
   const leftJournal = orderJournal(left);
   const rightJournal = orderJournal(right);
   if (leftJournal && rightJournal) return leftJournal === rightJournal;
-  const rightIds = orderStableIds(right);
-  return Array.from(orderStableIds(left)).some((id) => rightIds.has(id));
+  return false;
 }
 
-function orderMatchesLedgerLine(order, line) {
+function orderMatchesLedgerLine(order, line, workspaceState) {
+  const lineOrderId = clean(line?.orderId);
+  const stableIds = orderStableIds(order);
+  if (lineOrderId && stableIds.size) {
+    return stableIds.has(lineOrderId)
+      || Boolean(orderParticipantIdentityLinkForLedgerLine(workspaceState, order, line));
+  }
   const lineJournal = clean(line?.journal);
   const candidateJournal = orderJournal(order);
   if (lineJournal && candidateJournal) return lineJournal === candidateJournal;
-  const lineOrderId = clean(line?.orderId);
-  return Boolean(lineOrderId && orderStableIds(order).has(lineOrderId));
+  return false;
 }
 
 function actorNameFromAccount(account) {
@@ -74,9 +86,14 @@ function paymentLineIsForNonMasterActor(line, actors) {
     !sameName(actorName, "Master Transactions");
 }
 
-function participantForRole(order, role, actors) {
-  const actorId = clean(role === "broker" ? order?.brokerActorId : order?.agentActorId);
-  const actorName = clean(role === "broker" ? order?.broker : order?.agent);
+function participantForRole(order, role, actors, workspaceState) {
+  const storedActorId = clean(role === "broker" ? order?.brokerActorId : order?.agentActorId);
+  const storedActorName = clean(role === "broker" ? order?.broker : order?.agent);
+  const linkedActor = actors.find((actor) =>
+    orderParticipantIdentityLinkMatches(workspaceState, order, actor, role)
+  );
+  const actorId = clean(linkedActor?.id || storedActorId);
+  const actorName = clean(linkedActor?.name || storedActorName);
   if (!actorId && !actorName) return null;
   if (role === "agent" && ["unassigned", "cancelled"].includes(normalized(actorName))) return null;
   const actor = actorForIdentity(actors, actorId, actorName);
@@ -91,10 +108,10 @@ function participantIdentitiesMatch(left, right) {
   return Boolean(left?.actorName && right?.actorName && sameName(left.actorName, right.actorName));
 }
 
-function orderParticipants(order, actors) {
+function orderParticipants(order, actors, workspaceState) {
   const participants = [
-    participantForRole(order, "broker", actors),
-    participantForRole(order, "agent", actors),
+    participantForRole(order, "broker", actors, workspaceState),
+    participantForRole(order, "agent", actors, workspaceState),
   ].filter(Boolean);
   return participants.filter((participant, index) =>
     participants.findIndex((candidate) => participantIdentitiesMatch(candidate, participant)) === index
@@ -121,17 +138,26 @@ function valuesConflict(orders, selector, normalizeValue = clean) {
   return values.size > 1;
 }
 
-function participantFactsConflict(orders, idField, nameField) {
-  const ids = new Set(orders.map((order) => clean(order?.[idField])).filter(Boolean));
+function effectiveParticipantActorId(order, role, workspaceState) {
+  const linkedActor = asArray(workspaceState?.actors).find((actor) =>
+    orderParticipantIdentityLinkMatches(workspaceState, order, actor, role)
+  );
+  return clean(linkedActor?.id || (role === "broker" ? order?.brokerActorId : order?.agentActorId));
+}
+
+function participantFactsConflict(orders, idField, nameField, workspaceState, role) {
+  const ids = new Set(orders
+    .map((order) => effectiveParticipantActorId(order, role, workspaceState) || clean(order?.[idField]))
+    .filter(Boolean));
   if (ids.size > 1) return true;
   if (ids.size === 1) return false;
   return valuesConflict(orders, (order) => order?.[nameField], normalized);
 }
 
-function archivedSnapshotsConflict(orders) {
+function archivedSnapshotsConflict(orders, workspaceState) {
   if (orders.length < 2) return false;
-  if (participantFactsConflict(orders, "brokerActorId", "broker")) return true;
-  if (participantFactsConflict(orders, "agentActorId", "agent")) return true;
+  if (participantFactsConflict(orders, "brokerActorId", "broker", workspaceState, "broker")) return true;
+  if (participantFactsConflict(orders, "agentActorId", "agent", workspaceState, "agent")) return true;
   const textFields = [
     "journal",
     "brokerOrderNumber",
@@ -184,14 +210,14 @@ function archivedOrders(archives) {
 }
 
 /**
- * Resolves one completed order for an Actor payment line. A shared journal is the
- * primary identity; stable hidden IDs are used only when one side has no journal.
+ * Resolves one completed order for an Actor payment line. Stable hidden IDs take
+ * priority; journals are legacy fallback only when an ID is unavailable.
  */
-export function resolveParticipantOrderForLedgerLine(line, liveOrders = [], archives = []) {
+export function resolveParticipantOrderForLedgerLine(line, liveOrders = [], archives = [], workspaceState = {}) {
   const candidates = [
     ...asArray(liveOrders).map((order) => ({ source: "live", archive: null, order })),
     ...archivedOrders(archives).map(({ archive, order }) => ({ source: "archive", archive, order })),
-  ].filter(({ order }) => orderIsCompleted(order) && orderMatchesLedgerLine(order, line));
+  ].filter(({ order }) => orderIsCompleted(order) && orderMatchesLedgerLine(order, line, workspaceState));
   if (!candidates.length) {
     return { order: null, source: "", archive: null, conflict: false, reason: "not-found" };
   }
@@ -199,9 +225,17 @@ export function resolveParticipantOrderForLedgerLine(line, liveOrders = [], arch
   const exactIdCandidates = orderId
     ? candidates.filter((candidate) => orderStableIds(candidate.order).has(orderId))
     : [];
-  const resolvedCandidates = exactIdCandidates.length ? exactIdCandidates : candidates;
+  const approvedLinkedCandidates = candidates.filter((candidate) =>
+    orderParticipantIdentityLinkForLedgerLine(workspaceState, candidate.order, line)
+  );
+  const resolvedCandidates = approvedLinkedCandidates.length
+    ? approvedLinkedCandidates
+    : (exactIdCandidates.length ? exactIdCandidates : candidates);
   const archived = resolvedCandidates.filter((candidate) => candidate.source === "archive").map((candidate) => candidate.order);
-  if (archivedSnapshotsConflict(archived) || archivedSnapshotsConflict(resolvedCandidates.map((candidate) => candidate.order))) {
+  if (
+    archivedSnapshotsConflict(archived, workspaceState)
+    || archivedSnapshotsConflict(resolvedCandidates.map((candidate) => candidate.order), workspaceState)
+  ) {
     return { order: null, source: "", archive: null, conflict: true, reason: "conflicting-snapshots" };
   }
   const selected = resolvedCandidates.slice().sort((left, right) => {
@@ -221,11 +255,11 @@ function lineMatchesParticipant(line, participant, actors) {
 /** Returns whether an unarchived Actor payment line still belongs to this order. */
 export function orderHasOpenParticipantLine(order, workspaceState = {}) {
   const actors = asArray(workspaceState?.actors);
-  const participants = orderParticipants(order, actors);
+  const participants = orderParticipants(order, actors, workspaceState);
   return asArray(workspaceState?.ledger).some((line) =>
     line?.archived !== true &&
     paymentLineIsForNonMasterActor(line, actors) &&
-    orderMatchesLedgerLine(order, line) &&
+    orderMatchesLedgerLine(order, line, workspaceState) &&
     participants.some((participant) => lineMatchesParticipant(line, participant, actors))
   );
 }
@@ -237,7 +271,7 @@ export function orderHasOpenParticipantLine(order, workspaceState = {}) {
 export function participantArchiveCoverage(order, workspaceState = {}) {
   const actors = asArray(workspaceState?.actors);
   const archives = asArray(workspaceState?.archives);
-  const participants = orderParticipants(order, actors);
+  const participants = orderParticipants(order, actors, workspaceState);
   const participantResults = participants.map((participant) => {
     const matches = archives
       .filter((archive) => archiveBelongsToParticipant(archive, participant, actors))
@@ -247,13 +281,13 @@ export function participantArchiveCoverage(order, workspaceState = {}) {
       );
     return {
       ...participant,
-      covered: matches.length > 0 && !archivedSnapshotsConflict(matches.map((match) => match.snapshot)),
+      covered: matches.length > 0 && !archivedSnapshotsConflict(matches.map((match) => match.snapshot), workspaceState),
       archiveIds: matches.map((match) => clean(match.archive?.id)).filter(Boolean),
       snapshots: matches.map((match) => match.snapshot),
     };
   });
   const allSnapshots = participantResults.flatMap((participant) => participant.snapshots);
-  const conflict = archivedSnapshotsConflict(allSnapshots);
+  const conflict = archivedSnapshotsConflict(allSnapshots, workspaceState);
   return {
     complete: participants.length > 0 && !conflict && participantResults.every((participant) => participant.covered),
     conflict,
@@ -322,20 +356,20 @@ export function retainOrdersForOpenParticipants(workspaceState = {}) {
   asArray(workspaceState?.ledger)
     .filter((line) => line?.archived !== true && paymentLineIsForNonMasterActor(line, actors))
     .forEach((line) => {
-      const liveMatch = resolveParticipantOrderForLedgerLine(line, nextOrders, []);
+      const liveMatch = resolveParticipantOrderForLedgerLine(line, nextOrders, [], workspaceState);
       if (liveMatch.order) return;
       if (liveMatch.conflict) {
         skippedConflicts.push(conflictRecord(line, liveMatch.reason));
         return;
       }
 
-      const source = resolveParticipantOrderForLedgerLine(line, [], archives);
+      const source = resolveParticipantOrderForLedgerLine(line, [], archives, workspaceState);
       if (!source.order) {
         if (source.conflict) skippedConflicts.push(conflictRecord(line, source.reason));
         return;
       }
       if (tombstones.has(clean(line?.orderId)) || orderIsTombstoned(source.order)) return;
-      const participants = orderParticipants(source.order, actors);
+      const participants = orderParticipants(source.order, actors, workspaceState);
       const lineParticipants = participants.filter((participant) => lineMatchesParticipant(line, participant, actors));
       if (lineParticipants.length !== 1) {
         skippedConflicts.push(conflictRecord(line, "participant-identity-conflict"));

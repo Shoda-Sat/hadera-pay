@@ -4171,7 +4171,7 @@
           ...structuredClone(defaultState),
           ...saved,
           actors: normalizeActors(Array.isArray(saved.actors) ? saved.actors : structuredClone(defaultState.actors)),
-          orders: removeOrdersAlreadyArchived(saved.orders, archives, saved.deletedOrderIds, saved.ledger, saved.actors),
+          orders: removeOrdersAlreadyArchived(saved.orders, archives, saved.deletedOrderIds, saved.ledger, saved.actors, saved.orderParticipantIdentityLinks, saved._workspaceId || currentAuth?.workspace?.id),
           savedCustomers: normalizeSavedCustomers(saved.savedCustomers),
           receivables: Array.isArray(saved.receivables) ? saved.receivables : [],
           transfers: normalizeTransfers(Array.isArray(saved.transfers) ? saved.transfers : []),
@@ -4396,21 +4396,62 @@
     }
 
     function participantOrderRecordsMatch(left, right) {
+      const leftIds = new Set([left?.id, left?.internalOrderId, left?.collisionSourceOrderId]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean));
+      const rightIds = new Set([right?.id, right?.internalOrderId, right?.collisionSourceOrderId]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean));
+      if (leftIds.size && rightIds.size) return [...leftIds].some((id) => rightIds.has(id));
       const leftJournal = String(left?.journal || "").trim();
       const rightJournal = String(right?.journal || "").trim();
-      if (leftJournal && rightJournal) return leftJournal === rightJournal;
-      const rightIds = new Set([right?.id, right?.internalOrderId, right?.collisionSourceOrderId].map((value) => String(value || "").trim()).filter(Boolean));
-      return [left?.id, left?.internalOrderId, left?.collisionSourceOrderId]
-        .map((value) => String(value || "").trim())
-        .filter(Boolean)
-        .some((value) => rightIds.has(value));
+      return Boolean(leftJournal && rightJournal && leftJournal === rightJournal);
     }
 
-    function participantOrderActors(order, actors = []) {
+    function participantOrderIdentityLinkMatches(order, actor, role, identityLinks = [], workspaceId = "") {
+      const actorId = String(actor?.id || "").trim();
+      const actorName = String(actor?.name || "").trim().toLocaleLowerCase();
+      const participantActorId = String((role === "broker" ? order?.brokerActorId : order?.agentActorId) || "").trim();
+      const participantName = String((role === "broker" ? order?.broker : order?.agent) || "").trim().toLocaleLowerCase();
+      const journal = String(order?.journal || "").trim();
+      const actorRole = String(actor?.role || "").trim();
+      const roleSupported = role === "broker"
+        ? ["Broker", "Special Broker"].includes(actorRole)
+        : ["Agent", "Special Agent", "Special Broker"].includes(actorRole);
+      const orderIds = new Set([order?.id, order?.internalOrderId, order?.collisionSourceOrderId]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean));
+      if (!actorId || !actorName || !participantName || !journal || !orderIds.size || !roleSupported) return false;
+      return (Array.isArray(identityLinks) ? identityLinks : []).some((link) => {
+        const linkedOrderIds = new Set((Array.isArray(link?.orderIds) ? link.orderIds : [])
+          .map((value) => String(value || "").trim())
+          .filter(Boolean));
+        const linkWorkspace = String(link?.workspace || "").trim().toLocaleLowerCase().replace(/[^a-z0-9]+/g, "").replace(/workspace$/, "");
+        return String(link?.repairId || "").trim() === "galaxy-nahom-jrn-1739-participant-v1" &&
+          linkWorkspace === "galaxy" &&
+          Boolean(String(workspaceId || "").trim()) &&
+          String(link?.workspaceId || "").trim() === String(workspaceId || "").trim() &&
+          String(link?.actorId || "").trim() === actorId &&
+          String(link?.actorName || "").trim().toLocaleLowerCase() === actorName &&
+          String(link?.role || "").trim() === role &&
+          String(link?.participantName || "").trim().toLocaleLowerCase() === participantName &&
+          Boolean(String(link?.legacyActorId || "").trim()) &&
+          String(link.legacyActorId).trim() === participantActorId &&
+          String(link?.journal || "").trim() === journal &&
+          [...orderIds].some((id) => linkedOrderIds.has(id));
+      });
+    }
+
+    function participantOrderActors(order, actors = [], identityLinks = [], workspaceId = "") {
       const participants = [
-        { actorId: String(order?.brokerActorId || "").trim(), actorName: String(order?.broker || "").trim() },
-        { actorId: String(order?.agentActorId || "").trim(), actorName: String(order?.agent || "").trim() }
-      ].filter((participant) => {
+        { role: "broker", actorId: String(order?.brokerActorId || "").trim(), actorName: String(order?.broker || "").trim() },
+        { role: "agent", actorId: String(order?.agentActorId || "").trim(), actorName: String(order?.agent || "").trim() }
+      ].map((participant) => {
+        const linkedActor = actors.find((actor) => participantOrderIdentityLinkMatches(order, actor, participant.role, identityLinks, workspaceId));
+        return linkedActor
+          ? { ...participant, actorId: String(linkedActor.id || "").trim(), actorName: String(linkedActor.name || participant.actorName).trim() }
+          : participant;
+      }).filter((participant) => {
         if (!participant.actorId && !participant.actorName) return false;
         if (["master", "master transactions", "unassigned", "cancelled"].includes(participant.actorName.toLocaleLowerCase())) return false;
         const actor = participant.actorId
@@ -4423,8 +4464,8 @@
       );
     }
 
-    function participantOrderArchiveCoverage(order, archives = [], actors = []) {
-      const participants = participantOrderActors(order, actors);
+    function participantOrderArchiveCoverage(order, archives = [], actors = [], identityLinks = [], workspaceId = "") {
+      const participants = participantOrderActors(order, actors, identityLinks, workspaceId);
       const covered = participants.map((participant) => normalizeArchiveSnapshots(archives).some((archive) => {
         if (archive?.kind === "master-transactions" || archive?.actorRole === "Master") return false;
         const archiveIdentity = { actorId: String(archive?.actorId || "").trim(), actorName: String(archive?.actor || "").trim() };
@@ -4434,16 +4475,17 @@
       return { participants, complete: participants.length > 0 && covered.every(Boolean) };
     }
 
-    function participantOrderHasOpenLine(order, ledger = [], actors = []) {
-      const participants = participantOrderActors(order, actors);
+    function participantOrderHasOpenLine(order, ledger = [], actors = [], identityLinks = [], workspaceId = "") {
+      const participants = participantOrderActors(order, actors, identityLinks, workspaceId);
       const journal = String(order?.journal || "").trim();
       const orderIds = new Set([order?.id, order?.internalOrderId, order?.collisionSourceOrderId].map((value) => String(value || "").trim()).filter(Boolean));
       return (Array.isArray(ledger) ? ledger : []).some((line) => {
         if (line?.source !== "ORDER_PAYMENT" || line?.archived === true || String(line?.account || "").startsWith("MASTER_")) return false;
         const lineJournal = String(line?.journal || "").trim();
-        const sameOrder = lineJournal && journal
-          ? lineJournal === journal
-          : Boolean(String(line?.orderId || "").trim() && orderIds.has(String(line.orderId).trim()));
+        const lineOrderId = String(line?.orderId || "").trim();
+        const sameOrder = lineOrderId && orderIds.size
+          ? orderIds.has(lineOrderId)
+          : Boolean(lineJournal && journal && lineJournal === journal);
         if (!sameOrder) return false;
         const accountName = String(line?.account || "").replace(/ ACTOR_CLEARING$/, "").trim().toLocaleLowerCase();
         return participants.some((participant) => {
@@ -4453,7 +4495,7 @@
       });
     }
 
-    function removeOrdersAlreadyArchived(orders = [], archives = [], deletedOrderIds = [], ledger = [], actors = []) {
+    function removeOrdersAlreadyArchived(orders = [], archives = [], deletedOrderIds = [], ledger = [], actors = [], identityLinks = [], workspaceId = "") {
       const normalizedArchives = normalizeArchiveSnapshots(archives);
       const deletedIds = new Set((Array.isArray(deletedOrderIds) ? deletedOrderIds : []).filter(Boolean).map(String));
       return (Array.isArray(orders) ? orders : []).filter((order) => {
@@ -4466,8 +4508,8 @@
         const createdAt = new Date(order?.createdAt || order?.sentAt || 0).getTime();
         if (Number.isFinite(createdAt) && createdAt > latestClosedAt) return true;
         if (!["Paid", "Voided"].includes(order?.state)) return false;
-        const coverage = participantOrderArchiveCoverage(order, normalizedArchives, actors);
-        return !coverage.complete || participantOrderHasOpenLine(order, ledger, actors);
+        const coverage = participantOrderArchiveCoverage(order, normalizedArchives, actors, identityLinks, workspaceId);
+        return !coverage.complete || participantOrderHasOpenLine(order, ledger, actors, identityLinks, workspaceId);
       });
     }
 
@@ -4839,7 +4881,7 @@
       const archives = normalizeArchiveSnapshots(nextState?.archives);
       const preparedState = {
         ...nextState,
-        orders: removeOrdersAlreadyArchived(nextState?.orders, archives, nextState?.deletedOrderIds, nextState?.ledger, nextState?.actors),
+        orders: removeOrdersAlreadyArchived(nextState?.orders, archives, nextState?.deletedOrderIds, nextState?.ledger, nextState?.actors, nextState?.orderParticipantIdentityLinks, nextState?._workspaceId || currentAuth?.workspace?.id),
         archives,
         deletedOrderIds: Array.isArray(nextState?.deletedOrderIds) ? nextState.deletedOrderIds : [],
         savedCustomers: normalizeSavedCustomers(nextState?.savedCustomers),
@@ -5186,8 +5228,11 @@
       state.masterBankEntries = normalizeMasterBankEntries(mergeById(state.masterBankEntries, remoteState.masterBankEntries || []));
       state.settlements = Array.isArray(remoteState.settlements) ? remoteState.settlements : state.settlements;
       state.archives = normalizeArchiveSnapshots(mergeById(state.archives, remoteState.archives || []));
+      state.orderParticipantIdentityLinks = Array.isArray(remoteState.orderParticipantIdentityLinks)
+        ? remoteState.orderParticipantIdentityLinks.map((link) => ({ ...link, orderIds: Array.isArray(link?.orderIds) ? [...link.orderIds] : [] }))
+        : (Array.isArray(state.orderParticipantIdentityLinks) ? state.orderParticipantIdentityLinks : []);
       state.deletedOrderIds = Array.from(new Set([...(state.deletedOrderIds || []), ...(remoteState.deletedOrderIds || [])].filter(Boolean).map(String)));
-      state.orders = removeOrdersAlreadyArchived(state.orders, state.archives, state.deletedOrderIds, state.ledger, state.actors);
+      state.orders = removeOrdersAlreadyArchived(state.orders, state.archives, state.deletedOrderIds, state.ledger, state.actors, state.orderParticipantIdentityLinks, remoteState?._workspaceId || state?._workspaceId || currentAuth?.workspace?.id);
       state.chatConversations = mergeChatConversations(state.chatConversations, remoteState.chatConversations || [])
         .filter((chat) => !deletedChatIds.has(chat.id))
         .map((chat) => ({
@@ -13803,12 +13848,12 @@
         receivable.updatedAt = postedAt;
       }
       const lines = [
-        { journal: journalId, orderId: order.id, source: "ORDER_PAYMENT", account: `${order.broker} ACTOR_CLEARING`, direction: "Debit", currency: sourceCurrency, amountMinor: sourceAmountMinor, postedAt },
-        { journal: journalId, orderId: order.id, source: "ORDER_PAYMENT", account: `${order.broker} ACTOR_CLEARING`, direction: commissionTerms.brokerDirection, currency: sourceCurrency, amountMinor: commissionTerms.amountMinor, postedAt },
+        { journal: journalId, orderId: order.id, actorId: order.brokerActorId || "", participantRole: "broker", source: "ORDER_PAYMENT", account: `${order.broker} ACTOR_CLEARING`, direction: "Debit", currency: sourceCurrency, amountMinor: sourceAmountMinor, postedAt },
+        { journal: journalId, orderId: order.id, actorId: order.brokerActorId || "", participantRole: "broker", source: "ORDER_PAYMENT", account: `${order.broker} ACTOR_CLEARING`, direction: commissionTerms.brokerDirection, currency: sourceCurrency, amountMinor: commissionTerms.amountMinor, postedAt },
         { journal: journalId, orderId: order.id, source: "ORDER_PAYMENT", account: "MASTER_FX_CLEARING", direction: "Credit", currency: sourceCurrency, amountMinor: sourceAmountMinor, postedAt },
         { journal: journalId, orderId: order.id, source: "ORDER_PAYMENT", account: commissionTerms.masterAccount, direction: commissionTerms.masterDirection, currency: sourceCurrency, amountMinor: commissionTerms.amountMinor, postedAt },
         { journal: journalId, orderId: order.id, source: "ORDER_PAYMENT", account: "MASTER_FX_CLEARING", direction: "Debit", currency: payerStatement.currency, amountMinor: payerStatement.amountMinor, postedAt },
-        { journal: journalId, orderId: order.id, source: "ORDER_PAYMENT", account: `${order.agent} ACTOR_CLEARING`, direction: "Credit", currency: payerStatement.currency, amountMinor: payerStatement.amountMinor, postedAt }
+        { journal: journalId, orderId: order.id, actorId: order.agentActorId || "", participantRole: "agent", source: "ORDER_PAYMENT", account: `${order.agent} ACTOR_CLEARING`, direction: "Credit", currency: payerStatement.currency, amountMinor: payerStatement.amountMinor, postedAt }
       ].filter((line) => line.amountMinor > 0);
       freezeOrderIncomeStatement(order, lines, true);
       state.ledger.unshift(...lines);
@@ -13883,6 +13928,7 @@
         state: order.state,
         fundingType: order.fundingType || "cash",
         journal: order.journal || "",
+        journalCollisionBase: order.journalCollisionBase || "",
         voidJournal: order.voidJournal || "",
         excludedFromCalculations: orderRecordIsVoided(order) || orderRecordIsCancelled(order),
         locked: true,
@@ -14121,16 +14167,17 @@
       return Array.from(new Set([
         order?.id,
         order?.internalOrderId,
-        order?.journal
+        order?.collisionSourceOrderId
       ].map((value) => String(value || "").trim()).filter(Boolean)));
     }
 
     function ordersReferToSameRecord(left, right) {
+      const leftValues = orderArchiveIdentityValues(left);
+      const rightValues = new Set(orderArchiveIdentityValues(right));
+      if (leftValues.length && rightValues.size) return leftValues.some((value) => rightValues.has(value));
       const leftJournal = String(left?.journal || "").trim();
       const rightJournal = String(right?.journal || "").trim();
-      if (leftJournal && rightJournal) return leftJournal === rightJournal;
-      const rightValues = new Set(orderArchiveIdentityValues(right));
-      return orderArchiveIdentityValues(left).some((value) => rightValues.has(value));
+      return Boolean(leftJournal && rightJournal && leftJournal === rightJournal);
     }
 
     function orderArchivedForActor(order, actor) {
@@ -14161,7 +14208,8 @@
       ];
       const unique = [];
       candidates.forEach((order) => {
-        if (orderArchiveIdentityValues(order).length && !unique.some((candidate) => ordersReferToSameRecord(candidate, order))) {
+        if ((orderArchiveIdentityValues(order).length || String(order?.journal || "").trim()) &&
+          !unique.some((candidate) => ordersReferToSameRecord(candidate, order))) {
           unique.push(order);
         }
       });
@@ -14236,7 +14284,9 @@
         state.archives,
         state.deletedOrderIds,
         state.ledger,
-        state.actors
+        state.actors,
+        state.orderParticipantIdentityLinks,
+        state?._workspaceId || currentAuth?.workspace?.id
       );
       const archivedTransferIds = new Set(archivedTransfers.map(transferIdentity));
       state.transfers = state.transfers.map((transfer) => {

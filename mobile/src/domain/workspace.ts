@@ -609,12 +609,12 @@ export async function markOrderPaid(orderId: string, actorId: string, proof?: Pr
     const commissionTerms = orderCommissionLedgerTerms(order);
     const details = orderDetails(order);
     const lines: LedgerLine[] = [
-      { journal, orderId: order.id, source: "ORDER_PAYMENT", account: `${order.broker} ACTOR_CLEARING`, direction: "Debit" as const, currency: order.sourceCurrency, amountMinor: Number(order.sourceAmountMinor || 0), details, postedAt },
-      { journal, orderId: order.id, source: "ORDER_PAYMENT", account: `${order.broker} ACTOR_CLEARING`, direction: commissionTerms.brokerDirection, currency: order.sourceCurrency, amountMinor: commissionTerms.amountMinor, details, postedAt },
+      { journal, orderId: order.id, actorId: order.brokerActorId || "", participantRole: "broker" as const, source: "ORDER_PAYMENT", account: `${order.broker} ACTOR_CLEARING`, direction: "Debit" as const, currency: order.sourceCurrency, amountMinor: Number(order.sourceAmountMinor || 0), details, postedAt },
+      { journal, orderId: order.id, actorId: order.brokerActorId || "", participantRole: "broker" as const, source: "ORDER_PAYMENT", account: `${order.broker} ACTOR_CLEARING`, direction: commissionTerms.brokerDirection, currency: order.sourceCurrency, amountMinor: commissionTerms.amountMinor, details, postedAt },
       { journal, orderId: order.id, source: "ORDER_PAYMENT", account: "MASTER_FX_CLEARING", direction: "Credit" as const, currency: order.sourceCurrency, amountMinor: Number(order.sourceAmountMinor || 0), details, postedAt },
       { journal, orderId: order.id, source: "ORDER_PAYMENT", account: commissionTerms.masterAccount, direction: commissionTerms.masterDirection, currency: order.sourceCurrency, amountMinor: commissionTerms.amountMinor, details, postedAt },
       { journal, orderId: order.id, source: "ORDER_PAYMENT", account: "MASTER_FX_CLEARING", direction: "Debit" as const, currency: payer.currency, amountMinor: payer.amountMinor, details, postedAt },
-      { journal, orderId: order.id, source: "ORDER_PAYMENT", account: `${order.agent} ACTOR_CLEARING`, direction: "Credit" as const, currency: payer.currency, amountMinor: payer.amountMinor, details, postedAt }
+      { journal, orderId: order.id, actorId: order.agentActorId || "", participantRole: "agent" as const, source: "ORDER_PAYMENT", account: `${order.agent} ACTOR_CLEARING`, direction: "Credit" as const, currency: payer.currency, amountMinor: payer.amountMinor, details, postedAt }
     ].filter((line) => line.amountMinor > 0);
     order.journal = journal;
     order.state = "Paid";
