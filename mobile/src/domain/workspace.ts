@@ -1,4 +1,10 @@
-import { updateWorkspaceState } from "../api/client";
+import {
+  currentWorkspaceSession,
+  loadWorkspaceStateForUpdate,
+  saveWorkspaceState,
+  updateWorkspaceState,
+  verifyWorkspaceRoutingCommit
+} from "../api/client";
 import type {
   ActorRecord,
   ChatConversationRecord,
@@ -19,12 +25,22 @@ import type {
 } from "../types";
 import { compactAmount, majorFromMinor, minorFromMajor, orderCommissionLedgerTerms, parseAmount, parseDecimalNumber, signedOrderCommissionMinor } from "../utils/money";
 import { actorLedgerSequenceWidth, nextActorLedgerNumber, nextActorLedgerSequence } from "./ledgerNumbering";
+import {
+  clearMobileRoutingAction,
+  masterRoutingOrderMatches,
+  mobileMasterRoutingAttemptId,
+  persistMobileRoutingAction,
+  readMobileRoutingAction,
+  routingOrderIdentityMatches,
+  type MobileMasterRoutingAction
+} from "./routingDurability";
 
 export const supportedCurrencies: Currency[] = ["USD", "ETB", "EUR", "ERN", "SSP", "SDG", "LYD"];
 export const commissionLiabilityOptions: CommissionLiability[] = ["Sender", "Master", "Receiver"];
 export const pendingCancelledOrderStates = new Set<OrderRecord["state"]>(["Assigned", "Returned", "Voided", "Cancelled"]);
 const processingOrderIds = new Set<string>();
 const processingTransferIds = new Set<string>();
+const processingRoutingOrderIds = new Set<string>();
 
 export function isMasterView(session: UserSession): boolean {
   return session.role === "Master" && session.actorRole === "Master";
@@ -221,8 +237,10 @@ function nextJournalId(state: WorkspaceState): string {
   }, 0);
   state.journalCounter = Math.max(Number(state.journalCounter || 0), highest) + 1;
   const base = `JRN-${1000 + state.journalCounter}`;
-  const hasJournal = (record: { journal?: string; voidJournal?: string; reversalJournal?: string } | undefined, journal: string) =>
-    record?.journal === journal || record?.voidJournal === journal || record?.reversalJournal === journal;
+  const hasJournal = (record: unknown, journal: string) => {
+    const candidate = record as { journal?: string; voidJournal?: string; reversalJournal?: string } | undefined;
+    return candidate?.journal === journal || candidate?.voidJournal === journal || candidate?.reversalJournal === journal;
+  };
   const journalInUse = (journal: string) =>
     state.ledger.some((line) => line.journal === journal)
     || state.orders.some((order) => hasJournal(order, journal))
@@ -494,16 +512,79 @@ function freezeIncome(state: WorkspaceState, order: OrderRecord, lines: LedgerLi
   }
 }
 
-export async function assignOrder(orderId: string, agentId: string, dividerText = "", percentText = ""): Promise<WorkspaceState> {
-  return updateWorkspaceState((state) => {
-    const order = state.orders.find((item) => item.id === orderId);
-    const agent = activeActors(state).find((actor) => actor.id === agentId);
+function currentExpectedRoutingSession(expectedSession?: UserSession): UserSession {
+  const session = currentWorkspaceSession();
+  if (!session) throw new Error("Sign in before forwarding this order.");
+  if (expectedSession && (session.workspaceId !== expectedSession.workspaceId || session.userId !== expectedSession.userId ||
+      (expectedSession.loginStartedAt && session.loginStartedAt !== expectedSession.loginStartedAt))) {
+    throw new Error("The signed-in session changed before this forwarding action finished.");
+  }
+  return session;
+}
+
+export async function assignOrder(
+  orderId: string,
+  agentId: string,
+  dividerText = "",
+  percentText = "",
+  expectedSession?: UserSession
+): Promise<WorkspaceState> {
+  const session = currentExpectedRoutingSession(expectedSession);
+  if (!isMasterView(session)) throw new Error("Only Master can forward this order.");
+  const routingKey = `${session.workspaceId}:${session.userId}:${orderId}`;
+  if (processingRoutingOrderIds.has(routingKey)) throw new Error("This order is already being forwarded.");
+  processingRoutingOrderIds.add(routingKey);
+  let protectedAttempt: MobileMasterRoutingAction | null = null;
+  let persisted = false;
+  try {
+    const unfinished = await readMobileRoutingAction(session);
+    currentExpectedRoutingSession(expectedSession || session);
+    if (unfinished?.kind === "broker-send") {
+      throw new Error("Finish the protected Broker send before forwarding another order.");
+    }
+    if (unfinished && unfinished.orderId !== orderId) {
+      throw new Error("Finish the protected forwarding action before forwarding another order.");
+    }
+    protectedAttempt = unfinished;
+    const targetActorId = unfinished?.targetActorId || agentId;
+    const effectiveDividerText = unfinished?.dividerText ?? dividerText;
+    const effectivePercentText = unfinished?.percentText ?? percentText;
+    const state = await loadWorkspaceStateForUpdate();
+    currentExpectedRoutingSession(expectedSession || session);
+    if (unfinished) {
+      const acknowledged = state.orders.find((candidate) => masterRoutingOrderMatches(candidate, unfinished.order));
+      if (acknowledged) {
+        await clearMobileRoutingAction(session, unfinished.attemptId);
+        return state;
+      }
+    }
+
+    const order = unfinished
+      ? state.orders.find((item) => routingOrderIdentityMatches(item, unfinished.order))
+      : state.orders.find((item) => item.id === orderId);
+    if (unfinished && (!order || order.state !== "Pending Forward")) {
+      await clearMobileRoutingAction(session, unfinished.attemptId);
+      throw new Error(order
+        ? `The server already has this order as ${order.state}. Its current version will be loaded instead.`
+        : "The protected order is no longer available on the server.");
+    }
+    const agent = activeActors(state).find((actor) => actor.id === targetActorId);
     if (!order || order.state !== "Pending Forward") throw new Error("This order is no longer waiting for forwarding.");
-    if (!agent || agent.name === order.broker || !actorCanPayoutCurrency(agent, order.payoutCurrency)) throw new Error(`Choose a ${order.payoutCurrency} payout actor.`);
-    const divider = Number(dividerText || 0);
-    const percent = Number(percentText || 0);
-    if (dividerText && divider <= 0) throw new Error("Enter a payout divisor greater than zero.");
-    if (percentText && percent < 0) throw new Error("Enter zero or a positive percentage.");
+    if (!agent || agent.name === order.broker || !actorCanPayoutCurrency(agent, order.payoutCurrency)) {
+      if (unfinished) await clearMobileRoutingAction(session, unfinished.attemptId);
+      throw new Error(`Choose a ${order.payoutCurrency} payout actor.`);
+    }
+    const divider = Number(effectiveDividerText || 0);
+    const percent = Number(effectivePercentText || 0);
+    if (effectiveDividerText && (!Number.isFinite(divider) || divider <= 0)) throw new Error("Enter a payout divisor greater than zero.");
+    if (effectivePercentText && (!Number.isFinite(percent) || percent < 0)) throw new Error("Enter zero or a positive percentage.");
+    const routingForwardAttemptId = unfinished?.attemptId || mobileMasterRoutingAttemptId(
+      order,
+      agent.id,
+      effectiveDividerText || "AUTO",
+      effectivePercentText || "AUTO"
+    );
+    order.routingForwardAttemptId = routingForwardAttemptId;
     order.agent = agent.name;
     order.agentActorId = agent.id;
     assignAgentNumber(state, order, agent.name);
@@ -511,23 +592,81 @@ export async function assignOrder(orderId: string, agentId: string, dividerText 
     delete order.manualSpecialPayoutPercent;
     delete order.manualMasterRateDivider;
     delete order.manualMasterRatePercent;
-    if (dividerText) order.forwardedPayoutDivider = divider;
+    if (effectiveDividerText) order.forwardedPayoutDivider = divider;
     else delete order.forwardedPayoutDivider;
-    if (percentText) order.forwardedPayoutPercent = percent;
+    if (effectivePercentText) order.forwardedPayoutPercent = percent;
     else delete order.forwardedPayoutPercent;
     order.state = "Assigned";
-    order.assignedAt = new Date().toISOString();
+    order.assignedAt = unfinished?.order.assignedAt || new Date().toISOString();
     order.updatedAt = order.assignedAt;
     order.returnedBy = "";
     order.returnedReason = "";
     order.returnedAt = "";
-    appendOrderAssignmentMessage(state, order, agent);
+    appendOrderAssignmentMessage(state, order, agent, `MSG-${routingForwardAttemptId}`);
     const receivable = state.receivables.find((item) => item.orderId === order.id);
     if (receivable) receivable.updatedAt = order.updatedAt;
-  });
+
+    protectedAttempt = unfinished || {
+      kind: "master-forward",
+      attemptId: routingForwardAttemptId,
+      workspaceId: session.workspaceId,
+      userId: session.userId,
+      orderId: order.id,
+      order: { ...order },
+      targetActorId: agent.id,
+      targetActorName: agent.name,
+      dividerText: effectiveDividerText,
+      percentText: effectivePercentText
+    };
+    if (unfinished) protectedAttempt = { ...unfinished, orderId: order.id, order: { ...order } };
+    currentExpectedRoutingSession(expectedSession || session);
+    await persistMobileRoutingAction(session, protectedAttempt);
+    persisted = true;
+    const savedState = await saveWorkspaceState(state, session);
+    currentExpectedRoutingSession(expectedSession || session);
+    const acknowledged = savedState.orders.find((candidate) => masterRoutingOrderMatches(candidate, order));
+    if (!acknowledged) throw new Error("The server did not confirm the exact forwarding action.");
+    await clearMobileRoutingAction(session, protectedAttempt.attemptId);
+    return savedState;
+  } catch (error) {
+    const activeSession = currentWorkspaceSession();
+    const sameSession = activeSession?.workspaceId === session.workspaceId && activeSession.userId === session.userId &&
+      (!session.loginStartedAt || activeSession.loginStartedAt === session.loginStartedAt);
+    if (persisted && protectedAttempt && sameSession) {
+      try {
+        const verification = await verifyWorkspaceRoutingCommit(
+          session,
+          (candidate) => masterRoutingOrderMatches(candidate, protectedAttempt!.order)
+        );
+        const latest = verification?.state;
+        const acknowledged = verification?.order;
+        if (latest && acknowledged) {
+          await clearMobileRoutingAction(session, protectedAttempt.attemptId);
+          return latest;
+        }
+      } catch {
+        // Preserve the exact payer and terms for the next retry.
+      }
+      const detail = error instanceof Error ? error.message : "The forwarding result was not confirmed.";
+      throw new Error(`${detail} The exact payer and terms are protected. Retry Forward when connected.`);
+    }
+    throw error;
+  } finally {
+    processingRoutingOrderIds.delete(routingKey);
+  }
+}
+
+async function ensureOrderIsNotBeingForwarded(orderId: string): Promise<void> {
+  const session = currentWorkspaceSession();
+  if (!session) return;
+  const unfinished = await readMobileRoutingAction(session);
+  if (unfinished?.kind === "master-forward" && unfinished.orderId === orderId) {
+    throw new Error("This order has a protected forwarding action. Retry Forward before returning or cancelling it.");
+  }
 }
 
 export async function returnOrder(orderId: string, actorName = "Master", reason = "", actorId = ""): Promise<WorkspaceState> {
+  await ensureOrderIsNotBeingForwarded(orderId);
   return updateWorkspaceState((state) => {
     const order = state.orders.find((item) => item.id === orderId);
     if (!order) throw new Error("This order is no longer available.");
@@ -549,6 +688,7 @@ export async function returnOrder(orderId: string, actorName = "Master", reason 
 }
 
 export async function cancelOrder(orderId: string, actorName = "Master"): Promise<WorkspaceState> {
+  await ensureOrderIsNotBeingForwarded(orderId);
   return updateWorkspaceState((state) => {
     const order = state.orders.find((item) => item.id === orderId);
     const actor = activeActors(state).find((item) => item.name === actorName);
@@ -1442,19 +1582,25 @@ function nextMessageId(state: WorkspaceState): string {
   return `MSG-${state.messageCounter}-${Date.now().toString(36)}`;
 }
 
-function appendOrderAssignmentMessage(state: WorkspaceState, order: OrderRecord, payer: ActorRecord): void {
+function appendOrderAssignmentMessage(
+  state: WorkspaceState,
+  order: OrderRecord,
+  payer: ActorRecord,
+  messageId = nextMessageId(state)
+): void {
   ensureDirectChats(state);
   const master = activeActors(state).find((actor) => actor.role === "Master");
   const chat = master && state.chatConversations.find((item) =>
     item.type === "direct" && item.members.includes(master.name) && item.members.includes(payer.name)
   );
   if (!master || !chat) throw new Error("The payout actor chat is not available.");
+  if (chat.messages.some((message) => message.id === messageId)) return;
   const displayNumber = order.agentOrderNumbers?.[payer.name] || order.agentOrderNumber || brokerOrderNumber(order);
   const payoutCurrency = order.payoutCurrency || order.sourceCurrency;
   const payoutAmount = majorFromMinor(Number(order.payoutAmountMinor || order.sourceAmountMinor || 0), payoutCurrency);
   const receiver = order.receiverName || order.accountNumber || order.phoneNumber || "the receiver";
   chat.messages.push({
-    id: nextMessageId(state),
+    id: messageId,
     from: master.name,
     text: `Order ${displayNumber} assigned to you. Pay ${compactAmount(payoutCurrency, payoutAmount)} to ${receiver}.`,
     kind: "text",

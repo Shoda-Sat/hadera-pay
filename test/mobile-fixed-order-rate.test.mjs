@@ -17,6 +17,6 @@ test("Android applies and enforces each Actor's Master-fixed order rate", async 
   assert.match(app, /fixedOrderRateForActor\(actor, draft\.payoutCurrency\)/);
   assert.match(app, /editable=\{!fixedRate\}/);
   assert.match(app, /reconcileFixedOrderConversion\(next, fixedRate, key\)/);
-  assert.match(client, /fixedOrderRateForActor\(actor, draft\.payoutCurrency\)/);
+  assert.match(client, /fixedOrderRateForActor\(actor, effectiveDraft\.payoutCurrency\)/);
   assert.match(client, /fixedRate \? \{ rate: String\(fixedRate\), payoutAmount: "" \} : \{\}/);
 });

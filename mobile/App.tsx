@@ -41,6 +41,7 @@ import {
 import type { LucideProps } from "lucide-react-native";
 import {
   canCreateOrders,
+  currentWorkspaceSession,
   getAccountDeviceWarning,
   getLastSessionActivityAt,
   getCurrentSession,
@@ -59,6 +60,8 @@ import { colors, radius, shadow, spacing } from "./src/theme";
 import { actingSessionFor, activeActors, calculableLedgerLines, isMasterView, orderRecordIsVoided, orderSortForSession, transferTargetsFor } from "./src/domain/workspace";
 import { ledgerLineBelongsToActor } from "./src/domain/ledgerNumbering";
 import { buildArchiveReportPdfHtml } from "./src/domain/reportPdf";
+import { readMobileRoutingAction, type MobileRoutingActionRecord } from "./src/domain/routingDurability";
+import { recoverMobileRoutingAction } from "./src/domain/routingRecovery";
 import { useProgressiveLimit } from "./src/hooks/useProgressiveLimit";
 import { notifyNewRequiredActions, subscribeToActionNotificationResponses } from "./src/notifications/actionNotifications";
 import {
@@ -302,6 +305,8 @@ export default function App() {
   const [workspaceState, setWorkspaceState] = useState<WorkspaceState | null>(null);
   const [stateLoading, setStateLoading] = useState(false);
   const [stateError, setStateError] = useState("");
+  const [routingAction, setRoutingAction] = useState<MobileRoutingActionRecord | null>(null);
+  const [routingActionBusy, setRoutingActionBusy] = useState(false);
   const [accountDeviceWarning, setAccountDeviceWarning] = useState<AccountDeviceWarning | null>(null);
   const [lastActivityAt, setLastActivityAt] = useState(Date.now());
   const historyRef = useRef<AppScreen[]>(["home"]);
@@ -309,10 +314,22 @@ export default function App() {
   const lastActivityRef = useRef(Date.now());
   const lastServerActivityRef = useRef(0);
   const logoutInFlightRef = useRef(false);
+  const routingActionRef = useRef<MobileRoutingActionRecord | null>(null);
+  const routingActionBusyRef = useRef(false);
   const accountDeviceWarningTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const selectedActor = workspaceState?.actors.find((actor) => actor.id === selectedActorId);
   const actingSession = session ? actingSessionFor(session, selectedActor) : null;
   const quote = useMemo(() => calculateQuote(draft), [draft]);
+
+  const handleRoutingActionChange = useCallback((nextAction: MobileRoutingActionRecord | null) => {
+    routingActionRef.current = nextAction;
+    setRoutingAction(nextAction);
+  }, []);
+
+  const handleRoutingBusyChange = useCallback((busy: boolean) => {
+    routingActionBusyRef.current = busy;
+    setRoutingActionBusy(busy);
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -345,32 +362,50 @@ export default function App() {
     let mounted = true;
     setStateLoading(true);
     setStateError("");
+    handleRoutingBusyChange(true);
     loadWorkspaceState()
-      .then((state) => {
-        if (mounted) setWorkspaceState(state);
+      .then((state) => recoverMobileRoutingAction(session, state))
+      .then(({ state, action }) => {
+        if (!mounted) return;
+        setWorkspaceState(state);
+        handleRoutingActionChange(action);
+        if (action?.kind === "broker-send") {
+          setDraft(action.draft);
+          setEditingOrderId(action.editingOrderId);
+          setSubmittedOrder(null);
+          if (action.order.brokerActorId) setSelectedActorId(action.order.brokerActorId);
+          historyRef.current = ["confirmation"];
+          setScreen("confirmation");
+        } else if (action?.kind === "master-forward") {
+          historyRef.current = ["orders"];
+          setScreen("orders");
+        }
       })
       .catch((error) => {
         if (mounted) setStateError(error instanceof Error ? error.message : "Could not load workspace.");
       })
       .finally(() => {
-        if (mounted) setStateLoading(false);
+        if (mounted) {
+          setStateLoading(false);
+          handleRoutingBusyChange(false);
+        }
       });
     return () => {
       mounted = false;
     };
-  }, [session?.workspaceId]);
+  }, [handleRoutingActionChange, handleRoutingBusyChange, session?.userId, session?.workspaceId]);
 
   useEffect(() => {
     if (!session || session.role === "Owner") return;
     let mounted = true;
     const timer = setInterval(() => {
-      if (AppState.currentState !== "active") return;
+      if (AppState.currentState !== "active" || routingActionRef.current || routingActionBusyRef.current) return;
       loadWorkspaceStateIfChanged()
         .then((state) => {
-          if (mounted && state) setWorkspaceState(state);
+          if (mounted && state && !routingActionRef.current && !routingActionBusyRef.current) setWorkspaceState(state);
         })
         .catch(() => undefined);
-    }, 10000);
+    }, 3000);
     return () => {
       mounted = false;
       clearInterval(timer);
@@ -438,12 +473,25 @@ export default function App() {
   }, [orderFlowAllowed, screen]);
 
   const navigate = (next: AppScreen) => {
+    const protectedScreen = routingActionRef.current?.kind === "broker-send"
+      ? "confirmation"
+      : routingActionRef.current?.kind === "master-forward"
+        ? "orders"
+        : "";
+    if ((protectedScreen && next !== protectedScreen) || routingActionBusyRef.current) {
+      Alert.alert("Order action in progress", "Finish the protected order action before opening another page.");
+      return;
+    }
     if (next === screen) return;
     historyRef.current.push(next);
     setScreen(next);
   };
 
   const goBack = () => {
+    if (routingActionRef.current || routingActionBusyRef.current) {
+      Alert.alert("Order action in progress", "Finish the protected order action before leaving this page.");
+      return false;
+    }
     if (historyRef.current.length <= 1) return false;
     historyRef.current.pop();
     setScreen(historyRef.current[historyRef.current.length - 1] || "home");
@@ -458,6 +506,10 @@ export default function App() {
 
   const refreshWorkspace = async () => {
     if (!session) return;
+    if (routingActionRef.current || routingActionBusyRef.current) {
+      Alert.alert("Refresh paused", "Finish the protected order action first. This prevents a refresh from interrupting it.");
+      return;
+    }
     setStateLoading(true);
     setStateError("");
     try {
@@ -480,12 +532,14 @@ export default function App() {
     setSubmittedOrder(null);
     setSelectedActorId("");
     setEditingOrderId("");
+    handleRoutingActionChange(null);
+    handleRoutingBusyChange(false);
     const firstScreen: AppScreen = nextSession.role === "Owner" ? "owner" : "home";
     historyRef.current = [firstScreen];
     setScreen(firstScreen);
   };
 
-  const handleLogout = useCallback(async () => {
+  const performLogout = useCallback(async () => {
     if (logoutInFlightRef.current) return;
     logoutInFlightRef.current = true;
     setLoggingOut(true);
@@ -496,6 +550,8 @@ export default function App() {
     setSelectedActorId("");
     setEditingOrderId("");
     setDraft(emptyDraft);
+    handleRoutingActionChange(null);
+    handleRoutingBusyChange(false);
     historyRef.current = ["home"];
     setScreen("home");
     try {
@@ -506,17 +562,32 @@ export default function App() {
       setLoggingOut(false);
       logoutInFlightRef.current = false;
     }
-  }, []);
+  }, [handleRoutingActionChange, handleRoutingBusyChange]);
+
+  const handleLogout = useCallback(async (forced = false) => {
+    if (!forced && (routingActionRef.current || routingActionBusyRef.current)) {
+      Alert.alert(
+        "Order delivery is not confirmed",
+        "You can log out safely, but this exact order action will remain protected on this device. Sign back into the same account to check or retry it.",
+        [
+          { text: "Stay signed in", style: "cancel" },
+          { text: "Log out anyway", style: "destructive", onPress: () => void performLogout() }
+        ]
+      );
+      return;
+    }
+    await performLogout();
+  }, [performLogout]);
 
   useEffect(() => {
     if (!session?.subscriptionReadOnly || !session.subscriptionGraceEndsAt) return;
     const remainingMs = new Date(session.subscriptionGraceEndsAt).getTime() - Date.now();
     if (!Number.isFinite(remainingMs)) return;
     if (remainingMs <= 0) {
-      void handleLogout();
+      void handleLogout(true);
       return;
     }
-    const timer = setTimeout(() => void handleLogout(), remainingMs);
+    const timer = setTimeout(() => void handleLogout(true), remainingMs);
     return () => clearTimeout(timer);
   }, [handleLogout, session?.subscriptionGraceEndsAt, session?.subscriptionReadOnly]);
 
@@ -549,7 +620,7 @@ export default function App() {
     const timer = setTimeout(() => {
       if (Date.now() - lastActivityRef.current < idleMs || logoutInFlightRef.current) return;
       Alert.alert("Session timed out", "You were logged out because this account was inactive.");
-      void handleLogout();
+      void handleLogout(true);
     }, remainingMs);
     return () => clearTimeout(timer);
   }, [handleLogout, lastActivityAt, session]);
@@ -563,7 +634,7 @@ export default function App() {
       const idleMs = idleTimeoutSeconds * 1000;
       if (Date.now() - lastActivityRef.current >= idleMs && !logoutInFlightRef.current) {
         Alert.alert("Session timed out", "You were logged out because this account was inactive.");
-        void handleLogout();
+        void handleLogout(true);
       }
     });
     return () => subscription.remove();
@@ -621,7 +692,7 @@ export default function App() {
             onBack={goBack}
             onLogout={() => Alert.alert("Log out?", "This account will stay available offline until you log out.", [
               { text: "Cancel", style: "cancel" },
-              { text: "Log out", style: "destructive", onPress: handleLogout }
+              { text: "Log out", style: "destructive", onPress: () => void handleLogout(false) }
             ])}
             loggingOut={loggingOut}
           />
@@ -657,7 +728,16 @@ export default function App() {
               onLedger={() => navigate("ledger")}
             />
           )}
-          {commonProps && currentScreen === "orders" ? <OrdersScreen {...commonProps} onNewOrder={startNewOrder} onEditReturnedOrder={editReturnedOrder} /> : null}
+          {commonProps && currentScreen === "orders" ? (
+            <OrdersScreen
+              {...commonProps}
+              onNewOrder={startNewOrder}
+              onEditReturnedOrder={editReturnedOrder}
+              routingAction={routingAction}
+              onRoutingActionChange={handleRoutingActionChange}
+              onRoutingBusyChange={handleRoutingBusyChange}
+            />
+          ) : null}
           {commonProps && currentScreen === "pendingCancelled" && isMasterView(actingSession) ? <PendingCancelledScreen {...commonProps} /> : null}
           {commonProps && currentScreen === "transfers" ? <TransfersScreen {...commonProps} /> : null}
           {commonProps && currentScreen === "search" ? <SearchScreen {...commonProps} /> : null}
@@ -680,7 +760,7 @@ export default function App() {
                 setDraft(draftForSession(actingSessionFor(session, actor)));
                 navigate("home");
               }}
-              onLogout={() => Alert.alert("Log out?", "Your locally cached account will be removed from this device.", [{ text: "Cancel", style: "cancel" }, { text: "Log out", style: "destructive", onPress: handleLogout }])}
+              onLogout={() => Alert.alert("Log out?", "Your locally cached account will be removed from this device.", [{ text: "Cancel", style: "cancel" }, { text: "Log out", style: "destructive", onPress: () => void handleLogout(false) }])}
             />
           ) : null}
           {currentScreen === "settlement" && (
@@ -722,6 +802,10 @@ export default function App() {
               quote={quote}
               submittedOrder={submittedOrder}
               editingOrderId={editingOrderId}
+              routingAction={routingAction}
+              routingActionBusy={routingActionBusy}
+              onRoutingActionChange={handleRoutingActionChange}
+              onRoutingBusyChange={handleRoutingBusyChange}
               onSubmitted={(order) => {
                 setSubmittedOrder(order);
                 setWorkspaceState(order.state);
@@ -1660,6 +1744,10 @@ function ConfirmationScreen({
   quote,
   submittedOrder,
   editingOrderId,
+  routingAction,
+  routingActionBusy,
+  onRoutingActionChange,
+  onRoutingBusyChange,
   onSubmitted,
   onEdit,
   onHome
@@ -1669,23 +1757,40 @@ function ConfirmationScreen({
   quote: ReturnType<typeof calculateQuote>;
   submittedOrder: SubmittedOrder | null;
   editingOrderId: string;
+  routingAction: MobileRoutingActionRecord | null;
+  routingActionBusy: boolean;
+  onRoutingActionChange: (action: MobileRoutingActionRecord | null) => void;
+  onRoutingBusyChange: (busy: boolean) => void;
   onSubmitted: (order: SubmittedOrder) => void;
   onEdit: () => void;
   onHome: () => void;
 }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const pendingBrokerSend = routingAction?.kind === "broker-send" ? routingAction : null;
+  const actionLocked = loading || routingActionBusy || Boolean(pendingBrokerSend);
 
   const submit = async () => {
+    const routingSessionIsCurrent = () => {
+      const current = currentWorkspaceSession();
+      return current?.workspaceId === session.workspaceId && current.userId === session.userId;
+    };
     setLoading(true);
+    onRoutingBusyChange(true);
     setError("");
     try {
       const order = await submitTransferOrder(session, draft, editingOrderId);
+      if (!routingSessionIsCurrent()) return;
+      onRoutingActionChange(null);
       onSubmitted(order);
     } catch (caught) {
+      const protectedAction = await readMobileRoutingAction(session);
+      if (!routingSessionIsCurrent()) return;
+      onRoutingActionChange(protectedAction);
       setError(caught instanceof Error ? caught.message : "Could not submit order.");
     } finally {
       setLoading(false);
+      if (routingSessionIsCurrent()) onRoutingBusyChange(false);
     }
   };
 
@@ -1722,8 +1827,15 @@ function ConfirmationScreen({
       </Panel>
       {error ? <Text style={styles.errorText}>{error}</Text> : null}
       <View style={styles.quickActions}>
-        <Button label="Edit" onPress={onEdit} variant="secondary" style={styles.actionButton} />
-        <Button label={editingOrderId ? "Resubmit order" : "Send order"} onPress={submit} loading={loading} icon={<Send size={17} color="#ffffff" />} style={styles.actionButton} />
+        <Button label="Edit" onPress={onEdit} disabled={actionLocked} variant="secondary" style={styles.actionButton} />
+        <Button
+          label={pendingBrokerSend ? "Retry exact send" : editingOrderId ? "Resubmit order" : "Send order"}
+          onPress={submit}
+          loading={loading || routingActionBusy}
+          disabled={loading || routingActionBusy}
+          icon={<Send size={17} color="#ffffff" />}
+          style={styles.actionButton}
+        />
       </View>
     </View>
   );
