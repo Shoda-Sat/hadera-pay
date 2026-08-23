@@ -30,7 +30,9 @@ test("create-order fields and cleared payer terms stay empty", async () => {
 
   const forwardPercentInput = index.match(/<input id="forwardPercent-\$\{order\.id\}"[^>]*>/)?.[0] || "";
   assert.ok(forwardPercentInput, "Missing Master payer-percentage field");
-  assert.match(forwardPercentInput, /value="\$\{escapeHtml\(forwardedPayoutPercentInputValue\(order\)\)\}"/);
+  assert.match(forwardPercentInput, /value="\$\{escapeHtml\(forwardingPercentValue\)\}"/);
+  assert.match(index, /const forwardingPercentValue = displayedRoutingAttempt[\s\S]*: forwardedPayoutPercentInputValue\(order\);/,
+    "Normal Master routing must still leave an unset payer percentage empty outside an unresolved retry.");
   assert.doesNotMatch(forwardPercentInput, /commissionPercent/, "The order commission must not prefill the payer percentage");
   assert.match(index, /function forwardedPayoutPercentValue\(order\)[\s\S]*hasOwnProperty\.call\(order \|\| \{\}, "forwardedPayoutPercent"\)[\s\S]*return null;/);
   assert.match(index, /function forwardedPayoutPercentInputValue\(order\)[\s\S]*forwardedPayoutPercentValue\(order\)[\s\S]*percent === null \? ""/);

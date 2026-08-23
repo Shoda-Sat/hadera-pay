@@ -3951,6 +3951,12 @@
     let browserDeviceId = "";
     let accountSecurityWarningTimer = null;
     const processingOrderIds = new Set();
+    const pendingOrderActionSaves = new Set();
+    const unconfirmedOrderActions = new Set();
+    const brokerRoutingRetryAttempts = new Map();
+    const masterRoutingRetryAttempts = new Map();
+    let orderActionDeferredRemoteSave = false;
+    let orderActionSessionGeneration = 0;
     const pendingProofFiles = new Map();
     const pendingProofUploads = new Map();
     const forwardTransferDrafts = new Map();
@@ -4689,6 +4695,10 @@
         // Large proof images can exceed browser storage; keep remote saving alive.
       }
       if (!currentAuth || !remoteStateReady || suppressRemoteSave) return;
+      if (pendingOrderActionSaves.size > 0 || unconfirmedOrderActions.size > 0) {
+        orderActionDeferredRemoteSave = true;
+        return;
+      }
       clearTimeout(saveTimer);
       saveTimer = setTimeout(() => {
         saveTimer = null;
@@ -4702,27 +4712,40 @@
       }
     }
 
-    function queueRemoteStateSave() {
+    function queueRemoteStateSave(stateSnapshot = null) {
+      const submittedState = stateSnapshot || state;
+      const submittedSession = typeof currentOrderActionSession === "function" ? currentOrderActionSession() : null;
+      const submittedStorageKey = storageKey;
+      const assertSubmittedSession = () => {
+        if (!submittedSession || (typeof orderActionSessionIsCurrent === "function" && orderActionSessionIsCurrent(submittedSession))) return;
+        const error = new Error("The signed-in workspace changed before this save finished.");
+        error.code = "ORDER_ACTION_SESSION_CHANGED";
+        throw error;
+      };
       const write = remoteSaveChain.then(async () => {
+        assertSubmittedSession();
         remoteSavePending += 1;
         try {
           for (let attempt = 0; attempt < 3; attempt += 1) {
             try {
               const result = await api("/api/app-state", {
                 method: "PUT",
-                body: { state, expectedRevision: remoteStateRevision }
+                body: { state: submittedState, expectedRevision: remoteStateRevision }
               });
+              assertSubmittedSession();
               remoteStateRevision = String(result.revision || result.state?._syncRevision || remoteStateRevision || "0");
               if (result.state) mergeSharedState(result.state);
               try {
-                localStorage.setItem(storageKey, JSON.stringify(state));
+                localStorage.setItem(submittedStorageKey, JSON.stringify(state));
               } catch {
                 // Keep the authoritative remote save even if local storage is full.
               }
               return result;
             } catch (error) {
-              if (error?.status !== 409 || attempt === 2) throw error;
+              assertSubmittedSession();
+              if (error?.status !== 409 || attempt === 2 || stateSnapshot) throw error;
               const version = await api("/api/app-state/version");
+              assertSubmittedSession();
               remoteStateRevision = String(version?.revision || remoteStateRevision || "0");
             }
           }
@@ -5277,7 +5300,7 @@
     async function refreshSharedState() {
       if (!currentAuth || !remoteStateReady) return;
       refreshAccountDeviceWarning();
-      if (actorPermissionSavePending > 0 || remoteSavePending > 0 || saveTimer !== null || workspaceInputIsFocused()) return;
+      if (pendingOrderActionSaves.size > 0 || unconfirmedOrderActions.size > 0 || actorPermissionSavePending > 0 || remoteSavePending > 0 || saveTimer !== null || workspaceInputIsFocused()) return;
       const version = await api("/api/app-state/version").catch(() => null);
       if (version?.clientReleaseId && version.clientReleaseId !== clientReleaseId) {
         if (!clientUpdateNoticeShown) {
@@ -5287,7 +5310,7 @@
       }
       if (!version?.revision || String(version.revision) === String(remoteStateRevision)) return;
       const remote = await api("/api/app-state").catch(() => null);
-      if (actorPermissionSavePending > 0 || remoteSavePending > 0 || saveTimer !== null || workspaceInputIsFocused()) return;
+      if (pendingOrderActionSaves.size > 0 || unconfirmedOrderActions.size > 0 || actorPermissionSavePending > 0 || remoteSavePending > 0 || saveTimer !== null || workspaceInputIsFocused()) return;
       if (!mergeSharedState(remote?.state)) return;
       remoteStateRevision = String(remote?.revision || remote?.state?._syncRevision || remoteStateRevision || "0");
       suppressRemoteSave = true;
@@ -5473,6 +5496,7 @@
       endingAuthSession = true;
       const session = currentAuth;
       const idleLabel = authIdleLabel(authIdleSeconds(session));
+      resetOrderActionSession();
       await api("/api/auth/logout", { method: "POST" }).catch(() => {});
       forgetAuthActivity(session);
       currentAuth = null;
@@ -5502,16 +5526,24 @@
       return signedInRole() === "Owner";
     }
 
-    async function saveStateNow() {
+    async function saveStateNow(stateSnapshot = null) {
       if (subscriptionIsReadOnly()) return false;
-      saveState();
+      if (!stateSnapshot && orderActionIsOutstanding()) {
+        saveState();
+        orderActionDeferredRemoteSave = true;
+        return false;
+      }
+      if (stateSnapshot) persistOrderActionStateLocally();
+      else saveState();
       if (!currentAuth || !remoteStateReady || suppressRemoteSave) return false;
+      if (stateSnapshot && saveTimer !== null) orderActionDeferredRemoteSave = true;
       clearTimeout(saveTimer);
       saveTimer = null;
       try {
-        await queueRemoteStateSave();
-        return true;
+        const result = await queueRemoteStateSave(stateSnapshot);
+        return stateSnapshot ? result : true;
       } catch (error) {
+        if (error?.code === "ORDER_ACTION_SESSION_CHANGED") return false;
         handleRemoteSaveError(error);
         if (error?.status !== 409) {
           notifyEvent("Save unavailable", error?.message || "The latest changes could not be saved.");
@@ -5519,6 +5551,419 @@
         return false;
       }
     }
+
+    function orderActionIsOutstanding() {
+      return pendingOrderActionSaves.size > 0 || unconfirmedOrderActions.size > 0;
+    }
+
+    function currentOrderActionSession() {
+      return {
+        generation: orderActionSessionGeneration,
+        workspaceId: String(currentAuth?.workspace?.id || ""),
+        userId: String(currentAuth?.user?.id || "")
+      };
+    }
+
+    function orderActionSessionIsCurrent(session) {
+      return Boolean(session)
+        && session.generation === orderActionSessionGeneration
+        && session.workspaceId === String(currentAuth?.workspace?.id || "")
+        && session.userId === String(currentAuth?.user?.id || "");
+    }
+
+    function resetOrderActionSession() {
+      orderActionSessionGeneration += 1;
+      pendingOrderActionSaves.clear();
+      unconfirmedOrderActions.clear();
+      brokerRoutingRetryAttempts.clear();
+      masterRoutingRetryAttempts.clear();
+      orderActionDeferredRemoteSave = false;
+      if (saveTimer !== null) clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+
+    function routingActionIsBlocked(actionKey) {
+      const anotherUnconfirmedAction = Array.from(unconfirmedOrderActions).some((key) => key !== actionKey);
+      if (pendingOrderActionSaves.size === 0 && !anotherUnconfirmedAction) return false;
+      notifyEvent("Order save in progress", "Finish or retry the current order delivery before starting another routing action.");
+      return true;
+    }
+
+    function routingActionOutboxKey(session = currentAuth) {
+      const workspaceId = String(session?.workspace?.id || "");
+      const userId = String(session?.user?.id || "");
+      return workspaceId && userId ? `haderapay.routing-action.${workspaceId}.${userId}` : "";
+    }
+
+    function routingActionAttemptId(record) {
+      return String(record?.attemptId || record?.submittedOrder?.routingSubmissionId || record?.submittedOrder?.routingForwardAttemptId || "");
+    }
+
+    function savedRoutingActionOutbox(session = currentAuth) {
+      const key = routingActionOutboxKey(session);
+      if (!key) return null;
+      try {
+        const record = JSON.parse(localStorage.getItem(key) || "null");
+        if (!record || record.version !== 1) return null;
+        if (String(record.workspaceId || "") !== String(session?.workspace?.id || "")) return null;
+        if (String(record.userId || "") !== String(session?.user?.id || "")) return null;
+        return record;
+      } catch {
+        return null;
+      }
+    }
+
+    function persistRoutingActionOutbox(record) {
+      const key = routingActionOutboxKey();
+      if (!key || !record) return false;
+      try {
+        localStorage.setItem(key, JSON.stringify({
+          ...record,
+          version: 1,
+          workspaceId: String(currentAuth?.workspace?.id || ""),
+          userId: String(currentAuth?.user?.id || ""),
+          savedAt: new Date().toISOString()
+        }));
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    function clearRoutingActionOutbox(expectedAttemptId = "") {
+      const key = routingActionOutboxKey();
+      if (!key) return;
+      if (expectedAttemptId) {
+        const stored = savedRoutingActionOutbox();
+        if (stored && routingActionAttemptId(stored) !== String(expectedAttemptId)) return;
+      }
+      try {
+        localStorage.removeItem(key);
+      } catch {
+        // A stale recovery marker is harmless if browser storage cannot be changed.
+      }
+    }
+
+    function captureOrderActionRecord(collectionName, predicate) {
+      const collection = Array.isArray(state[collectionName]) ? state[collectionName] : [];
+      const index = collection.findIndex(predicate);
+      return {
+        collectionName,
+        index,
+        record: index >= 0 ? structuredClone(collection[index]) : null
+      };
+    }
+
+    function restoreOrderActionRecord(snapshot, predicate) {
+      const collection = Array.isArray(state[snapshot.collectionName]) ? state[snapshot.collectionName] : [];
+      state[snapshot.collectionName] = collection;
+      let removedCount = 0;
+      for (let index = collection.length - 1; index >= 0; index -= 1) {
+        if (!predicate(collection[index])) continue;
+        collection.splice(index, 1);
+        removedCount += 1;
+      }
+      if (!snapshot.record) return;
+      if (removedCount === 0 && collection.some((item) => item?.id === snapshot.record.id)) return;
+      const targetIndex = Math.min(Math.max(snapshot.index, 0), collection.length);
+      collection.splice(targetIndex, 0, structuredClone(snapshot.record));
+    }
+
+    function captureSavedCustomerRecords() {
+      return new Map((state.savedCustomers || []).map((customer, index) => [
+        customer.id,
+        { index, record: structuredClone(customer) }
+      ]));
+    }
+
+    function restoreTouchedSavedCustomers(beforeById, touchedCustomers = []) {
+      const touchedIds = Array.from(new Set(touchedCustomers.map((customer) => customer?.id).filter(Boolean)));
+      touchedIds.forEach((customerId) => {
+        const currentIndex = state.savedCustomers.findIndex((customer) => customer.id === customerId);
+        if (currentIndex >= 0) state.savedCustomers.splice(currentIndex, 1);
+        const previous = beforeById.get(customerId);
+        if (!previous) return;
+        const targetIndex = Math.min(Math.max(previous.index, 0), state.savedCustomers.length);
+        state.savedCustomers.splice(targetIndex, 0, structuredClone(previous.record));
+      });
+    }
+
+    function removeOrderActionChatMessage(reference) {
+      if (!reference?.chatId || !reference?.messageId) return;
+      const chat = state.chatConversations.find((item) => item.id === reference.chatId);
+      if (!chat) return;
+      chat.messages = (chat.messages || []).filter((message) => message.id !== reference.messageId);
+    }
+
+    function orderForActionId(orders, orderId, predicate = () => true) {
+      const reference = String(orderId || "");
+      if (!reference) return null;
+      const candidates = Array.isArray(orders) ? orders : [];
+      const exact = candidates.find((order) => [order?.id, order?.internalOrderId]
+        .some((value) => String(value || "") === reference) && predicate(order));
+      if (exact) return exact;
+      return candidates.find((order) => [order?.collisionSourceOrderId, order?._serverCollisionSourceOrderId]
+        .some((value) => String(value || "") === reference) && predicate(order)) || null;
+    }
+
+    function orderRoutingTokenPart(value, fallback = "INITIAL") {
+      return String(value || fallback).replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "").slice(0, 80) || fallback;
+    }
+
+    function brokerRoutingSubmissionId(order, previousOrder = null) {
+      const cycle = previousOrder?.state === "Returned"
+        ? previousOrder.returnedAt || previousOrder.updatedAt || "RETURNED"
+        : "INITIAL";
+      return `ROUTE-SEND-${orderRoutingTokenPart(order?.id)}-${orderRoutingTokenPart(cycle)}`;
+    }
+
+    function masterRoutingAttemptId(order, targetActorId, divider = "AUTO", percent = "AUTO") {
+      const cycle = order?.routingSubmissionId || order?.updatedAt || order?.sentAt || order?.createdAt || "INITIAL";
+      return `ROUTE-FORWARD-${orderRoutingTokenPart(order?.id)}-${orderRoutingTokenPart(targetActorId)}-${orderRoutingTokenPart(cycle)}-D-${orderRoutingTokenPart(divider, "AUTO")}-P-${orderRoutingTokenPart(percent, "AUTO")}`;
+    }
+
+    function brokerRoutingCommitted(candidate, submittedOrder, allowAdvanced = false) {
+      if (!candidate || !submittedOrder || candidate.routingSubmissionId !== submittedOrder.routingSubmissionId) return false;
+      if (!recoveredOrderMatches(candidate, submittedOrder)) return false;
+      if (!allowAdvanced) return candidate.state === "Pending Forward";
+      return ["Pending Forward", "Assigned", "Returned", "Paid", "Void Requested", "Voided", "Cancelled"].includes(candidate.state);
+    }
+
+    function sameOptionalForwardingTerm(candidate, submittedOrder, field) {
+      const candidateHas = Object.prototype.hasOwnProperty.call(candidate || {}, field);
+      const submittedHas = Object.prototype.hasOwnProperty.call(submittedOrder || {}, field);
+      if (candidateHas !== submittedHas) return false;
+      return !submittedHas || Number(candidate[field]) === Number(submittedOrder[field]);
+    }
+
+    function masterRoutingCommitted(candidate, submittedOrder, targetActor, allowAdvanced = false) {
+      if (!candidate || !submittedOrder || !targetActor) return false;
+      if (candidate.routingForwardAttemptId !== submittedOrder.routingForwardAttemptId) return false;
+      if (candidate.agentActorId !== targetActor.id) return false;
+      if (!sameOptionalForwardingTerm(candidate, submittedOrder, "forwardedPayoutDivider")) return false;
+      if (!sameOptionalForwardingTerm(candidate, submittedOrder, "forwardedPayoutPercent")) return false;
+      if (!allowAdvanced) return candidate.state === "Assigned";
+      return ["Assigned", "Returned", "Paid", "Void Requested", "Voided"].includes(candidate.state);
+    }
+
+    function rollbackCachedRoutingAction(record) {
+      const submittedOrder = record?.submittedOrder;
+      if (!submittedOrder?.id) return;
+      const orderToken = routingActionAttemptId(record);
+      restoreOrderActionRecord({
+        collectionName: "orders",
+        index: Number(record.previousOrderIndex || 0),
+        record: record.previousOrder || null
+      }, (candidate) => {
+        if (!orderForActionId([candidate], submittedOrder.id)) return false;
+        return record.kind === "broker-send"
+          ? candidate.routingSubmissionId === orderToken
+          : candidate.routingForwardAttemptId === orderToken;
+      });
+      restoreOrderActionRecord({
+        collectionName: "receivables",
+        index: Number(record.previousReceivableIndex || 0),
+        record: record.previousReceivable || null
+      }, (candidate) => candidate.id === record.retryAttempt?.receivable?.id || candidate.orderId === submittedOrder.id);
+      if (record.kind === "broker-send") {
+        const previousCustomers = new Map((record.previousCustomers || []).map((entry) => [entry.id, entry]));
+        restoreTouchedSavedCustomers(previousCustomers, record.retryAttempt?.customers || []);
+        state.editingOrderId = submittedOrder.id;
+      } else {
+        removeOrderActionChatMessage(record.messageReference);
+      }
+      persistOrderActionStateLocally();
+    }
+
+    function restoreRoutingActionOutbox(remoteWasLoaded) {
+      const record = savedRoutingActionOutbox();
+      const submittedOrder = record?.submittedOrder;
+      if (!record || !submittedOrder?.id || !routingActionAttemptId(record)) return null;
+      if (!remoteWasLoaded) rollbackCachedRoutingAction(record);
+      const currentOrder = orderForActionId(state.orders, submittedOrder.id);
+      if (record.kind === "broker-send") {
+        if (remoteWasLoaded && brokerRoutingCommitted(currentOrder, submittedOrder, true)) {
+          clearRoutingActionOutbox(routingActionAttemptId(record));
+          return { status: "confirmed", kind: record.kind, order: currentOrder };
+        }
+        if (remoteWasLoaded && currentOrder && currentOrder.state !== "Returned") {
+          clearRoutingActionOutbox(routingActionAttemptId(record));
+          return { status: "changed", kind: record.kind, order: currentOrder };
+        }
+        brokerRoutingRetryAttempts.set(submittedOrder.id, structuredClone(record.retryAttempt || { order: submittedOrder }));
+        unconfirmedOrderActions.add("broker-send");
+        state.editingOrderId = submittedOrder.id;
+        return { status: "retry", kind: record.kind, order: submittedOrder, receivable: record.retryAttempt?.receivable || null };
+      }
+      if (record.kind !== "master-forward") {
+        clearRoutingActionOutbox(routingActionAttemptId(record));
+        return null;
+      }
+      const targetActor = activeActors().find((actor) => actor.id === record.retryAttempt?.targetActorId);
+      if (remoteWasLoaded && masterRoutingCommitted(currentOrder, submittedOrder, targetActor, true)) {
+        clearRoutingActionOutbox(routingActionAttemptId(record));
+        return { status: "confirmed", kind: record.kind, order: currentOrder };
+      }
+      if (remoteWasLoaded && (!currentOrder || currentOrder.state !== "Pending Forward")) {
+        clearRoutingActionOutbox(routingActionAttemptId(record));
+        return { status: "changed", kind: record.kind, order: currentOrder };
+      }
+      if (!targetActor || !currentOrder || currentOrder.state !== "Pending Forward") {
+        return { status: "blocked", kind: record.kind, order: currentOrder };
+      }
+      const actionKey = `master-forward:${submittedOrder.id}`;
+      masterRoutingRetryAttempts.set(submittedOrder.id, structuredClone(record.retryAttempt || { order: submittedOrder }));
+      unconfirmedOrderActions.add(actionKey);
+      return { status: "retry", kind: record.kind, order: submittedOrder, retryAttempt: record.retryAttempt || null };
+    }
+
+    async function authoritativeOrderActionState(orderId, predicate) {
+      let latestRemote = null;
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 350 * (2 ** (attempt - 1))));
+        const remote = await api("/api/app-state").catch(() => null);
+        if (!remote?.state) continue;
+        latestRemote = remote;
+        const order = orderForActionId(remote.state.orders, orderId, predicate);
+        if (order) return { remote, order, confirmed: true };
+      }
+      return { remote: latestRemote, order: null, confirmed: false };
+    }
+
+    function adoptAuthoritativeOrderActionState(remote) {
+      if (!mergeSharedState(remote?.state)) return false;
+      remoteStateRevision = String(remote?.revision || remote?.state?._syncRevision || remoteStateRevision || "0");
+      renderOrderActionStateWithoutRemoteSave();
+      return true;
+    }
+
+    function persistOrderActionStateLocally() {
+      try {
+        localStorage.setItem(storageKey, JSON.stringify(state));
+      } catch {
+        // Keep the in-memory action available when browser storage is full.
+      }
+    }
+
+    function renderOrderActionStateWithoutRemoteSave() {
+      suppressRemoteSave = true;
+      try {
+        renderAll();
+      } finally {
+        suppressRemoteSave = false;
+      }
+    }
+
+    function flushDeferredOrderActionSave() {
+      if (!orderActionDeferredRemoteSave || pendingOrderActionSaves.size > 0 || unconfirmedOrderActions.size > 0) return;
+      orderActionDeferredRemoteSave = false;
+      saveState();
+    }
+
+    function beginOrderActionUi(button, label, container = null) {
+      const controls = Array.from((container || button?.parentElement)?.querySelectorAll?.("button, input, select, textarea") || []);
+      const disabledStates = controls.map((control) => ({ control, disabled: control.disabled }));
+      const originalButtonHtml = button?.innerHTML || "";
+      disabledStates.forEach(({ control }) => { control.disabled = true; });
+      if (button) {
+        button.textContent = label;
+        button.setAttribute("aria-busy", "true");
+      }
+      return () => {
+        disabledStates.forEach(({ control, disabled }) => { control.disabled = disabled; });
+        if (button) {
+          button.innerHTML = originalButtonHtml;
+          button.removeAttribute("aria-busy");
+        }
+      };
+    }
+
+    function setRoutingActionButtonLabel(button, label) {
+      if (!button) return;
+      const textNode = Array.from(button.childNodes || []).find((node) => node.nodeType === 3 && String(node.nodeValue || "").trim());
+      if (textNode) textNode.nodeValue = `\n                      ${label}\n                    `;
+      else button.append(document.createTextNode(label));
+    }
+
+    function brokerInputMatchesRoutingRetry(input, retryAttempt) {
+      const order = retryAttempt?.order;
+      if (!order) return true;
+      const sameText = (left, right) => String(left || "").trim() === String(right || "").trim();
+      return sameText(input.broker, order.broker)
+        && sameText(input.sourceCurrency, order.sourceCurrency)
+        && sameText(input.payoutCurrency, order.payoutCurrency)
+        && Number(input.sourceAmountMinor) === Number(order.sourceAmountMinor)
+        && Number(input.payoutAmountMinor) === Number(order.payoutAmountMinor)
+        && Number(input.commissionMinor) === Number(order.commissionMinor)
+        && Number(input.grossMinor) === Number(order.grossMinor)
+        && Number(input.rate) === Number(order.rate)
+        && Number(input.commissionPercent) === Number(order.commissionPercent)
+        && sameText(input.orderCommissionLiability, order.orderCommissionLiability)
+        && sameText(input.fundingType || "cash", order.fundingType || "cash")
+        && sameText(input.senderName, order.senderName)
+        && sameText(input.receiverName, order.receiverName)
+        && sameText(input.receiverCity, order.receiverCity)
+        && sameText(input.accountNumber, order.accountNumber)
+        && sameText(input.phoneNumber, order.phoneNumber)
+        && sameText(input.remarks, order.remarks)
+        && sameText(input.creditReminder, retryAttempt.receivable?.creditReminder);
+    }
+
+    function showBrokerRoutingRetryControls(retryAttempt) {
+      const order = retryAttempt?.order;
+      if (!order) return;
+      state.editingOrderId = order.id;
+      fillOrderForm(order);
+      document.getElementById("creditReminder").value = retryAttempt.receivable?.creditReminder || "";
+      const button = document.getElementById("sendOrderButton");
+      setRoutingActionButtonLabel(button, "Retry Exact Send");
+      button.title = "Retry the exact order whose previous delivery could not be confirmed";
+    }
+
+    function masterRoutingControlsMatchRetry(targetAgent, dividerText, percentText, retryAttempt) {
+      if (!retryAttempt?.order) return true;
+      return String(targetAgent || "") === String(retryAttempt.targetAgent || "")
+        && String(dividerText || "") === String(retryAttempt.dividerText || "")
+        && String(percentText || "") === String(retryAttempt.percentText || "");
+    }
+
+    function showMasterRoutingRetryControls(orderId, retryAttempt) {
+      if (!retryAttempt?.order) return;
+      const buttons = Array.from(document.querySelectorAll(".forward-order"))
+        .filter((candidate) => String(candidate.dataset.id || "") === String(orderId || ""));
+      buttons.forEach((button) => {
+        const actionBox = button.closest(".order-actions");
+        if (!actionBox) return;
+        const targetInput = actionBox.querySelector(".forward-agent");
+        const dividerInput = actionBox.querySelector(".forward-payout-divider");
+        const percentInput = actionBox.querySelector(".forward-payout-percent");
+        if (targetInput) targetInput.value = retryAttempt.targetAgent || "";
+        if (dividerInput) dividerInput.value = retryAttempt.dividerText || "";
+        if (percentInput) percentInput.value = retryAttempt.percentText || "";
+        setRoutingActionButtonLabel(button, "Retry Exact Forwarding");
+        button.title = "Retry the exact forwarding whose previous delivery could not be confirmed";
+        actionBox.querySelectorAll(".master-return-order, .cancel-order").forEach((conflictingButton) => {
+          conflictingButton.disabled = true;
+          conflictingButton.title = "Retry the unresolved forwarding before choosing another action";
+        });
+        const reasonInput = actionBox.querySelector(".master-return-reason");
+        if (reasonInput) reasonInput.disabled = true;
+      });
+    }
+
+    function masterRoutingActionBlocksOtherActions(orderId) {
+      const actionKey = `master-forward:${orderId}`;
+      if (!pendingOrderActionSaves.has(actionKey) && !unconfirmedOrderActions.has(actionKey)) return false;
+      showMasterRoutingRetryControls(orderId, masterRoutingRetryAttempts.get(orderId));
+      notifyEvent("Finish forwarding first", "Retry the unresolved forwarding before returning or cancelling this order.");
+      return true;
+    }
+
+    window.addEventListener("beforeunload", (event) => {
+      if (pendingOrderActionSaves.size === 0 && unconfirmedOrderActions.size === 0) return;
+      event.preventDefault();
+      event.returnValue = "";
+    });
 
     function ensureSessionActor() {
       const membership = currentAuth?.membership;
@@ -5561,6 +6006,7 @@
 
     async function applyAuthSession(session) {
       endingAuthSession = false;
+      resetOrderActionSession();
       currentAuth = session;
       const loginStartedAt = new Date(session?.loginStartedAt || 0).getTime();
       currentLoginStartedAt = Number.isFinite(loginStartedAt) && loginStartedAt > 0 ? loginStartedAt : Date.now();
@@ -5587,6 +6033,7 @@
       state.withdrawalCounter = Math.max(Number(state.withdrawalCounter || 0), nextWithdrawalNumberFromLedger() - 1);
       assignCurrentMasterTransactionCycle();
       ensureSessionActor();
+      const routingRecovery = restoreRoutingActionOutbox(Boolean(remote.state));
       const actorLedgerNumbersChanged = ensureActorLedgerNumbers();
       remoteStateReady = true;
       if (actorLedgerNumbersChanged) await saveStateNow();
@@ -5597,6 +6044,22 @@
       document.documentElement.classList.remove("auth-locked");
       document.body.classList.remove("auth-locked");
       renderAll();
+      if (routingRecovery?.status === "retry" && routingRecovery.kind === "broker-send") {
+        showBrokerRoutingRetryControls(brokerRoutingRetryAttempts.get(routingRecovery.order.id));
+      } else if (routingRecovery?.status === "retry" && routingRecovery.kind === "master-forward") {
+        showMasterRoutingRetryControls(routingRecovery.order.id, routingRecovery.retryAttempt);
+      }
+      if (routingRecovery?.status === "retry") {
+        notifyEvent("Order delivery recovered", routingRecovery.kind === "broker-send"
+          ? "The last send was not confirmed before the page closed. Review the restored order and press Send Order to retry the same delivery."
+          : "The last forwarding was not confirmed before the page closed. Press Forward again to retry the exact same routing.");
+      } else if (routingRecovery?.status === "confirmed") {
+        notifyEvent("Order delivery confirmed", "The order finished saving before the page closed and its server version has been loaded.");
+      } else if (routingRecovery?.status === "changed") {
+        notifyEvent("Order status changed", "The server already has a newer status for the unfinished order, so that version was loaded.");
+      } else if (routingRecovery?.status === "blocked") {
+        notifyEvent("Order delivery needs review", "The unfinished forwarding could not be retried from this session. Refresh after the connection returns and review the order's current status.");
+      }
       notifyWorkspaceIsolationRepair();
       setView(viewFromLocation() || state.activeView, { historyMode: "replace" });
     }
@@ -6342,8 +6805,8 @@
 
     function rememberOrderCustomers(input, actor) {
       const brokerActor = activeActors().find((candidate) => candidate.id === actor?.id && actorCanInitiateOrders(candidate.role));
-      if (!brokerActor) return;
-      upsertSavedCustomer(brokerActor, {
+      if (!brokerActor) return [];
+      const sender = upsertSavedCustomer(brokerActor, {
         kind: "sender",
         name: input.senderName,
         receiverCity: "",
@@ -6351,7 +6814,7 @@
         phoneNumber: "",
         remarks: ""
       });
-      upsertSavedCustomer(brokerActor, {
+      const receiver = upsertSavedCustomer(brokerActor, {
         kind: "receiver",
         name: input.receiverName,
         receiverCity: input.receiverCity,
@@ -6359,6 +6822,7 @@
         phoneNumber: input.phoneNumber,
         remarks: input.remarks
       });
+      return [sender, receiver].filter(Boolean);
     }
 
     function getOrderInput() {
@@ -8452,13 +8916,13 @@
       });
     }
 
-    function sendOrderAssignmentToAgent(order, agentName) {
-      if (!order || !agentName) return;
+    function sendOrderAssignmentToAgent(order, agentName, messageId = "") {
+      if (!order || !agentName) return null;
       const chat = directChatWithMaster(agentName);
-      if (!chat) return;
+      if (!chat) return null;
       const master = masterName();
-      chat.messages.push({
-        id: nextMessageId(),
+      const message = {
+        id: messageId || nextMessageId(),
         from: master,
         text: `Order ${orderDisplayNumber(order, { name: agentName, role: "Agent" })} assigned to you. Pay ${money(order.payoutCurrency || order.sourceCurrency || "USD", order.payoutAmountMinor || order.sourceAmountMinor || 0)} to ${order.receiverName || order.phoneNumber || order.accountNumber || "the receiver"}.`,
         kind: "text",
@@ -8470,7 +8934,9 @@
         reactions: {},
         readBy: [master],
         createdAt: new Date().toISOString()
-      });
+      };
+      chat.messages.push(message);
+      return { chatId: chat.id, messageId: message.id };
     }
 
     const pendingCancelledOrderStates = new Set(["Assigned", "Returned", "Voided", "Cancelled"]);
@@ -9497,6 +9963,12 @@
 
     function orderActionsHtml(order, actor) {
       const canForward = actor?.role === "Master" && order.state === "Pending Forward";
+      const masterRoutingActionKey = canForward ? `master-forward:${order.id}` : "";
+      const routingAttempt = canForward ? masterRoutingRetryAttempts.get(order.id) : null;
+      const routingPending = canForward && pendingOrderActionSaves.has(masterRoutingActionKey);
+      const routingUnconfirmed = canForward && unconfirmedOrderActions.has(masterRoutingActionKey);
+      const routingLocked = routingPending || routingUnconfirmed;
+      const displayedRoutingAttempt = routingLocked ? routingAttempt : null;
       const canPay = actorCanPayOrder(order, actor);
       const canRequestVoid = actorCanRequestVoidOrder(order, actor);
       const canApproveVoid = actor?.role === "Master" && order.state === "Void Requested";
@@ -9516,26 +9988,38 @@
             </div>
           `;
         }
+        const selectedForwardAgent = displayedRoutingAttempt?.targetAgent || order.agent;
+        const forwardingDividerValue = displayedRoutingAttempt
+          ? String(displayedRoutingAttempt.dividerText || "")
+          : Number.isFinite(Number(order.forwardedPayoutDivider)) ? formatRate(order.forwardedPayoutDivider) : "";
+        const forwardingPercentValue = displayedRoutingAttempt
+          ? String(displayedRoutingAttempt.percentText || "")
+          : forwardedPayoutPercentInputValue(order);
+        const forwardingButtonLabel = routingPending ? "Forwarding..." : routingUnconfirmed ? "Retry Exact Forwarding" : "Forward";
+        const forwardingButtonState = routingPending ? ' disabled aria-busy="true"' : "";
+        const conflictingActionState = routingLocked
+          ? ' disabled title="Retry the unresolved forwarding before choosing another action"'
+          : "";
         return `
           <div class="order-actions">
             <select class="forward-agent" data-id="${order.id}">
-              ${matchedAgents.map((item) => `<option ${item.name === order.agent ? "selected" : ""}>${escapeHtml(item.name)}</option>`).join("")}
+              ${matchedAgents.map((item) => `<option ${item.name === selectedForwardAgent ? "selected" : ""}>${escapeHtml(item.name)}</option>`).join("")}
             </select>
             <div class="manual-divider-field">
               <label for="forwardDivider-${order.id}">Payout divisor</label>
-              <input id="forwardDivider-${order.id}" class="forward-payout-divider" data-id="${order.id}" type="number" min="0.000001" step="0.000001" value="${Number.isFinite(Number(order.forwardedPayoutDivider)) ? escapeHtml(formatRate(order.forwardedPayoutDivider)) : ""}" placeholder="Optional">
+              <input id="forwardDivider-${order.id}" class="forward-payout-divider" data-id="${order.id}" type="number" min="0.000001" step="0.000001" value="${escapeHtml(forwardingDividerValue)}" placeholder="Optional">
             </div>
             <div class="manual-divider-field">
               <label for="forwardPercent-${order.id}">Payer %</label>
-              <input id="forwardPercent-${order.id}" class="forward-payout-percent" data-id="${order.id}" type="number" min="0" step="0.000001" value="${escapeHtml(forwardedPayoutPercentInputValue(order))}" placeholder="Optional">
+              <input id="forwardPercent-${order.id}" class="forward-payout-percent" data-id="${order.id}" type="number" min="0" step="0.000001" value="${escapeHtml(forwardingPercentValue)}" placeholder="Optional">
             </div>
             <div class="manual-divider-field master-return-reason-field">
               <label for="returnReason-${order.id}">Reason for returning</label>
-              <textarea id="returnReason-${order.id}" class="master-return-reason order-return-reason" data-id="${order.id}" maxlength="500" placeholder="Required only when returning this order">${escapeHtml(orderReturnReasonDrafts.get(order.id) || "")}</textarea>
+              <textarea id="returnReason-${order.id}" class="master-return-reason order-return-reason" data-id="${order.id}" maxlength="500" placeholder="Required only when returning this order"${conflictingActionState}>${escapeHtml(orderReturnReasonDrafts.get(order.id) || "")}</textarea>
             </div>
-            <button class="btn secondary forward-order" data-id="${order.id}" type="button">Forward</button>
-            <button class="btn secondary master-return-order" data-id="${order.id}" type="button">Return</button>
-            <button class="btn danger cancel-order" data-id="${order.id}" type="button">Cancel</button>
+            <button class="btn secondary forward-order" data-id="${order.id}" type="button"${forwardingButtonState}>${forwardingButtonLabel}</button>
+            <button class="btn secondary master-return-order" data-id="${order.id}" type="button"${conflictingActionState}>Return</button>
+            <button class="btn danger cancel-order" data-id="${order.id}" type="button"${conflictingActionState}>Cancel</button>
           </div>
         `;
       }
@@ -16204,25 +16688,211 @@
         showOrderError("This broker is restricted to orders in their base currency.");
         return;
       }
+      const retryAttempt = brokerRoutingRetryAttempts.get(state.editingOrderId) || null;
+      if (retryAttempt && !brokerInputMatchesRoutingRetry(input, retryAttempt)) {
+        showBrokerRoutingRetryControls(retryAttempt);
+        notifyEvent("Retry details restored", "The previous delivery is still unconfirmed. Its exact order details were restored; review them and press Retry Exact Send.");
+        return;
+      }
 
-      confirmAction("Send this order to Master for routing?", () => {
-        const order = buildOrderRecord(input, "Pending Forward");
-        rememberOrderCustomers(input, actor);
-        const receivable = recordCreditReceivable(input, order);
-        const existingIndex = state.orders.findIndex((item) => item.id === state.editingOrderId);
-        if (existingIndex >= 0) {
-          state.orders.splice(existingIndex, 1, order);
-        } else {
-          state.orders.unshift(order);
+      confirmAction("Send this order to Master for routing?", async () => {
+        const actionKey = "broker-send";
+        if (routingActionIsBlocked(actionKey)) return;
+        unconfirmedOrderActions.delete(actionKey);
+        const actionSession = currentOrderActionSession();
+        const previousEditingOrderId = state.editingOrderId;
+        const previousOrderState = state.orderState;
+        const orderSnapshot = captureOrderActionRecord("orders", (item) => Boolean(previousEditingOrderId) && item.id === previousEditingOrderId);
+        const receivableSnapshot = captureOrderActionRecord("receivables", (item) => Boolean(previousEditingOrderId) && item.orderId === previousEditingOrderId);
+        const customersBefore = captureSavedCustomerRecords();
+        const sendButton = document.getElementById("sendOrderButton");
+        const restoreUi = beginOrderActionUi(sendButton, "Sending...", document.getElementById("orderForm"));
+        pendingOrderActionSaves.add(actionKey);
+        let order = null;
+        let createdReceivable = null;
+        let touchedCustomers = [];
+        let localMutationApplied = false;
+        let saveAttempted = false;
+        let actionConfirmed = false;
+        const rollbackLocalAction = () => {
+          if (!order) return;
+          const actionOrders = state.orders.filter((item) => orderForActionId(
+            [item],
+            order.id,
+            (candidate) => candidate.routingSubmissionId === order.routingSubmissionId && recoveredOrderMatches(candidate, order)
+          ));
+          const actionOrderIds = new Set(actionOrders.map((item) => item.id));
+          restoreOrderActionRecord(orderSnapshot, (item) => actionOrders.includes(item));
+          restoreOrderActionRecord(receivableSnapshot, (item) =>
+            item.id === createdReceivable?.id || actionOrderIds.has(item.orderId)
+          );
+          restoreTouchedSavedCustomers(customersBefore, touchedCustomers);
+          state.editingOrderId = previousEditingOrderId;
+          state.orderState = previousOrderState;
+          persistOrderActionStateLocally();
+        };
+        try {
+          order = retryAttempt?.order ? structuredClone(retryAttempt.order) : buildOrderRecord(input, "Pending Forward");
+          order.routingSubmissionId ||= brokerRoutingSubmissionId(order, orderSnapshot.record);
+          const actionInput = retryAttempt?.order ? {
+            ...input,
+            broker: order.broker,
+            agent: order.agent,
+            sourceCurrency: order.sourceCurrency,
+            payoutCurrency: order.payoutCurrency,
+            sourceAmountMinor: order.sourceAmountMinor,
+            commissionMinor: order.commissionMinor,
+            orderCommissionLiability: order.orderCommissionLiability,
+            payoutAmountMinor: order.payoutAmountMinor,
+            grossMinor: order.grossMinor,
+            rate: order.rate,
+            commissionPercent: order.commissionPercent,
+            senderName: order.senderName,
+            receiverName: order.receiverName,
+            receiverCity: order.receiverCity,
+            accountNumber: order.accountNumber,
+            phoneNumber: order.phoneNumber,
+            remarks: order.remarks,
+            fundingType: order.fundingType || "cash",
+            creditReminder: retryAttempt.receivable?.creditReminder || "",
+            receiverFields: [order.receiverName, order.receiverCity, order.accountNumber, order.phoneNumber, order.remarks]
+          } : input;
+          localMutationApplied = true;
+          for (const customer of retryAttempt?.customers || []) {
+            const alreadyPresent = state.savedCustomers.some((item) =>
+              item.id === customer.id
+              || (item.actorId === customer.actorId && item.kind === customer.kind && item.name.toLocaleLowerCase() === customer.name.toLocaleLowerCase())
+            );
+            if (!alreadyPresent) state.savedCustomers.unshift(structuredClone(customer));
+          }
+          if (retryAttempt?.receivable && !state.receivables.some((item) => item.orderId === order.id)) {
+            state.receivables.unshift(structuredClone(retryAttempt.receivable));
+          }
+          touchedCustomers = rememberOrderCustomers(actionInput, actor);
+          createdReceivable = recordCreditReceivable(actionInput, order);
+          const existingIndex = state.orders.findIndex((item) => item.id === previousEditingOrderId);
+          if (existingIndex >= 0) {
+            state.orders.splice(existingIndex, 1, order);
+          } else {
+            state.orders.unshift(order);
+          }
+          state.editingOrderId = "";
+          state.orderState = "Pending Forward";
+          const storedRetryAttempt = {
+            order: structuredClone(order),
+            receivable: createdReceivable ? structuredClone(createdReceivable) : null,
+            customers: structuredClone(touchedCustomers)
+          };
+          brokerRoutingRetryAttempts.set(order.id, storedRetryAttempt);
+          const previousCustomers = touchedCustomers.map((customer) => {
+            const previous = customersBefore.get(customer.id);
+            return previous ? { id: customer.id, index: previous.index, record: structuredClone(previous.record) } : null;
+          }).filter(Boolean);
+          if (!persistRoutingActionOutbox({
+            kind: "broker-send",
+            actionKey,
+            attemptId: order.routingSubmissionId,
+            orderId: order.id,
+            submittedOrder: structuredClone(order),
+            previousOrder: orderSnapshot.record,
+            previousOrderIndex: orderSnapshot.index,
+            previousReceivable: receivableSnapshot.record,
+            previousReceivableIndex: receivableSnapshot.index,
+            previousCustomers,
+            retryAttempt: storedRetryAttempt
+          })) {
+            throw new Error("The browser could not protect this order for refresh. Free browser storage and try again.");
+          }
+          saveAttempted = true;
+          let saveAcknowledged = await saveStateNow(structuredClone(state));
+          if (!orderActionSessionIsCurrent(actionSession)) return;
+          let authoritativeState = saveAcknowledged?.state || null;
+          let committedOrder = orderForActionId(
+            authoritativeState?.orders,
+            order.id,
+            (candidate) => brokerRoutingCommitted(candidate, order, false)
+          );
+          saveAcknowledged = Boolean(committedOrder);
+          if (!saveAcknowledged) {
+            const verification = await authoritativeOrderActionState(
+              order.id,
+              (candidate) => brokerRoutingCommitted(candidate, order, true)
+            );
+            if (!orderActionSessionIsCurrent(actionSession)) return;
+            rollbackLocalAction();
+            localMutationApplied = false;
+            if (verification.remote) adoptAuthoritativeOrderActionState(verification.remote);
+            if (!verification.confirmed) {
+              const currentOrder = verification.remote
+                ? orderForActionId(
+                  verification.remote.state?.orders,
+                  order.id,
+                  (candidate) => recoveredOrderMatches(candidate, order)
+                )
+                : null;
+              if (currentOrder && currentOrder.state !== "Returned") {
+                state.editingOrderId = "";
+                persistOrderActionStateLocally();
+                brokerRoutingRetryAttempts.delete(order.id);
+                clearRoutingActionOutbox(order.routingSubmissionId);
+                notifyEvent("Order status changed", `The server already has this order as ${currentOrder.state || "updated"}. Its current version was loaded instead.`);
+                return;
+              }
+              state.editingOrderId = order.id;
+              persistOrderActionStateLocally();
+              unconfirmedOrderActions.add(actionKey);
+              notifyEvent("Order not sent", "Delivery was not confirmed. Keep this page open and press Send Order again after the connection returns; the retry will reuse the same order.");
+              return;
+            }
+            authoritativeState = verification.remote.state;
+            committedOrder = orderForActionId(
+              state.orders,
+              order.id,
+              (candidate) => brokerRoutingCommitted(candidate, order, true)
+            ) || verification.order;
+          }
+          localMutationApplied = false;
+          actionConfirmed = true;
+          unconfirmedOrderActions.delete(actionKey);
+          brokerRoutingRetryAttempts.delete(order.id);
+          clearRoutingActionOutbox(order.routingSubmissionId);
+          const committedState = committedOrder?.state || "Pending Forward";
+          state.orderState = committedState;
+          els.orderState.textContent = committedState;
+          els.orderState.className = committedState === "Pending Forward" ? "state-pill warn" : "state-pill";
+          els.voidButton.disabled = true;
+          clearOrderDetails();
+          renderOrderActionStateWithoutRemoteSave();
+          const committedReceivable = createdReceivable
+            ? (authoritativeState?.receivables || []).find((item) => item.orderId === committedOrder?.id || item.orderId === order.id)
+            : null;
+          if (committedReceivable) notifyEvent("Receivable registered", `${committedReceivable.id} recorded for ${committedReceivable.borrower}.`);
+          notifyEvent("New order", `${orderDisplayNumber(committedOrder || order, actor)} sent to Master for routing.`);
+        } catch (error) {
+          if (!orderActionSessionIsCurrent(actionSession)) return;
+          if (localMutationApplied) rollbackLocalAction();
+          if (saveAttempted && !actionConfirmed) {
+            state.editingOrderId = order?.id || previousEditingOrderId;
+            persistOrderActionStateLocally();
+            unconfirmedOrderActions.add(actionKey);
+          } else if (order?.id) {
+            brokerRoutingRetryAttempts.delete(order.id);
+          }
+          notifyEvent("Order not sent", error?.message || (saveAttempted
+            ? "Delivery was not confirmed. Keep this page open and retry after the connection returns."
+            : "The order could not be prepared. Your form is still available; press Send Order to retry."));
+        } finally {
+          if (!orderActionSessionIsCurrent(actionSession)) return;
+          restoreUi();
+          pendingOrderActionSaves.delete(actionKey);
+          if (unconfirmedOrderActions.has(actionKey)) {
+            showBrokerRoutingRetryControls(brokerRoutingRetryAttempts.get(order?.id || previousEditingOrderId));
+          } else {
+            setRoutingActionButtonLabel(sendButton, "Send Order");
+            sendButton?.removeAttribute("title");
+          }
+          flushDeferredOrderActionSave();
         }
-        state.orderState = "Pending Forward";
-        els.orderState.textContent = "Pending Forward";
-        els.orderState.className = "state-pill warn";
-        els.voidButton.disabled = true;
-        clearOrderDetails();
-        if (receivable) notifyEvent("Receivable registered", `${receivable.id} recorded for ${receivable.borrower}.`);
-        notifyEvent("New order", `${orderDisplayNumber(order, actor)} sent to Master for routing.`);
-        renderAll();
       });
     });
 
@@ -16911,80 +17581,218 @@
       const forwardButton = event.target.closest(".forward-order");
       if (forwardButton) {
         if (forwardButton.disabled) return;
-        forwardButton.disabled = true;
         const actor = selectedActor();
         const order = state.orders.find((item) => item.id === forwardButton.dataset.id);
         const actionBox = forwardButton.closest(".order-actions");
-        const targetAgent = actionBox?.querySelector(".forward-agent")?.value || "";
+        const requestedTargetAgent = actionBox?.querySelector(".forward-agent")?.value || "";
         const dividerInput = actionBox?.querySelector(".forward-payout-divider");
-        const dividerText = dividerInput?.value.trim() || "";
-        const forwardedDivider = Number(dividerText || 0);
+        const requestedDividerText = dividerInput?.value.trim() || "";
         const percentInput = actionBox?.querySelector(".forward-payout-percent");
-        const percentText = percentInput?.value.trim() || "";
-        const forwardedPercent = Number(percentText || 0);
+        const requestedPercentText = percentInput?.value.trim() || "";
         if (!order || actor?.role !== "Master" || order.state !== "Pending Forward") return;
+        const actionKey = `master-forward:${order.id}`;
+        if (routingActionIsBlocked(actionKey)) return;
+        const retryAttempt = masterRoutingRetryAttempts.get(order.id) || null;
+        if (retryAttempt && !masterRoutingControlsMatchRetry(requestedTargetAgent, requestedDividerText, requestedPercentText, retryAttempt)) {
+          showMasterRoutingRetryControls(order.id, retryAttempt);
+          notifyEvent("Retry details restored", "The previous forwarding is still unconfirmed. Its exact payout actor and terms were restored; review them and press Retry Exact Forwarding.");
+          return;
+        }
+        const targetAgent = retryAttempt?.targetAgent || requestedTargetAgent;
+        const dividerText = retryAttempt ? retryAttempt.dividerText : requestedDividerText;
+        const percentText = retryAttempt ? retryAttempt.percentText : requestedPercentText;
+        const forwardedDivider = Number(dividerText || 0);
+        const forwardedPercent = Number(percentText || 0);
         if (!targetAgent || targetAgent === order.broker) {
-          forwardButton.disabled = false;
           showOrderError("Choose a payout actor different from the broker.");
           return;
         }
         if (dividerText && (!Number.isFinite(forwardedDivider) || forwardedDivider <= 0)) {
-          forwardButton.disabled = false;
           dividerInput?.setCustomValidity("Enter a divisor greater than zero.");
           dividerInput?.reportValidity();
           return;
         }
         if (percentText && (!Number.isFinite(forwardedPercent) || forwardedPercent < 0)) {
-          forwardButton.disabled = false;
           percentInput?.setCustomValidity("Enter zero or a positive percentage.");
           percentInput?.reportValidity();
           return;
         }
-        const targetActor = activeActors().find((actor) => actor.name === targetAgent);
+        const targetActor = activeActors().find((actor) => actor.id === retryAttempt?.targetActorId)
+          || activeActors().find((actor) => actor.name === targetAgent);
         if (!targetActor || !actorCanPayoutCurrency(targetActor, order.payoutCurrency)) {
-          forwardButton.disabled = false;
           showOrderError(`Choose a ${order.payoutCurrency} payout actor.`);
           return;
         }
+        unconfirmedOrderActions.delete(actionKey);
+        const actionSession = currentOrderActionSession();
         dividerInput?.setCustomValidity("");
         percentInput?.setCustomValidity("");
-        order.agent = targetAgent;
-        order.agentActorId = targetActor.id;
-        assignAgentOrderNumber(order, targetAgent);
-        const receivable = receivableForOrder(order);
-        if (receivable) {
-          receivable.brokerOrderNumber = brokerOrderNumberForOrder(order);
-          receivable.agentOrderNumber = agentOrderNumberForOrder(order, targetAgent);
-          receivable.updatedAt = new Date().toISOString();
+        const previousOrderState = state.orderState;
+        const orderSnapshot = captureOrderActionRecord("orders", (item) => item.id === order.id);
+        const receivableSnapshot = captureOrderActionRecord("receivables", (item) => item.orderId === order.id);
+        const routingForwardAttemptId = retryAttempt?.order?.routingForwardAttemptId
+          || masterRoutingAttemptId(order, targetActor.id, dividerText || "AUTO", percentText || "AUTO");
+        const restoreUi = beginOrderActionUi(forwardButton, "Forwarding...", actionBox);
+        pendingOrderActionSaves.add(actionKey);
+        let messageReference = null;
+        let updatedReceivable = null;
+        let localMutationApplied = false;
+        let saveAttempted = false;
+        let actionConfirmed = false;
+        const rollbackLocalAction = () => {
+          const actionOrders = state.orders.filter((item) => orderForActionId(
+            [item],
+            order.id,
+            (candidate) => candidate.routingForwardAttemptId === routingForwardAttemptId
+          ));
+          const actionOrderIds = new Set(actionOrders.map((item) => item.id));
+          restoreOrderActionRecord(orderSnapshot, (item) => actionOrders.includes(item));
+          restoreOrderActionRecord(receivableSnapshot, (item) =>
+            actionOrderIds.has(item.orderId)
+            || (item.id === updatedReceivable?.id && item.updatedAt === updatedReceivable?.updatedAt)
+          );
+          removeOrderActionChatMessage(messageReference);
+          state.orderState = previousOrderState;
+          persistOrderActionStateLocally();
+        };
+        try {
+          localMutationApplied = true;
+          if (retryAttempt?.order) {
+            Object.keys(order).forEach((field) => { delete order[field]; });
+            Object.assign(order, structuredClone(retryAttempt.order));
+          } else {
+            order.routingForwardAttemptId = routingForwardAttemptId;
+            order.agent = targetAgent;
+            order.agentActorId = targetActor.id;
+            assignAgentOrderNumber(order, targetAgent);
+          }
+          const receivable = receivableForOrder(order);
+          if (receivable) {
+            if (retryAttempt?.receivable) {
+              Object.keys(receivable).forEach((field) => { delete receivable[field]; });
+              Object.assign(receivable, structuredClone(retryAttempt.receivable));
+            } else {
+              receivable.brokerOrderNumber = brokerOrderNumberForOrder(order);
+              receivable.agentOrderNumber = agentOrderNumberForOrder(order, targetAgent);
+              receivable.updatedAt = new Date().toISOString();
+            }
+            updatedReceivable = structuredClone(receivable);
+          }
+          if (!retryAttempt?.order) {
+            delete order.manualSpecialPayoutDivider;
+            delete order.manualSpecialPayoutPercent;
+            delete order.manualMasterRateDivider;
+            delete order.manualMasterRatePercent;
+            if (dividerText) {
+              order.forwardedPayoutDivider = forwardedDivider;
+            } else {
+              delete order.forwardedPayoutDivider;
+            }
+            if (percentText) {
+              order.forwardedPayoutPercent = forwardedPercent;
+            } else {
+              delete order.forwardedPayoutPercent;
+            }
+            order.state = "Assigned";
+            order.assignedAt = new Date().toISOString();
+            order.updatedAt = order.assignedAt;
+            order.returnedBy = "";
+            order.returnedReason = "";
+            order.returnedAt = "";
+          }
+          messageReference = sendOrderAssignmentToAgent(order, targetAgent, `MSG-${routingForwardAttemptId}`);
+          state.orderState = "Assigned";
+          const storedRetryAttempt = {
+            order: structuredClone(order),
+            receivable: updatedReceivable ? structuredClone(updatedReceivable) : null,
+            targetActorId: targetActor.id,
+            targetAgent,
+            dividerText,
+            percentText
+          };
+          masterRoutingRetryAttempts.set(order.id, storedRetryAttempt);
+          if (!persistRoutingActionOutbox({
+            kind: "master-forward",
+            actionKey,
+            attemptId: routingForwardAttemptId,
+            orderId: order.id,
+            submittedOrder: structuredClone(order),
+            previousOrder: orderSnapshot.record,
+            previousOrderIndex: orderSnapshot.index,
+            previousReceivable: receivableSnapshot.record,
+            previousReceivableIndex: receivableSnapshot.index,
+            messageReference,
+            retryAttempt: storedRetryAttempt
+          })) {
+            throw new Error("The browser could not protect this forwarding for refresh. Free browser storage and try again.");
+          }
+          saveAttempted = true;
+          let saveAcknowledged = await saveStateNow(structuredClone(state));
+          if (!orderActionSessionIsCurrent(actionSession)) return;
+          let committedOrder = orderForActionId(
+            saveAcknowledged?.state?.orders,
+            order.id,
+            (candidate) => masterRoutingCommitted(candidate, order, targetActor, false)
+          );
+          saveAcknowledged = Boolean(committedOrder);
+          if (!saveAcknowledged) {
+            const verification = await authoritativeOrderActionState(
+              order.id,
+              (candidate) => masterRoutingCommitted(candidate, order, targetActor, true)
+            );
+            if (!orderActionSessionIsCurrent(actionSession)) return;
+            rollbackLocalAction();
+            localMutationApplied = false;
+            if (verification.remote) adoptAuthoritativeOrderActionState(verification.remote);
+            if (!verification.confirmed) {
+              const currentOrder = verification.remote
+                ? orderForActionId(verification.remote.state?.orders, order.id)
+                : null;
+              if (currentOrder && currentOrder.state !== "Pending Forward") {
+                masterRoutingRetryAttempts.delete(order.id);
+                clearRoutingActionOutbox(routingForwardAttemptId);
+                notifyEvent("Order already changed", `The server has this order as ${currentOrder.state || "updated"}. Its current routing was loaded instead.`);
+                return;
+              }
+              unconfirmedOrderActions.add(actionKey);
+              notifyEvent("Order not forwarded", "Forwarding was not confirmed. Keep this page open and retry after the connection returns; the same routing attempt will be reused.");
+              return;
+            }
+            committedOrder = orderForActionId(
+              state.orders,
+              order.id,
+              (candidate) => masterRoutingCommitted(candidate, order, targetActor, true)
+            ) || verification.order;
+          }
+          localMutationApplied = false;
+          actionConfirmed = true;
+          unconfirmedOrderActions.delete(actionKey);
+          masterRoutingRetryAttempts.delete(order.id);
+          clearRoutingActionOutbox(routingForwardAttemptId);
+          const committedState = committedOrder?.state || "Assigned";
+          state.orderState = committedState;
+          els.orderState.textContent = committedState;
+          els.orderState.className = "state-pill";
+          clearOrderDetails();
+          renderOrderActionStateWithoutRemoteSave();
+          notifyEvent("Order forwarded", `${orderDisplayNumber(committedOrder || order, { name: targetAgent, role: targetActor.role })} sent to ${targetAgent}.`);
+        } catch (error) {
+          if (!orderActionSessionIsCurrent(actionSession)) return;
+          if (localMutationApplied) rollbackLocalAction();
+          if (saveAttempted && !actionConfirmed) unconfirmedOrderActions.add(actionKey);
+          else masterRoutingRetryAttempts.delete(order.id);
+          notifyEvent("Order not forwarded", error?.message || (saveAttempted
+            ? "Forwarding was not confirmed. Keep this page open and retry after the connection returns."
+            : "The forwarding could not be prepared. The order is still ready to forward; please retry."));
+        } finally {
+          if (!orderActionSessionIsCurrent(actionSession)) return;
+          restoreUi();
+          pendingOrderActionSaves.delete(actionKey);
+          if (unconfirmedOrderActions.has(actionKey)) {
+            showMasterRoutingRetryControls(order.id, masterRoutingRetryAttempts.get(order.id));
+          }
+          flushDeferredOrderActionSave();
         }
-        delete order.manualSpecialPayoutDivider;
-        delete order.manualSpecialPayoutPercent;
-        delete order.manualMasterRateDivider;
-        delete order.manualMasterRatePercent;
-        if (dividerText) {
-          order.forwardedPayoutDivider = forwardedDivider;
-        } else {
-          delete order.forwardedPayoutDivider;
-        }
-        if (percentText) {
-          order.forwardedPayoutPercent = forwardedPercent;
-        } else {
-          delete order.forwardedPayoutPercent;
-        }
-        order.state = "Assigned";
-        order.assignedAt = new Date().toISOString();
-        order.updatedAt = order.assignedAt;
-        order.returnedBy = "";
-        order.returnedReason = "";
-        order.returnedAt = "";
-        sendOrderAssignmentToAgent(order, targetAgent);
-        state.orderState = "Assigned";
-        els.orderState.textContent = "Assigned";
-        els.orderState.className = "state-pill";
-        clearOrderDetails();
-        notifyEvent("Order forwarded", `${orderDisplayNumber(order, { name: targetAgent, role: targetActor.role })} sent to ${targetAgent}.`);
-        renderAll();
-        await saveStateNow();
         return;
       }
 
@@ -16993,6 +17801,7 @@
         const actor = selectedActor();
         const order = state.orders.find((item) => item.id === masterReturnButton.dataset.id);
         if (!order || actor?.role !== "Master" || order.state !== "Pending Forward") return;
+        if (masterRoutingActionBlocksOtherActions(order.id)) return;
         const actionBox = masterReturnButton.closest(".order-actions");
         const reasonInput = actionBox?.querySelector(".master-return-reason");
         const reason = reasonInput?.value.trim() || orderReturnReasonDrafts.get(order.id)?.trim() || "";
@@ -17006,6 +17815,7 @@
         confirmAction(`Return order ${orderNumber} to ${order.broker}?`, () => {
           const currentOrder = state.orders.find((item) => item.id === order.id);
           if (!currentOrder || currentOrder.state !== "Pending Forward") return;
+          if (pendingOrderActionSaves.has(`master-forward:${currentOrder.id}`) || unconfirmedOrderActions.has(`master-forward:${currentOrder.id}`)) return;
           currentOrder.state = "Returned";
           currentOrder.returnedBy = "Master";
           currentOrder.returnedReason = reason;
@@ -17029,6 +17839,7 @@
         const masterCanCancel = actor?.role === "Master" && order?.state === "Pending Forward";
         const brokerCanCancel = ["Broker", "Special Broker"].includes(actor?.role) && order?.state === "Returned" && order.broker === actor.name;
         if (!order || (!masterCanCancel && !brokerCanCancel)) return;
+        if (masterCanCancel && masterRoutingActionBlocksOtherActions(order.id)) return;
         const orderNumber = orderDisplayNumber(order, actor);
         const confirmation = brokerCanCancel
           ? `Cancel returned order ${orderNumber}? It will remain in Orders as Cancelled until Master closes the Broker's balance.`
@@ -17038,6 +17849,7 @@
           const masterStillCanCancel = actor.role === "Master" && currentOrder?.state === "Pending Forward";
           const brokerStillCanCancel = ["Broker", "Special Broker"].includes(actor.role) && currentOrder?.state === "Returned" && currentOrder.broker === actor.name;
           if (!currentOrder || (!masterStillCanCancel && !brokerStillCanCancel)) return;
+          if (masterStillCanCancel && (pendingOrderActionSaves.has(`master-forward:${currentOrder.id}`) || unconfirmedOrderActions.has(`master-forward:${currentOrder.id}`))) return;
           currentOrder.state = "Cancelled";
           if (masterStillCanCancel) currentOrder.returnedBy = "";
           currentOrder.cancelledBy = actor.name;
