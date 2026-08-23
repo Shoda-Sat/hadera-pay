@@ -19,6 +19,17 @@ import type {
   WorkspaceState
 } from "../types";
 import { ensureActorLedgerNumbers, nextActorLedgerSequence } from "../domain/ledgerNumbering";
+import {
+  brokerRoutingOrderMatches,
+  clearMobileRoutingAction,
+  mobileBrokerRoutingAttemptId,
+  persistMobileRoutingAction,
+  readMobileRoutingAction,
+  routingOrderContentMatches,
+  routingOrderIdentityMatches,
+  type MobileBrokerRoutingAction,
+  type MobileRoutingSession
+} from "../domain/routingDurability";
 import { calculateQuote, compactAmount, fixedOrderCommissionForActor, fixedOrderRateForActor, minorFromMajor, parseDecimalNumber } from "../utils/money";
 import { retainOrdersForUnclosedParticipants } from "../utils/orderParticipantRetention";
 
@@ -38,6 +49,9 @@ let activeDeviceId: string | null = null;
 let activeWorkspaceRevision: string | null = null;
 let activeWorkspaceSnapshotJson: string | null = null;
 let activeWorkspaceSnapshotSessionKey = "";
+let activeWorkspaceMutationGeneration = 0;
+const activeWorkspaceSaveScopes = new Set<string>();
+const processingBrokerRoutingScopes = new Set<string>();
 
 export const allowedIdleTimeoutSeconds = [10, 20, 30, 60, 300, 900, 1800, 3600, 7200, 0] as const;
 
@@ -200,32 +214,58 @@ async function writeCache(key: string, value: unknown): Promise<void> {
   }
 }
 
-function workspaceSnapshotSessionKey(session: UserSession | null | undefined): string {
+function workspaceSnapshotSessionKey(session: MobileRoutingSession | null | undefined): string {
   return session ? `${session.workspaceId}:${session.userId}` : "";
 }
 
+export function currentWorkspaceSession(): UserSession | null {
+  return activeSession;
+}
+
+function assertUserSessionIsCurrent(session: UserSession): void {
+  const current = currentWorkspaceSession();
+  if (workspaceSnapshotSessionKey(current) !== workspaceSnapshotSessionKey(session) ||
+      (session.loginStartedAt && current?.loginStartedAt !== session.loginStartedAt)) {
+    throw new Error("The signed-in session changed before this order action finished.");
+  }
+}
+
+function assertWorkspaceRequestSession(session: MobileRoutingSession | null, generation: number): void {
+  if (!session || workspaceSnapshotSessionKey(activeSession) !== workspaceSnapshotSessionKey(session) ||
+      generation !== activeWorkspaceMutationGeneration) {
+    throw new Error("The signed-in workspace changed before this request finished.");
+  }
+}
+
 function resetWorkspaceSnapshot(): void {
+  activeWorkspaceMutationGeneration += 1;
   activeWorkspaceRevision = null;
   activeWorkspaceSnapshotJson = null;
   activeWorkspaceSnapshotSessionKey = "";
 }
 
-async function rememberWorkspaceSnapshot(state: WorkspaceState, revision?: string): Promise<void> {
-  if (!activeSession?.workspaceId) return;
+async function rememberWorkspaceSnapshot(
+  state: WorkspaceState,
+  revision?: string,
+  submittedSession: MobileRoutingSession | null = activeSession,
+  generation = activeWorkspaceMutationGeneration
+): Promise<void> {
+  assertWorkspaceRequestSession(submittedSession, generation);
   const cachedState = cacheableWorkspaceState(state);
   const serialized = JSON.stringify(cachedState);
+  try {
+    await AsyncStorage.setItem(workspaceCacheKey(submittedSession!.workspaceId), serialized);
+  } catch {
+    // The live in-memory snapshot still avoids unnecessary network reloads.
+  }
+  assertWorkspaceRequestSession(submittedSession, generation);
   activeWorkspaceRevision = typeof revision === "string"
     ? revision
     : typeof state._syncRevision === "string"
       ? state._syncRevision
       : null;
   activeWorkspaceSnapshotJson = serialized;
-  activeWorkspaceSnapshotSessionKey = workspaceSnapshotSessionKey(activeSession);
-  try {
-    await AsyncStorage.setItem(workspaceCacheKey(activeSession.workspaceId), serialized);
-  } catch {
-    // The live in-memory snapshot still avoids unnecessary network reloads.
-  }
+  activeWorkspaceSnapshotSessionKey = workspaceSnapshotSessionKey(submittedSession);
 }
 
 async function cacheSession(session: UserSession): Promise<void> {
@@ -559,29 +599,40 @@ export async function changePassword(currentPassword: string, newPassword: strin
 }
 
 export async function loadWorkspaceState(): Promise<WorkspaceState> {
+  const submittedSession = currentWorkspaceSession();
+  const generation = activeWorkspaceMutationGeneration;
+  if (!submittedSession?.workspaceId) throw new Error("Sign in before loading this workspace.");
   try {
     const result = await api<{ state: WorkspaceState; revision?: string }>("/api/app-state");
+    assertWorkspaceRequestSession(submittedSession, generation);
     const state = { ...normalizeState(result.state), offlineSnapshot: false, lastSyncedAt: new Date().toISOString() };
-    await rememberWorkspaceSnapshot(state, result.revision);
+    await rememberWorkspaceSnapshot(state, result.revision, submittedSession, generation);
     return state;
   } catch (error) {
-    if (!(error instanceof OfflineError) || !activeSession?.workspaceId) throw error;
-    const cached = await readCache<WorkspaceState>(workspaceCacheKey(activeSession.workspaceId));
+    if (!(error instanceof OfflineError)) throw error;
+    assertWorkspaceRequestSession(submittedSession, generation);
+    const cached = await readCache<WorkspaceState>(workspaceCacheKey(submittedSession.workspaceId));
     if (!cached) throw new Error("Connect once to download this account before using it offline.");
+    assertWorkspaceRequestSession(submittedSession, generation);
     const state = { ...normalizeState(cached), offlineSnapshot: true, lastSyncedAt: cached.lastSyncedAt };
     activeWorkspaceSnapshotJson = JSON.stringify(cacheableWorkspaceState(state));
-    activeWorkspaceSnapshotSessionKey = workspaceSnapshotSessionKey(activeSession);
+    activeWorkspaceSnapshotSessionKey = workspaceSnapshotSessionKey(submittedSession);
     activeWorkspaceRevision = null;
     return state;
   }
 }
 
 export async function loadWorkspaceStateIfChanged(): Promise<WorkspaceState | null> {
+  const submittedSession = currentWorkspaceSession();
+  const generation = activeWorkspaceMutationGeneration;
+  const scope = workspaceSnapshotSessionKey(submittedSession);
+  if (!submittedSession || !scope || activeWorkspaceSaveScopes.has(scope)) return null;
   try {
     const result = await api<{ revision: string }>("/api/app-state/version");
+    assertWorkspaceRequestSession(submittedSession, generation);
     if (
       activeWorkspaceRevision !== null &&
-      activeWorkspaceSnapshotSessionKey === workspaceSnapshotSessionKey(activeSession) &&
+      activeWorkspaceSnapshotSessionKey === scope &&
       result.revision === activeWorkspaceRevision
     ) {
       return null;
@@ -593,14 +644,49 @@ export async function loadWorkspaceStateIfChanged(): Promise<WorkspaceState | nu
   }
 }
 
-async function loadWorkspaceStateForUpdate(): Promise<WorkspaceState> {
+export async function verifyWorkspaceRoutingCommit(
+  expectedSession: UserSession,
+  predicate: (order: OrderRecord) => boolean
+): Promise<{ state: WorkspaceState; order?: OrderRecord } | null> {
+  const delays = [0, 200, 500, 1000, 2000];
+  let latest: WorkspaceState | null = null;
+  let lastError: unknown;
+  for (const delayMs of delays) {
+    assertUserSessionIsCurrent(expectedSession);
+    if (delayMs) await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+    assertUserSessionIsCurrent(expectedSession);
+    try {
+      latest = await loadWorkspaceState();
+      assertUserSessionIsCurrent(expectedSession);
+      if (latest.offlineSnapshot) break;
+      const order = [
+        ...latest.orders,
+        ...latest.archives.flatMap((archive) => archive.orders || [])
+      ].find(predicate);
+      if (order) return { state: latest, order };
+    } catch (error) {
+      lastError = error;
+      if (error instanceof Error && /session changed|workspace changed/i.test(error.message)) throw error;
+    }
+  }
+  if (latest) return { state: latest };
+  if (lastError) throw lastError;
+  return null;
+}
+
+export async function loadWorkspaceStateForUpdate(): Promise<WorkspaceState> {
+  const submittedSession = currentWorkspaceSession();
+  const generation = activeWorkspaceMutationGeneration;
+  const scope = workspaceSnapshotSessionKey(submittedSession);
+  if (!submittedSession || !scope) throw new Error("Sign in before changing this workspace.");
   if (
     activeWorkspaceRevision !== null &&
     activeWorkspaceSnapshotJson &&
-    activeWorkspaceSnapshotSessionKey === workspaceSnapshotSessionKey(activeSession)
+    activeWorkspaceSnapshotSessionKey === scope
   ) {
     try {
       const result = await api<{ revision: string }>("/api/app-state/version");
+      assertWorkspaceRequestSession(submittedSession, generation);
       if (result.revision === activeWorkspaceRevision) {
         return normalizeState(JSON.parse(activeWorkspaceSnapshotJson) as WorkspaceState);
       }
@@ -611,22 +697,37 @@ async function loadWorkspaceStateForUpdate(): Promise<WorkspaceState> {
   return loadWorkspaceState();
 }
 
-export async function saveWorkspaceState(state: WorkspaceState): Promise<WorkspaceState> {
+export async function saveWorkspaceState(state: WorkspaceState, routingSession?: UserSession): Promise<WorkspaceState> {
   if (state.offlineSnapshot) throw new Error("Reconnect to the internet before making financial changes.");
-  const result = await api<{ ok: boolean; state: WorkspaceState; revision?: string }>("/api/app-state", {
-    method: "PUT",
-    body: {
-      state: { ...state, offlineSnapshot: undefined, lastSyncedAt: undefined },
-      expectedRevision: activeWorkspaceRevision
-    }
-  });
-  const savedState = {
-    ...normalizeState(result.state || state),
-    offlineSnapshot: false,
-    lastSyncedAt: new Date().toISOString()
-  };
-  await rememberWorkspaceSnapshot(savedState, result.revision);
-  return savedState;
+  const submittedSession = currentWorkspaceSession();
+  const scope = workspaceSnapshotSessionKey(submittedSession);
+  if (!submittedSession || !scope) throw new Error("Sign in before changing this workspace.");
+  if (activeWorkspaceSaveScopes.has(scope)) throw new Error("Another workspace change is still being saved. Try again in a moment.");
+  if (routingSession) assertUserSessionIsCurrent(routingSession);
+  const expectedRevision = activeWorkspaceRevision;
+  const routingProtected = Boolean(routingSession);
+  const generation = routingProtected ? ++activeWorkspaceMutationGeneration : activeWorkspaceMutationGeneration;
+  if (routingProtected) activeWorkspaceSaveScopes.add(scope);
+  try {
+    const result = await api<{ ok: boolean; state: WorkspaceState; revision?: string }>("/api/app-state", {
+      method: "PUT",
+      body: {
+        state: { ...state, offlineSnapshot: undefined, lastSyncedAt: undefined },
+        expectedRevision
+      }
+    });
+    assertWorkspaceRequestSession(submittedSession, generation);
+    if (routingSession) assertUserSessionIsCurrent(routingSession);
+    const savedState = {
+      ...normalizeState(result.state || state),
+      offlineSnapshot: false,
+      lastSyncedAt: new Date().toISOString()
+    };
+    await rememberWorkspaceSnapshot(savedState, result.revision, submittedSession, generation);
+    return savedState;
+  } finally {
+    if (routingProtected) activeWorkspaceSaveScopes.delete(scope);
+  }
 }
 
 export async function updateWorkspaceState(mutator: (state: WorkspaceState) => void): Promise<WorkspaceState> {
@@ -857,101 +958,258 @@ export async function submitTransferOrder(session: UserSession, draft: TransferD
   if (!canCreateOrders(session)) {
     throw new Error("Only Brokers and Special Brokers can send new orders.");
   }
-  if (!draft.receiverName.trim() && !draft.receiverCity.trim() && !draft.phoneNumber.trim() && !draft.accountNumber.trim() && !draft.remarks.trim()) {
-    throw new Error("Enter at least one receiver detail.");
-  }
-  if (!draft.fundingType) {
-    throw new Error("Choose Cash or Credit before sending.");
-  }
+  const scope = workspaceSnapshotSessionKey(session);
+  assertUserSessionIsCurrent(session);
+  if (processingBrokerRoutingScopes.has(scope)) throw new Error("This order is already being sent.");
+  processingBrokerRoutingScopes.add(scope);
+  let protectedAttempt: MobileBrokerRoutingAction | null = null;
+  let persisted = false;
+  try {
+    const unfinished = await readMobileRoutingAction(session);
+    assertUserSessionIsCurrent(session);
+    if (unfinished?.kind === "master-forward") {
+      throw new Error("Finish the protected Master forwarding action before sending another order.");
+    }
+    protectedAttempt = unfinished;
+    const effectiveDraft = unfinished?.draft || draft;
+    const effectiveEditingOrderId = unfinished?.editingOrderId || editingOrderId;
+    if (!effectiveDraft.receiverName.trim() && !effectiveDraft.receiverCity.trim() && !effectiveDraft.phoneNumber.trim() &&
+        !effectiveDraft.accountNumber.trim() && !effectiveDraft.remarks.trim()) {
+      throw new Error("Enter at least one receiver detail.");
+    }
+    if (!effectiveDraft.fundingType) throw new Error("Choose Cash or Credit before sending.");
 
-  const state = await loadWorkspaceStateForUpdate();
-  const actor = sessionActor(session, state);
-  const existingOrder = editingOrderId ? state.orders.find((order) => order.id === editingOrderId) : undefined;
-  if (editingOrderId && (!existingOrder || existingOrder.state !== "Returned" || existingOrder.broker !== session.actorName)) {
-    throw new Error("This returned order is no longer available for modification.");
-  }
-  const sourceCurrency = actor?.orderMultiCurrencyEnabled === true ? draft.sourceCurrency : safeCurrency(actor?.currency, session.currency);
-  const fixedRate = fixedOrderRateForActor(actor, draft.payoutCurrency);
-  const fixedCommission = fixedOrderCommissionForActor(actor);
-  const parsedCommissionPercent = parseDecimalNumber(draft.commissionPercent);
-  const commissionPercent = fixedCommission !== null
-    ? fixedCommission
-    : Number.isFinite(parsedCommissionPercent) ? parsedCommissionPercent : 0;
-  const quote = calculateQuote({
-    ...draft,
-    broker: session.actorName,
-    sourceCurrency,
-    commissionPercent: String(commissionPercent),
-    ...(fixedRate ? { rate: String(fixedRate), payoutAmount: "" } : {})
-  });
-  if (quote.sourceAmount <= 0 || quote.payoutAmount <= 0 || quote.rate <= 0) {
-    throw new Error("Enter source amount, payout amount, and rate greater than zero.");
-  }
-  const now = new Date().toISOString();
-  const order: OrderRecord = {
-    ...(existingOrder || {}),
-    id: existingOrder?.id || nextOrderId(state),
-    brokerOrderNumber: existingOrder?.brokerOrderNumber || nextBrokerOrderNumber(session, state),
-    brokerOrderNumberCycle: existingOrder?.brokerOrderNumberCycle ?? Math.max(0, Math.floor(Number(actor?.numberingCycle || 0))),
-    brokerActorId: actor?.id || session.actorId,
-    broker: session.actorName,
-    agent: "Unassigned",
-    agentActorId: "",
-    sourceCurrency,
-    payoutCurrency: draft.payoutCurrency,
-    sourceAmountMinor: minorFromMajor(quote.sourceAmount, sourceCurrency),
-    payoutAmountMinor: minorFromMajor(quote.payoutAmount, draft.payoutCurrency),
-    commissionMinor: minorFromMajor(quote.commissionAmount, sourceCurrency),
-    orderCommissionLiability: commissionPercent < 0 ? "Master" : "Broker",
-    grossMinor: minorFromMajor(quote.grossAmount, sourceCurrency),
-    moneyUnitVersion: 2,
-    rate: quote.rate,
-    commissionPercent,
-    senderName: draft.senderName.trim(),
-    receiverName: draft.receiverName.trim(),
-    receiverCity: draft.receiverCity.trim(),
-    accountNumber: draft.accountNumber.trim(),
-    phoneNumber: draft.phoneNumber.trim(),
-    remarks: draft.remarks.trim(),
-    amount: compactAmount(sourceCurrency, quote.sourceAmount),
-    fundingType: draft.fundingType as FundingType,
-    state: "Pending Forward",
-    journal: "",
-    assignedAt: undefined,
-    forwardedPayoutDivider: undefined,
-    forwardedPayoutPercent: undefined,
-    manualSpecialPayoutDivider: undefined,
-    manualSpecialPayoutPercent: undefined,
-    manualMasterRateDivider: undefined,
-    manualMasterRatePercent: undefined,
-    paymentProof: undefined,
-    createdAt: existingOrder?.createdAt || now,
-    sentAt: existingOrder?.sentAt || now,
-    paidAt: existingOrder?.paidAt || "",
-    returnedBy: "",
-    returnedReason: "",
-    returnedAt: "",
-    updatedAt: now
-  };
+    const state = await loadWorkspaceStateForUpdate();
+    assertUserSessionIsCurrent(session);
+    let recoveredCurrentOrder: OrderRecord | undefined;
+    let needsCollisionSafeRetryIdentity = false;
+    if (unfinished) {
+      const acknowledged = state.orders.find((candidate) => brokerRoutingOrderMatches(candidate, unfinished.order));
+      if (acknowledged) {
+        await clearMobileRoutingAction(session, unfinished.attemptId);
+        return {
+          orderId: acknowledged.id,
+          orderNumber: acknowledged.brokerOrderNumber || acknowledged.id,
+          status: "Pending Master Approval",
+          createdAt: acknowledged.createdAt || acknowledged.sentAt || new Date().toISOString(),
+          state
+        };
+      }
+      const archivedOrders = state.archives.flatMap((archive) => archive.orders || []);
+      recoveredCurrentOrder = state.orders.find((candidate) =>
+        routingOrderIdentityMatches(candidate, unfinished.order) && routingOrderContentMatches(candidate, unfinished.order)
+      );
+      const archivedOrder = archivedOrders.find((candidate) =>
+        routingOrderIdentityMatches(candidate, unfinished.order) && routingOrderContentMatches(candidate, unfinished.order)
+      );
+      const currentIdWasDeleted = (state.deletedOrderIds || []).includes(unfinished.order.id);
+      if (archivedOrder || currentIdWasDeleted) {
+        await clearMobileRoutingAction(session, unfinished.attemptId);
+        throw new Error("The server has already archived or removed this order. Its current version will be loaded instead.");
+      }
+      const currentReferences = recoveredCurrentOrder
+        ? [recoveredCurrentOrder.id, recoveredCurrentOrder.internalOrderId, recoveredCurrentOrder.collisionSourceOrderId]
+        : [];
+      const canRetryReturnedOrder = recoveredCurrentOrder?.state === "Returned" &&
+        Boolean(effectiveEditingOrderId) && currentReferences.includes(effectiveEditingOrderId);
+      if (recoveredCurrentOrder && !canRetryReturnedOrder) {
+        await clearMobileRoutingAction(session, unfinished.attemptId);
+        throw new Error(`The server already has this order as ${recoveredCurrentOrder.state}. Its current version will be loaded instead.`);
+      }
+      const currentIdCollision = [...state.orders, ...archivedOrders].some((candidate) =>
+        candidate.id === unfinished.order.id && !routingOrderContentMatches(candidate, unfinished.order)
+      );
+      needsCollisionSafeRetryIdentity = !effectiveEditingOrderId && !recoveredCurrentOrder &&
+        currentIdCollision;
+    }
 
-  state.orders = [order, ...state.orders.filter((item) => item.id !== order.id)];
-  rememberOrderCustomers(state, actor, draft);
-  const existingReceivableIndex = state.receivables.findIndex((item) => item.orderId === order.id);
-  const existingReceivable = existingReceivableIndex >= 0 ? state.receivables[existingReceivableIndex] : undefined;
-  if (draft.fundingType === "credit") {
-    const receivable = buildReceivable(session, draft, order, state, existingReceivable);
-    if (existingReceivableIndex >= 0) state.receivables.splice(existingReceivableIndex, 1, receivable);
-    else state.receivables.unshift(receivable);
-  } else if (existingReceivable && existingReceivable.payments.reduce((sum, payment) => sum + Number(payment.amountMinor || 0), 0) === 0) {
-    state.receivables.splice(existingReceivableIndex, 1);
-  }
+    const actor = sessionActor(session, state);
+    const existingOrder = effectiveEditingOrderId
+      ? recoveredCurrentOrder || state.orders.find((order) => order.id === effectiveEditingOrderId)
+      : undefined;
+    if (effectiveEditingOrderId && (!existingOrder || existingOrder.state !== "Returned" ||
+        (existingOrder.brokerActorId ? existingOrder.brokerActorId !== (actor?.id || session.actorId) : existingOrder.broker !== session.actorName))) {
+      throw new Error("This returned order is no longer available for modification.");
+    }
 
-  const savedState = await saveWorkspaceState(state);
-  return {
-    orderId: order.id,
-    orderNumber: order.brokerOrderNumber || order.id,
-    status: "Pending Master Approval",
-    createdAt: now,
-    state: savedState
-  };
+    let order: OrderRecord;
+    if (unfinished) {
+      order = {
+        ...unfinished.order,
+        ...(existingOrder ? {
+          id: existingOrder.id,
+          internalOrderId: existingOrder.internalOrderId || unfinished.order.internalOrderId,
+          collisionSourceOrderId: existingOrder.collisionSourceOrderId || unfinished.order.collisionSourceOrderId
+        } : {})
+      };
+      if (needsCollisionSafeRetryIdentity) {
+        const collisionSourceOrderId = order.id;
+        order.id = nextOrderId(state);
+        order.collisionSourceOrderId = collisionSourceOrderId;
+        const brokerNumberCollision = [...state.orders, ...state.archives.flatMap((archive) => archive.orders || [])]
+          .some((candidate) =>
+            candidate.brokerOrderNumber === order.brokerOrderNumber &&
+            (candidate.brokerActorId && order.brokerActorId
+              ? candidate.brokerActorId === order.brokerActorId
+              : candidate.broker === order.broker) &&
+            !routingOrderContentMatches(candidate, order)
+          );
+        if (brokerNumberCollision) order.brokerOrderNumber = nextBrokerOrderNumber(session, state);
+      }
+      const conflictingOrder = state.orders.find((candidate) => candidate.id === order.id && candidate !== existingOrder);
+      if (conflictingOrder) throw new Error("This protected order ID is already used by a different order. Refresh before retrying.");
+      const orderSequence = Number(String(order.id || "").match(/^ORD-(\d+)/)?.[1] || 0);
+      if (orderSequence > 0) state.orderCounter = Math.max(Number(state.orderCounter || 0), orderSequence);
+      protectedAttempt = {
+        ...unfinished,
+        orderId: order.id,
+        order: { ...order },
+        editingOrderId: existingOrder?.id || effectiveEditingOrderId
+      };
+    } else {
+      const sourceCurrency = actor?.orderMultiCurrencyEnabled === true
+        ? effectiveDraft.sourceCurrency
+        : safeCurrency(actor?.currency, session.currency);
+      const fixedRate = fixedOrderRateForActor(actor, effectiveDraft.payoutCurrency);
+      const fixedCommission = fixedOrderCommissionForActor(actor);
+      const parsedCommissionPercent = parseDecimalNumber(effectiveDraft.commissionPercent);
+      const commissionPercent = fixedCommission !== null
+        ? fixedCommission
+        : Number.isFinite(parsedCommissionPercent) ? parsedCommissionPercent : 0;
+      const quote = calculateQuote({
+        ...effectiveDraft,
+        broker: session.actorName,
+        sourceCurrency,
+        commissionPercent: String(commissionPercent),
+        ...(fixedRate ? { rate: String(fixedRate), payoutAmount: "" } : {})
+      });
+      if (quote.sourceAmount <= 0 || quote.payoutAmount <= 0 || quote.rate <= 0) {
+        throw new Error("Enter source amount, payout amount, and rate greater than zero.");
+      }
+      const now = new Date().toISOString();
+      const orderId = existingOrder?.id || nextOrderId(state);
+      const routingSubmissionId = mobileBrokerRoutingAttemptId(
+        orderId,
+        existingOrder?.returnedAt || existingOrder?.updatedAt || "INITIAL"
+      );
+      order = {
+        ...(existingOrder || {}),
+        id: orderId,
+        routingSubmissionId,
+        routingForwardAttemptId: undefined,
+        brokerOrderNumber: existingOrder?.brokerOrderNumber || nextBrokerOrderNumber(session, state),
+        brokerOrderNumberCycle: existingOrder?.brokerOrderNumberCycle ?? Math.max(0, Math.floor(Number(actor?.numberingCycle || 0))),
+        brokerActorId: actor?.id || session.actorId,
+        broker: session.actorName,
+        agent: "Unassigned",
+        agentActorId: "",
+        sourceCurrency,
+        payoutCurrency: effectiveDraft.payoutCurrency,
+        sourceAmountMinor: minorFromMajor(quote.sourceAmount, sourceCurrency),
+        payoutAmountMinor: minorFromMajor(quote.payoutAmount, effectiveDraft.payoutCurrency),
+        commissionMinor: minorFromMajor(quote.commissionAmount, sourceCurrency),
+        orderCommissionLiability: commissionPercent < 0 ? "Master" : "Broker",
+        grossMinor: minorFromMajor(quote.grossAmount, sourceCurrency),
+        moneyUnitVersion: 2,
+        rate: quote.rate,
+        commissionPercent,
+        senderName: effectiveDraft.senderName.trim(),
+        receiverName: effectiveDraft.receiverName.trim(),
+        receiverCity: effectiveDraft.receiverCity.trim(),
+        accountNumber: effectiveDraft.accountNumber.trim(),
+        phoneNumber: effectiveDraft.phoneNumber.trim(),
+        remarks: effectiveDraft.remarks.trim(),
+        amount: compactAmount(sourceCurrency, quote.sourceAmount),
+        fundingType: effectiveDraft.fundingType as FundingType,
+        state: "Pending Forward",
+        journal: "",
+        assignedAt: undefined,
+        forwardedPayoutDivider: undefined,
+        forwardedPayoutPercent: undefined,
+        manualSpecialPayoutDivider: undefined,
+        manualSpecialPayoutPercent: undefined,
+        manualMasterRateDivider: undefined,
+        manualMasterRatePercent: undefined,
+        paymentProof: undefined,
+        createdAt: existingOrder?.createdAt || now,
+        sentAt: existingOrder?.sentAt || now,
+        paidAt: existingOrder?.paidAt || "",
+        returnedBy: "",
+        returnedReason: "",
+        returnedAt: "",
+        updatedAt: now
+      };
+      protectedAttempt = {
+        kind: "broker-send",
+        attemptId: routingSubmissionId,
+        workspaceId: session.workspaceId,
+        userId: session.userId,
+        orderId: order.id,
+        order: { ...order },
+        draft: { ...effectiveDraft },
+        editingOrderId: effectiveEditingOrderId
+      };
+    }
+
+    const submittedAttempt = protectedAttempt;
+    if (!submittedAttempt) throw new Error("The order could not be protected before sending.");
+    assertUserSessionIsCurrent(session);
+    await persistMobileRoutingAction(session, submittedAttempt);
+    persisted = true;
+    state.orders = [order, ...state.orders.filter((item) => item.id !== order.id)];
+    rememberOrderCustomers(state, actor, effectiveDraft);
+    const existingReceivableIndex = state.receivables.findIndex((item) => item.orderId === order.id);
+    const existingReceivable = existingReceivableIndex >= 0 ? state.receivables[existingReceivableIndex] : undefined;
+    if (effectiveDraft.fundingType === "credit") {
+      const receivable = buildReceivable(session, effectiveDraft, order, state, existingReceivable);
+      if (existingReceivableIndex >= 0) state.receivables.splice(existingReceivableIndex, 1, receivable);
+      else state.receivables.unshift(receivable);
+    } else if (existingReceivable && existingReceivable.payments.reduce((sum, payment) => sum + Number(payment.amountMinor || 0), 0) === 0) {
+      state.receivables.splice(existingReceivableIndex, 1);
+    }
+
+    const savedState = await saveWorkspaceState(state, session);
+    assertUserSessionIsCurrent(session);
+    const acknowledged = savedState.orders.find((candidate) => brokerRoutingOrderMatches(candidate, order));
+    if (!acknowledged) throw new Error("The server did not confirm the exact order that was sent.");
+    await clearMobileRoutingAction(session, submittedAttempt.attemptId);
+    return {
+      orderId: acknowledged.id,
+      orderNumber: acknowledged.brokerOrderNumber || acknowledged.id,
+      status: "Pending Master Approval",
+      createdAt: acknowledged.createdAt || acknowledged.sentAt || order.createdAt,
+      state: savedState
+    };
+  } catch (error) {
+    const current = currentWorkspaceSession();
+    const sameSession = workspaceSnapshotSessionKey(current) === scope &&
+      (!session.loginStartedAt || current?.loginStartedAt === session.loginStartedAt);
+    if (persisted && protectedAttempt && sameSession) {
+      try {
+        const verification = await verifyWorkspaceRoutingCommit(
+          session,
+          (candidate) => brokerRoutingOrderMatches(candidate, protectedAttempt!.order)
+        );
+        const latest = verification?.state;
+        const acknowledged = verification?.order;
+        if (latest && acknowledged) {
+          await clearMobileRoutingAction(session, protectedAttempt.attemptId);
+          return {
+            orderId: acknowledged.id,
+            orderNumber: acknowledged.brokerOrderNumber || acknowledged.id,
+            status: "Pending Master Approval",
+            createdAt: acknowledged.createdAt || acknowledged.sentAt || protectedAttempt.order.createdAt,
+            state: latest
+          };
+        }
+      } catch {
+        // Keep the protected record; the next exact retry will reconcile it first.
+      }
+      const detail = error instanceof Error ? error.message : "The send result was not confirmed.";
+      throw new Error(`${detail} Your exact order is protected. Retry Send when connected; do not create it again.`);
+    }
+    throw error;
+  } finally {
+    processingBrokerRoutingScopes.delete(scope);
+  }
 }

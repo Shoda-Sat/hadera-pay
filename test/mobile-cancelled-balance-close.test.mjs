@@ -53,6 +53,7 @@ test("Android close API sends the chosen cancellation policy and honors deleted-
       ensureActorLedgerNumbers: () => undefined,
       nextActorLedgerSequence: () => 1,
     },
+    "../domain/routingDurability": {},
     "../utils/money": {},
     "../utils/orderParticipantRetention": {
       retainOrdersForUnclosedParticipants: (orders, _archives, _ledger, _actors, deletedOrderIds = []) => {
@@ -65,6 +66,18 @@ test("Android close API sends the chosen cancellation policy and honors deleted-
   const previousFetch = globalThis.fetch;
   globalThis.fetch = async (url, options) => {
     requests.push({ url, options });
+    if (String(url).endsWith("/api/session")) {
+      return {
+        ok: true,
+        text: async () => JSON.stringify({
+          session: {
+            user: { id: "USR-MASTER", name: "Master", email: "master@example.com" },
+            workspace: { id: "WS-1", name: "Workspace" },
+            membership: { role: "Master", actorRole: "Master", actorId: "ACT-MASTER", actorName: "Master", currency: "USD" }
+          }
+        }),
+      };
+    }
     if (String(url).endsWith("/api/app-state") && String(options?.method || "GET") === "GET") {
       return {
         ok: true,
@@ -87,15 +100,16 @@ test("Android close API sends the chosen cancellation policy and honors deleted-
   };
 
   try {
+    await client.getCurrentSession();
     await client.loadWorkspaceState();
     const state = await client.closeActorBalance("ACT-BROKER", "omit", "revision-before-close");
     assert.deepEqual(state.deletedOrderIds, ["ORD-CANCELLED"]);
     assert.deepEqual(state.orders.map((order) => order.id), ["ORD-ACTIVE"]);
     assert.equal(state.offlineSnapshot, false);
-    assert.equal(requests.length, 2);
-    assert.equal(requests[1].url, "https://haderapay.com/api/app-state/close-balance");
-    assert.equal(requests[1].options.method, "POST");
-    assert.deepEqual(JSON.parse(requests[1].options.body), {
+    assert.equal(requests.length, 3);
+    assert.equal(requests[2].url, "https://haderapay.com/api/app-state/close-balance");
+    assert.equal(requests[2].options.method, "POST");
+    assert.deepEqual(JSON.parse(requests[2].options.body), {
       actorId: "ACT-BROKER",
       cancelledOrderPolicy: "omit",
       expectedRevision: "revision-before-close",

@@ -46,6 +46,7 @@ import {
   closeActorBalance,
   createOwnerMaster,
   createInvite,
+  currentWorkspaceSession,
   extendOwnerSubscription,
   loadOwnerMasters,
   loadInvites,
@@ -119,6 +120,7 @@ import {
   visibleChatsFor
 } from "../domain/workspace";
 import { actorLedgerReferenceForLine, ledgerAccountBelongsToActor, ledgerLineBelongsToActor } from "../domain/ledgerNumbering";
+import { readMobileRoutingAction, type MobileRoutingActionRecord } from "../domain/routingDurability";
 import { useProgressiveLimit } from "../hooks/useProgressiveLimit";
 import { colors, radius, spacing } from "../theme";
 import { orderArchivedForActor } from "../utils/orderParticipantRetention";
@@ -593,8 +595,28 @@ function errorMessage(error: unknown): string {
 
 const orderReturnReasonDrafts = new Map<string, string>();
 
-export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEditReturnedOrder: (order: OrderRecord) => void }) {
-  const { session, state, offline, onState, onNavigate, onRefresh, onNewOrder, onEditReturnedOrder } = props;
+type OrdersScreenProps = CommonProps & {
+  onNewOrder: () => void;
+  onEditReturnedOrder: (order: OrderRecord) => void;
+  routingAction: MobileRoutingActionRecord | null;
+  onRoutingActionChange: (action: MobileRoutingActionRecord | null) => void;
+  onRoutingBusyChange: (busy: boolean) => void;
+};
+
+export function OrdersScreen(props: OrdersScreenProps) {
+  const {
+    session,
+    state,
+    offline,
+    onState,
+    onNavigate,
+    onRefresh,
+    onNewOrder,
+    onEditReturnedOrder,
+    routingAction,
+    onRoutingActionChange,
+    onRoutingBusyChange
+  } = props;
   const [expanded, setExpanded] = useState<string[]>([]);
   const [selectedAgent, setSelectedAgent] = useState<Record<string, string>>({});
   const [divider, setDivider] = useState<Record<string, string>>({});
@@ -604,6 +626,7 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
   const [proofStatus, setProofStatus] = useState<Record<string, string>>({});
   const [preparingProof, setPreparingProof] = useState("");
   const [busy, setBusy] = useState("");
+  const routingForwardInFlight = useRef(false);
   const [statusFilter, setStatusFilter] = useState<ActorOrderStatusFilter>("Default");
   const [sortMode, setSortMode] = useState<ActorOrderSort>("Default");
   const [dateFrom, setDateFrom] = useState("");
@@ -618,6 +641,10 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
   const actorSortingAvailable = session.role !== "Owner";
   const viewerActor = actorForSession(session, state);
   const actorSortingActive = actorSortingAvailable && (statusFilter !== "Default" || sortMode !== "Default" || Boolean(dateFrom.trim() || dateTo.trim()));
+  const pendingMasterForward = routingAction?.kind === "master-forward" &&
+    routingAction.workspaceId === session.workspaceId && routingAction.userId === session.userId
+    ? routingAction
+    : null;
   const returnReasonKey = (orderId: string) => `${session.workspaceId}:${session.actorId || session.actorName}:${orderId}`;
   const returnReasonValue = (orderId: string) => {
     const key = returnReasonKey(orderId);
@@ -627,6 +654,14 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
     orderReturnReasonDrafts.set(returnReasonKey(orderId), value);
     setReturnReasons((current) => ({ ...current, [orderId]: value }));
   };
+
+  useEffect(() => {
+    if (!pendingMasterForward) return;
+    const { orderId, targetActorId, dividerText, percentText } = pendingMasterForward;
+    setSelectedAgent((current) => current[orderId] === targetActorId ? current : { ...current, [orderId]: targetActorId });
+    setDivider((current) => current[orderId] === dividerText ? current : { ...current, [orderId]: dividerText });
+    setPercent((current) => current[orderId] === percentText ? current : { ...current, [orderId]: percentText });
+  }, [pendingMasterForward?.attemptId, pendingMasterForward?.dividerText, pendingMasterForward?.orderId, pendingMasterForward?.percentText, pendingMasterForward?.targetActorId]);
 
   const clearOrderSorting = () => {
     setStatusFilter("Default");
@@ -644,6 +679,48 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
       Alert.alert("Could not continue", errorMessage(error));
     } finally {
       setBusy("");
+    }
+  };
+
+  const forwardOrder = async (order: OrderRecord) => {
+    if (offline) return Alert.alert("Offline", "Reconnect before forwarding this order.");
+    if (routingForwardInFlight.current) return;
+    if (pendingMasterForward && pendingMasterForward.orderId !== order.id) {
+      return Alert.alert("Forward pending", "Retry the protected forwarding attempt before forwarding another order.");
+    }
+
+    const targetActorId = pendingMasterForward?.orderId === order.id
+      ? pendingMasterForward.targetActorId
+      : selectedAgent[order.id];
+    const dividerText = pendingMasterForward?.orderId === order.id
+      ? pendingMasterForward.dividerText
+      : divider[order.id];
+    const percentText = pendingMasterForward?.orderId === order.id
+      ? pendingMasterForward.percentText
+      : percent[order.id];
+    if (!targetActorId) return Alert.alert("Paying actor required", "Choose the paying actor before forwarding this order.");
+
+    routingForwardInFlight.current = true;
+    setBusy(`assign-${order.id}`);
+    onRoutingBusyChange(true);
+    const routingSessionIsCurrent = () => {
+      const current = currentWorkspaceSession();
+      return current?.workspaceId === session.workspaceId && current.userId === session.userId;
+    };
+    try {
+      const next = await assignOrder(order.id, targetActorId, dividerText, percentText, session);
+      if (!routingSessionIsCurrent()) return;
+      onState(next);
+      onRoutingActionChange(null);
+    } catch (error) {
+      const protectedAction = await readMobileRoutingAction(session);
+      if (!routingSessionIsCurrent()) return;
+      onRoutingActionChange(protectedAction);
+      Alert.alert("Could not confirm forwarding", errorMessage(error));
+    } finally {
+      routingForwardInFlight.current = false;
+      setBusy("");
+      if (routingSessionIsCurrent()) onRoutingBusyChange(false);
     }
   };
 
@@ -706,6 +783,10 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
   };
 
   const confirmReturn = (order: OrderRecord) => {
+    if (pendingMasterForward?.orderId === order.id) {
+      Alert.alert("Forward pending", "Retry the protected forwarding attempt before returning this order.");
+      return;
+    }
     const masterReturn = isMasterView(session) && order.state === "Pending Forward";
     const reason = returnReasonValue(order.id).trim();
     if (!reason) {
@@ -732,6 +813,10 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
   };
 
   const confirmCancel = (order: OrderRecord) => {
+    if (pendingMasterForward?.orderId === order.id) {
+      Alert.alert("Forward pending", "Retry the protected forwarding attempt before cancelling this order.");
+      return;
+    }
     const returnedBrokerCancellation = order.state === "Returned" && orderBrokerMatchesActor(order, session.actorId, session.actorName);
     const message = returnedBrokerCancellation
       ? `${orderNumber(order, session)} will be marked Cancelled. When Master closes your balance, Master can keep it in Report or remove it without a report record.`
@@ -779,7 +864,7 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
         {isMasterView(session) ? (
           <Button label="Pending & Cancelled" variant="secondary" onPress={() => onNavigate("pendingCancelled")} style={styles.flexButton} />
         ) : null}
-        <Button label="Refresh" icon={<RefreshCw size={17} color={colors.ink} />} variant="secondary" onPress={onRefresh} style={styles.flexButton} />
+        <Button label="Refresh" icon={<RefreshCw size={17} color={colors.ink} />} variant="secondary" disabled={Boolean(pendingMasterForward) || busy.startsWith("assign-")} onPress={onRefresh} style={styles.flexButton} />
       </View>
       {actorSortingAvailable ? (
         <Panel title="Sort and filter orders" badge={statusFilter}>
@@ -801,6 +886,9 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
           (isMasterView(session) || orderBrokerMatchesActor(order, session.actorId, session.actorName));
         const payerOptions = activeActors(state).filter((actor) => actor.name !== order.broker && actorCanPayoutCurrency(actor, order.payoutCurrency));
         const stateLabel = isMasterView(session) && order.state === "Assigned" ? `Assigned to ${order.agent}` : order.state;
+        const routingForwardProtected = pendingMasterForward?.orderId === order.id;
+        const routingForwardPendingElsewhere = Boolean(pendingMasterForward && !routingForwardProtected);
+        const routingForwardBusy = busy === `assign-${order.id}`;
         return (
           <Panel
             key={order.id}
@@ -844,15 +932,21 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
                 <Text style={styles.fieldLabel}>Paying actor</Text>
                 <View style={styles.choiceWrap}>
                   {payerOptions.map((actor) => (
-                    <Pressable key={actor.id} onPress={() => setSelectedAgent((current) => ({ ...current, [order.id]: actor.id }))} style={[styles.choice, selectedAgent[order.id] === actor.id && styles.choiceActive]}>
+                    <Pressable
+                      key={actor.id}
+                      disabled={routingForwardProtected || routingForwardBusy}
+                      onPress={() => setSelectedAgent((current) => ({ ...current, [order.id]: actor.id }))}
+                      style={[styles.choice, selectedAgent[order.id] === actor.id && styles.choiceActive, (routingForwardProtected || routingForwardBusy) && styles.disabled]}
+                    >
                       <Text style={[styles.choiceText, selectedAgent[order.id] === actor.id && styles.choiceTextActive]}>{actor.name}</Text>
                     </Pressable>
                   ))}
                 </View>
                 <View style={styles.twoColumns}>
-                  <Field label="Payout divisor" value={divider[order.id] || ""} onChangeText={(value) => setDivider((current) => ({ ...current, [order.id]: value }))} keyboardType="decimal-pad" placeholder="Optional" />
-                  <Field label="Payer %" value={percent[order.id] || ""} onChangeText={(value) => setPercent((current) => ({ ...current, [order.id]: value }))} keyboardType="decimal-pad" placeholder="Optional" />
+                  <Field label="Payout divisor" value={divider[order.id] || ""} onChangeText={(value) => setDivider((current) => ({ ...current, [order.id]: value }))} keyboardType="decimal-pad" placeholder="Optional" editable={!routingForwardProtected && !routingForwardBusy} />
+                  <Field label="Payer %" value={percent[order.id] || ""} onChangeText={(value) => setPercent((current) => ({ ...current, [order.id]: value }))} keyboardType="decimal-pad" placeholder="Optional" editable={!routingForwardProtected && !routingForwardBusy} />
                 </View>
+                {routingForwardProtected ? <Text style={styles.warningText}>This exact forwarding attempt is protected. Retry it to confirm delivery.</Text> : null}
                 <Field
                   label="Reason for returning"
                   value={returnReasonValue(order.id)}
@@ -860,11 +954,17 @@ export function OrdersScreen(props: CommonProps & { onNewOrder: () => void; onEd
                   placeholder="Required only when returning this order"
                   multiline
                   maxLength={500}
+                  editable={!routingForwardProtected && !routingForwardBusy}
                 />
-                <Button label="Forward order" disabled={!selectedAgent[order.id] || offline} loading={busy === `assign-${order.id}`} onPress={() => run(`assign-${order.id}`, () => assignOrder(order.id, selectedAgent[order.id], divider[order.id], percent[order.id]))} />
+                <Button
+                  label="Forward order"
+                  disabled={!selectedAgent[order.id] || offline || routingForwardPendingElsewhere || (busy !== "" && !routingForwardBusy)}
+                  loading={routingForwardBusy}
+                  onPress={() => forwardOrder(order)}
+                />
                 <View style={styles.rowButtons}>
-                  <Button label="Return" variant="secondary" disabled={offline} onPress={() => confirmReturn(order)} style={styles.flexButton} />
-                  <Button label="Cancel" variant="danger" disabled={offline} onPress={() => confirmCancel(order)} style={styles.flexButton} />
+                  <Button label="Return" variant="secondary" disabled={offline || routingForwardProtected || routingForwardBusy} onPress={() => confirmReturn(order)} style={styles.flexButton} />
+                  <Button label="Cancel" variant="danger" disabled={offline || routingForwardProtected || routingForwardBusy} onPress={() => confirmCancel(order)} style={styles.flexButton} />
                 </View>
               </View>
             ) : null}
@@ -3203,6 +3303,7 @@ const styles = StyleSheet.create({
   offlineText: { color: colors.warn, fontWeight: "800", backgroundColor: colors.warnSoft, borderRadius: radius.md, padding: spacing.md },
   warningText: { color: colors.warn, fontWeight: "800", backgroundColor: colors.warnSoft, borderRadius: radius.md, padding: spacing.md },
   muted: { color: colors.muted, fontSize: 12, lineHeight: 18 },
+  emptyText: { color: colors.muted, fontSize: 12, lineHeight: 18, fontStyle: "italic" },
   versionText: { color: colors.muted, fontSize: 10, textAlign: "center", marginTop: spacing.sm, marginBottom: spacing.sm },
   primaryLine: { color: colors.ink, fontWeight: "900", flexShrink: 1 },
   amountLine: { color: colors.accent, fontSize: 17, fontWeight: "900" },

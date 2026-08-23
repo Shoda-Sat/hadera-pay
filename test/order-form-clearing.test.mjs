@@ -38,7 +38,7 @@ test("create-order fields and cleared payer terms stay empty", async () => {
   assert.match(index, /function forwardedPayoutPercentInputValue\(order\)[\s\S]*forwardedPayoutPercentValue\(order\)[\s\S]*percent === null \? ""/);
   assert.match(index, /if \(percentText\) \{[\s\S]*order\.forwardedPayoutPercent = forwardedPercent;[\s\S]*\} else \{[\s\S]*delete order\.forwardedPayoutPercent;/);
   assert.match(mobileClient, /forwardedPayoutPercent: undefined/);
-  assert.match(mobileWorkspace, /if \(percentText\) order\.forwardedPayoutPercent = percent;[\s\S]*else delete order\.forwardedPayoutPercent;/);
+  assert.match(mobileWorkspace, /if \(effectivePercentText\) order\.forwardedPayoutPercent = percent;[\s\S]*else delete order\.forwardedPayoutPercent;/);
   for (const legacyField of [
     "manualSpecialPayoutDivider",
     "manualSpecialPayoutPercent",
@@ -64,7 +64,7 @@ test("create-order fields and cleared payer terms stay empty", async () => {
   assert.match(mobileMasterForwardBlock, /<Field label="Payer %"[^\r\n]*placeholder="Optional"/);
   assert.doesNotMatch(mobileMasterForwardBlock, /payerOptions\.some|Special Agent|Special Broker/, "Payout terms must be available for every paying Actor");
   assert.doesNotMatch(mobileMasterForwardBlock, /commissionPercent/, "Broker commission must not populate Master payout terms");
-  assert.match(mobileMasterForwardBlock, /assignOrder\(order\.id, selectedAgent\[order\.id\], divider\[order\.id\], percent\[order\.id\]\)/);
+  assert.match(mobileScreens, /assignOrder\(order\.id, targetActorId, dividerText, percentText, session\)/);
 
   for (const field of [
     "forwardedPayoutDivider",

@@ -132,6 +132,8 @@ export interface OrderRecord {
   id: string;
   internalOrderId?: string;
   collisionSourceOrderId?: string;
+  routingSubmissionId?: string;
+  routingForwardAttemptId?: string;
   brokerOrderNumber?: string;
   brokerOrderNumberCycle?: number;
   brokerActorId?: string;
