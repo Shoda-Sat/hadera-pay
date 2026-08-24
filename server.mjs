@@ -3856,6 +3856,279 @@ function sanitizeIncomingWorkspaceState(state, session, db) {
   return sanitized;
 }
 
+const brokerSubmitAdvancedStates = new Set(["Pending Forward", "Assigned", "Returned", "Paid", "Void Requested", "Voided", "Cancelled"]);
+
+function brokerSubmitSessionOwnsOrder(session, order) {
+  const actorId = String(session?.membership?.actorId || "");
+  const actorName = String(session?.membership?.actorName || "");
+  return Boolean(order) && (
+    (actorId && String(order?.brokerActorId || "") === actorId) ||
+    (!order?.brokerActorId && actorName && String(order?.broker || "") === actorName)
+  );
+}
+
+function brokerSubmitOrderRecords(state = {}) {
+  return [
+    ...(Array.isArray(state.orders) ? state.orders : []).map((order) => ({ order, archived: false })),
+    ...(Array.isArray(state.archives) ? state.archives : []).flatMap((archive) =>
+      (Array.isArray(archive?.orders) ? archive.orders : []).map((order) => ({ order, archived: true }))
+    ),
+  ];
+}
+
+function brokerSubmitOrderIdentityValues(order = {}) {
+  return new Set([order?.id, order?.internalOrderId, order?.collisionSourceOrderId]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean));
+}
+
+function brokerSubmitOrdersShareIdentity(left, right) {
+  const leftIds = brokerSubmitOrderIdentityValues(left);
+  const rightIds = brokerSubmitOrderIdentityValues(right);
+  return recoveredOrderMatches(left, right) && Array.from(leftIds).some((value) => rightIds.has(value));
+}
+
+function brokerSubmitReceivableForOrder(state, order, includeArchives = false) {
+  const orderIds = brokerSubmitOrderIdentityValues(order);
+  return [
+    ...(Array.isArray(state.receivables) ? state.receivables : []),
+    ...(includeArchives && Array.isArray(state.archives) ? state.archives : [])
+      .flatMap((archive) => Array.isArray(archive?.receivables) ? archive.receivables : []),
+  ].find((receivable) => orderIds.has(String(receivable?.orderId || "").trim())) || null;
+}
+
+function brokerSubmitCustomerKey(customer, actorId) {
+  return [
+    String(actorId || customer?.actorId || ""),
+    String(customer?.kind || ""),
+    normalizedActorName(customer?.name),
+  ].join("|");
+}
+
+function nextBrokerSubmitCustomerId(state, reservedIds) {
+  let counter = Math.max(
+    Number(state.customerCounter || 0),
+    ...(Array.isArray(state.savedCustomers) ? state.savedCustomers : []).map((customer) => {
+      const match = String(customer?.id || "").match(/^CUST-(\d+)$/);
+      return match ? Number(match[1]) : 0;
+    })
+  );
+  let customerId = "";
+  do {
+    counter += 1;
+    customerId = `CUST-${counter}`;
+  } while (reservedIds.has(customerId));
+  state.customerCounter = counter;
+  reservedIds.add(customerId);
+  return customerId;
+}
+
+function canonicalBrokerSubmitCustomers(state, session, submittedCustomers = []) {
+  const actorId = String(session.membership.actorId || "");
+  const existingCustomers = Array.isArray(state.savedCustomers) ? state.savedCustomers : [];
+  const existingByKey = new Map(existingCustomers
+    .filter((customer) => String(customer?.actorId || "") === actorId)
+    .map((customer) => [brokerSubmitCustomerKey(customer, actorId), customer]));
+  const reservedIds = new Set(existingCustomers.map((customer) => String(customer?.id || "")).filter(Boolean));
+  const canonical = [];
+  for (const submitted of submittedCustomers.slice(0, 4)) {
+    if (!submitted || typeof submitted !== "object" || !["sender", "receiver"].includes(String(submitted.kind || ""))) continue;
+    const key = brokerSubmitCustomerKey(submitted, actorId);
+    const existing = existingByKey.get(key);
+    const proposedId = String(submitted.id || "").trim();
+    const id = existing?.id || (proposedId && !reservedIds.has(proposedId)
+      ? (reservedIds.add(proposedId), proposedId)
+      : nextBrokerSubmitCustomerId(state, reservedIds));
+    const customer = {
+      ...(existing || {}),
+      id,
+      actorId,
+      kind: String(submitted.kind),
+      name: String(submitted.name || ""),
+      receiverCity: String(submitted.receiverCity || ""),
+      accountNumber: String(submitted.accountNumber || ""),
+      phoneNumber: String(submitted.phoneNumber || ""),
+      remarks: String(submitted.remarks || ""),
+      updatedAt: String(submitted.updatedAt || new Date().toISOString()),
+    };
+    existingByKey.set(key, customer);
+    canonical.push(customer);
+  }
+  return canonical;
+}
+
+function canonicalBrokerSubmitReceivable(state, session, rawReceivable, submittedOrder, previousOrder = null) {
+  if (submittedOrder.fundingType !== "credit") {
+    if (rawReceivable) throw httpError(400, "A cash order cannot create a credit receivable.");
+    return null;
+  }
+  if (!rawReceivable || typeof rawReceivable !== "object" || Array.isArray(rawReceivable)) {
+    throw httpError(400, "A credit order must include its receivable.");
+  }
+  const previousIds = brokerSubmitOrderIdentityValues(previousOrder || {});
+  const existing = previousOrder
+    ? (state.receivables || []).find((receivable) => previousIds.has(String(receivable?.orderId || "").trim())) || null
+    : null;
+  const id = String(existing?.id || rawReceivable.id || "").trim();
+  if (!id) throw httpError(400, "The credit receivable is incomplete.");
+  return {
+    ...(existing || {}),
+    id,
+    orderId: submittedOrder.id,
+    brokerOrderNumber: existing?.brokerOrderNumber || String(rawReceivable.brokerOrderNumber || submittedOrder.brokerOrderNumber || submittedOrder.id),
+    agentOrderNumber: existing?.agentOrderNumber || "",
+    borrower: session.membership.actorName,
+    borrowerActorId: session.membership.actorId,
+    currency: submittedOrder.sourceCurrency,
+    principalMinor: Number(submittedOrder.sourceAmountMinor || 0),
+    senderName: String(rawReceivable.senderName || submittedOrder.senderName || ""),
+    receiverName: String(rawReceivable.receiverName || submittedOrder.receiverName || ""),
+    receiverCity: String(rawReceivable.receiverCity || submittedOrder.receiverCity || ""),
+    accountNumber: String(rawReceivable.accountNumber || submittedOrder.accountNumber || ""),
+    phoneNumber: String(rawReceivable.phoneNumber || submittedOrder.phoneNumber || ""),
+    remarks: String(rawReceivable.remarks || submittedOrder.remarks || ""),
+    creditReminder: String(rawReceivable.creditReminder || ""),
+    createdAt: String(existing?.createdAt || rawReceivable.createdAt || submittedOrder.createdAt || new Date().toISOString()),
+    updatedAt: String(rawReceivable.updatedAt || submittedOrder.updatedAt || new Date().toISOString()),
+    createdBy: String(existing?.createdBy || session.membership.actorName),
+    payments: structuredClone(existing?.payments || []),
+  };
+}
+
+function brokerSubmitResponse(state, session, revision, order, receivable, customers, {
+  alreadyApplied = false,
+  includeState = false,
+  archived = false,
+} = {}) {
+  return {
+    ok: true,
+    revision,
+    alreadyApplied,
+    archived,
+    order: structuredClone(order),
+    receivable: receivable ? structuredClone(receivable) : null,
+    customers: structuredClone(customers || []),
+    orderCounter: Number(state.orderCounter || 0),
+    receivableCounter: Number(state.receivableCounter || 0),
+    customerCounter: Number(state.customerCounter || 0),
+    orderState: order?.state || state.orderState || "Pending Forward",
+    ...(includeState ? { state: stripRestrictedCreditReminders(state, session) } : {}),
+  };
+}
+
+function applyAtomicBrokerSubmit(latestDb, state, session, body = {}) {
+  const submittedOrder = body?.order && typeof body.order === "object" && !Array.isArray(body.order)
+    ? structuredClone(body.order)
+    : null;
+  const attemptId = String(body.attemptId || "").trim();
+  const previousOrder = body?.previousOrder && typeof body.previousOrder === "object" && !Array.isArray(body.previousOrder)
+    ? body.previousOrder
+    : null;
+  const submittedCustomers = Array.isArray(body.customers) ? body.customers : [];
+  if (!submittedOrder?.id || !attemptId || attemptId.length > 512 ||
+    String(submittedOrder.routingSubmissionId || "") !== attemptId ||
+    submittedOrder.state !== "Pending Forward" || !["cash", "credit"].includes(String(submittedOrder.fundingType || "")) ||
+    submittedCustomers.length > 4) {
+    throw httpError(400, "The Broker order request is incomplete.");
+  }
+  const preMutationRevision = workspaceStateRevision(latestDb, session.workspace.id);
+  const expectedRevision = String(body.expectedRevision || "");
+  const includeState = Boolean(expectedRevision && expectedRevision !== preMutationRevision);
+  const ownedAttemptRecords = brokerSubmitOrderRecords(state).filter(({ order }) =>
+    brokerSubmitSessionOwnsOrder(session, order) && String(order?.routingSubmissionId || "") === attemptId
+  );
+  const replay = ownedAttemptRecords.find(({ order }) => recoveredOrderMatches(order, submittedOrder));
+  if (replay) {
+    if (!ownedAttemptRecords.every(({ order }) => brokerSubmitOrdersShareIdentity(order, replay.order))) {
+      throw httpError(409, "This Broker send attempt conflicts with another order.");
+    }
+    if (!brokerSubmitAdvancedStates.has(String(replay.order.state || ""))) {
+      throw httpError(409, "This Broker send attempt conflicts with the order's current state.");
+    }
+    const receivable = brokerSubmitReceivableForOrder(state, replay.order, replay.archived);
+    const customerKeys = new Set(submittedCustomers.map((customer) => brokerSubmitCustomerKey(customer, session.membership.actorId)));
+    const customers = (state.savedCustomers || []).filter((customer) => customerKeys.has(brokerSubmitCustomerKey(customer, session.membership.actorId)));
+    return brokerSubmitResponse(state, session, preMutationRevision, replay.order, receivable, customers, {
+      alreadyApplied: true,
+      includeState: includeState || replay.archived,
+      archived: replay.archived,
+    });
+  }
+  if (ownedAttemptRecords.length) {
+    throw httpError(409, "This Broker send attempt is already attached to different order details.");
+  }
+
+  const currentOrders = Array.isArray(state.orders) ? state.orders : [];
+  let previousIndex = -1;
+  if (previousOrder) {
+    const previousIds = brokerSubmitOrderIdentityValues(previousOrder);
+    const matches = currentOrders
+      .map((order, index) => ({ order, index }))
+      .filter(({ order }) => brokerSubmitSessionOwnsOrder(session, order) &&
+        Array.from(brokerSubmitOrderIdentityValues(order)).some((value) => previousIds.has(value)) &&
+        recoveredOrderMatches(order, previousOrder));
+    if (matches.length !== 1 || matches[0].order.state !== "Returned") {
+      throw httpError(409, "This returned order changed before it was sent again. Refresh and review it.");
+    }
+    if (String(matches[0].order.updatedAt || "") !== String(previousOrder.updatedAt || "") ||
+      String(matches[0].order.returnedAt || "") !== String(previousOrder.returnedAt || "")) {
+      throw httpError(409, "This returned order was updated before it was sent again. Refresh and review it.");
+    }
+    previousIndex = matches[0].index;
+  } else if (currentOrders.some((order) =>
+    brokerSubmitSessionOwnsOrder(session, order) && String(order?.id || "") === String(submittedOrder.id)
+  )) {
+    throw httpError(409, "This Broker order ID is already in use. Refresh before sending another order.");
+  }
+
+  const canonicalCustomers = canonicalBrokerSubmitCustomers(state, session, submittedCustomers);
+  const previousPersistedOrder = previousIndex >= 0 ? currentOrders[previousIndex] : null;
+  const canonicalReceivable = canonicalBrokerSubmitReceivable(
+    state,
+    session,
+    body.receivable,
+    submittedOrder,
+    previousPersistedOrder
+  );
+  const incoming = {
+    _workspaceId: session.workspace.id,
+    orders: [submittedOrder],
+    receivables: canonicalReceivable ? [canonicalReceivable] : [],
+    savedCustomers: canonicalCustomers,
+    orderCounter: Number(body.orderCounter || 0),
+    receivableCounter: Number(body.receivableCounter || 0),
+    customerCounter: Math.max(Number(body.customerCounter || 0), Number(state.customerCounter || 0)),
+    orderState: "Pending Forward",
+  };
+  if (previousIndex >= 0) {
+    incoming.orders[0].id = currentOrders[previousIndex].id;
+    if (incoming.receivables[0]) incoming.receivables[0].orderId = currentOrders[previousIndex].id;
+  }
+  const sanitized = sanitizeIncomingWorkspaceState(incoming, session, latestDb);
+  const nextState = mergeWorkspaceState(latestDb, session.workspace.id, sanitized);
+  const committedOrder = (nextState.orders || []).find((order) =>
+    brokerSubmitSessionOwnsOrder(session, order) &&
+    String(order?.routingSubmissionId || "") === attemptId &&
+    recoveredOrderMatches(order, submittedOrder)
+  );
+  if (!committedOrder) {
+    throw httpError(409, "The server could not confirm the exact Broker order that was sent.");
+  }
+  if (body.removeReceivable === true) {
+    const committedIds = brokerSubmitOrderIdentityValues(committedOrder);
+    nextState.receivables = (nextState.receivables || []).filter((receivable) => {
+      if (!committedIds.has(String(receivable?.orderId || "").trim())) return true;
+      return (receivable?.payments || []).reduce((sum, payment) => sum + Number(payment?.amountMinor || 0), 0) !== 0;
+    });
+  }
+  nextState.orderState = committedOrder.state || "Pending Forward";
+  const receivable = brokerSubmitReceivableForOrder(nextState, committedOrder);
+  const customerIds = new Set(canonicalCustomers.map((customer) => customer.id));
+  const customers = (nextState.savedCustomers || []).filter((customer) => customerIds.has(customer?.id));
+  const revision = markWorkspaceStateChanged(latestDb, session.workspace.id, nextState);
+  return brokerSubmitResponse(nextState, session, revision, committedOrder, receivable, customers, { includeState });
+}
+
 const masterForwardPayoutRoles = new Set(["Agent", "Special Agent", "Special Broker"]);
 const masterForwardAdvancedStates = new Set(["Assigned", "Returned", "Paid", "Void Requested", "Voided"]);
 
@@ -4351,6 +4624,24 @@ function latestWritableMasterSession(latestDb, request, workspaceId) {
   return { session, sessionRecord };
 }
 
+function latestWritableBrokerSession(latestDb, request, workspaceId) {
+  const sessionId = parseCookies(request).hp_session;
+  const sessionRecord = activeSessionRecord(latestDb, sessionId);
+  const session = publicSessionForRecord(latestDb, sessionRecord);
+  if (!session) throw httpError(401, "Please log in.");
+  if (session.workspace.id !== workspaceId) throw httpError(403, "The signed-in workspace changed before sending the order.");
+  if (session.subscription.accessDenied) throw httpError(402, "This workspace's 30-day viewing period has ended. Renew the subscription to regain access.");
+  if (session.subscription.inactive) throw httpError(403, "This workspace is inactive.");
+  if (session.subscription.readOnly) throw httpError(403, "This workspace is read-only after subscription expiry. Renew the subscription to make changes.");
+  if (session.membership.role !== "Actor" || !["Broker", "Special Broker"].includes(session.membership.actorRole)) {
+    throw httpError(403, "Only Brokers and Special Brokers can send new orders.");
+  }
+  const deviceId = requestDeviceId(request);
+  if (!sessionRecord.deviceId && deviceId) sessionRecord.deviceId = deviceId;
+  touchSession(sessionRecord);
+  return { session, sessionRecord };
+}
+
 function resetWorkspaceState(db, workspaceId, scope = "data") {
   const currentState = db.appStates[workspaceId] || {};
   const chatHistoryResetAt = new Date().toISOString();
@@ -4707,7 +4998,10 @@ async function handleApi(request, response, url) {
     ["/api/app-state", "/api/app-state/version", "/api/auth/device-warning", "/api/files/status"].includes(url.pathname) ||
     /^\/api\/files\/[^/]+\/(?:download-url|content)$/.test(url.pathname)
   );
-  const deferredSessionPersistence = method === "POST" && url.pathname === "/api/app-state/forward-order";
+  const deferredSessionPersistence = method === "POST" && [
+    "/api/app-state/submit-order",
+    "/api/app-state/forward-order",
+  ].includes(url.pathname);
   const session = await requireSession(request, response, db, {
     touch: !backgroundRead,
     deferPersistence: deferredSessionPersistence,
@@ -5279,7 +5573,23 @@ async function handleApi(request, response, url) {
   }
 
   if (url.pathname === "/api/app-state/version" && method === "GET") {
-    sendJson(response, 200, { revision: workspaceStateRevision(db, session.workspace.id), clientReleaseId: "master-forward-first-attempt-v1" });
+    sendJson(response, 200, { revision: workspaceStateRevision(db, session.workspace.id), clientReleaseId: "atomic-broker-send-v1" });
+    return;
+  }
+
+  if (url.pathname === "/api/app-state/submit-order" && method === "POST") {
+    if (session.membership.role !== "Actor" || !["Broker", "Special Broker"].includes(session.membership.actorRole)) {
+      return sendJson(response, 403, { error: "Only Brokers and Special Brokers can send new orders." });
+    }
+    const body = await readJson(request);
+    let committedSessionRecord = null;
+    const result = await mutateLatestWorkspaceStateAtLatest(session.workspace.id, async (latestDb, latestState) => {
+      const latestAuth = latestWritableBrokerSession(latestDb, request, session.workspace.id);
+      committedSessionRecord = latestAuth.sessionRecord;
+      return applyAtomicBrokerSubmit(latestDb, latestState, latestAuth.session, body);
+    });
+    setSessionCookie(response, committedSessionRecord);
+    sendJson(response, 200, result);
     return;
   }
 

@@ -172,7 +172,7 @@ test("mobile Broker Send persists and reuses one exact attempt until acknowledge
 
   const persistIndex = matchIndex(submit, /await\s+persistMobileRoutingAction\(/,
     "Broker Send must await durable outbox storage.");
-  const saveIndex = matchIndex(submit, /await\s+saveWorkspaceState\(/,
+  const saveIndex = matchIndex(submit, /await\s+saveBrokerSubmissionAtomic\(/,
     "Broker Send authoritative save was not found.");
   const afterSave = submit.slice(saveIndex);
   const acknowledgementIndex = matchIndex(afterSave, /brokerRoutingOrderMatches\(/,

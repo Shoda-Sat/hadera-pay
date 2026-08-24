@@ -135,9 +135,9 @@ test("web Broker Send waits for acknowledged persistence before clearing or repo
   );
   assert.match(brokerSend, /async\s*\(\s*\)\s*=>\s*\{/,
     "The confirmed Broker Send callback must be asynchronous.");
-  assertScopedPendingSave(brokerSend, "Broker Send", { orderScoped: false });
+  assertScopedPendingSave(brokerSend, "Broker Send", { orderScoped: false, saveFunction: "saveBrokerSendNow" });
 
-  const { saveIndex, failureIndex } = acknowledgedSave(brokerSend, "Broker Send");
+  const { saveIndex, failureIndex } = acknowledgedSave(brokerSend, "Broker Send", "saveBrokerSendNow");
   const clearIndex = matchIndex(brokerSend, /clearOrderDetails\(\)/,
     "Broker Send must clear the order form after a successful save.");
   const successIndex = matchIndex(brokerSend, /notifyEvent\(\s*"New order"/,
@@ -262,8 +262,24 @@ test("routing saves use scoped payloads and reconcile ambiguous results with aut
 
   const brokerSend = sectionBetween(index, 'confirmAction("Send this order to Master for routing?"', "els.cancelTransferEditButton.addEventListener");
   const masterForward = sectionBetween(index, 'const forwardButton = event.target.closest(".forward-order")', 'const masterReturnButton = event.target.closest(".master-return-order")');
-  assert.match(brokerSend, /await\s+saveStateNow\(\s*structuredClone\(state\)\s*\)/,
-    "Broker Send must retain its immutable point-in-time workspace snapshot.");
+  const brokerRequest = sectionBetween(brokerSend, "let saveAcknowledged = await saveBrokerSendNow({", "if (!orderActionSessionIsCurrent(actionSession))");
+  for (const field of [
+    "attemptId",
+    "order",
+    "previousOrder",
+    "receivable",
+    "removeReceivable",
+    "customers",
+    "orderCounter",
+    "receivableCounter",
+    "customerCounter",
+  ]) {
+    assert.match(brokerRequest, new RegExp(`\\b${field}\\s*:`), `Broker Send must submit ${field}.`);
+  }
+  assert.doesNotMatch(brokerRequest, /\b(?:state|ledger|archives|transfers|settlements)\s*:/,
+    "Broker Send must not upload the whole workspace or financial collections.");
+  assert.match(brokerSend, /saveBrokerSendNow\([\s\S]*?\(\)\s*=>\s*structuredClone\(state\)/,
+    "The full workspace fallback snapshot must be created lazily only when an old server needs it.");
 
   const masterRequest = sectionBetween(masterForward, "const masterForwardRequest = {", "let saveAcknowledged = await saveMasterForwardNow");
   for (const field of [
@@ -287,7 +303,7 @@ test("routing saves use scoped payloads and reconcile ambiguous results with aut
     "The full workspace fallback snapshot must be created lazily only when an old server needs it.");
 
   const actionSections = [
-    ["Broker Send", brokerSend, "saveStateNow"],
+    ["Broker Send", brokerSend, "saveBrokerSendNow"],
     ["Master Forward", masterForward, "saveMasterForwardNow"],
   ];
   for (const [label, section, saveFunction] of actionSections) {
@@ -429,6 +445,92 @@ test("Master Forward automatically reuses the same attempt after one ambiguous r
   assert.equal(harness.result().fallbackCalls, 0);
   assert.deepEqual(harness.result().submittedPayloads, [payload, payload],
     "The automatic second request must reuse the exact order, target, and idempotency token.");
+});
+
+test("Broker Send uses the small atomic endpoint and adopts only its own collision-remapped records", async () => {
+  const index = await readFile(path.join(repositoryRoot, "index.html"), "utf8");
+  const queueBroker = sectionBetween(index, "function queueRemoteBrokerSend", "function queueRemoteMasterForward");
+  assert.match(queueBroker, /api\(\s*"\/api\/app-state\/submit-order"/);
+  assert.match(queueBroker, /method:\s*"POST"/);
+  assert.match(queueBroker, /keepalive:\s*true/);
+  assert.match(queueBroker, /body:\s*\{\s*\.\.\.payload,\s*expectedRevision:\s*remoteStateRevision\s*\}/);
+  assert.doesNotMatch(queueBroker, /body:\s*\{\s*state\b/,
+    "Atomic Broker Send must not upload the workspace snapshot.");
+
+  const immediateBroker = sectionBetween(index, "async function saveBrokerSendNow", "async function saveMasterForwardNow");
+  assert.match(immediateBroker, /for\s*\(let attempt\s*=\s*0;\s*attempt\s*<\s*2/);
+  assert.match(immediateBroker, /\[404,\s*405\][\s\S]*saveStateNow\(fallbackSnapshot\)/,
+    "Only an old server without the atomic endpoint may receive the legacy full-state save.");
+
+  const adoptionSource = sectionBetween(index, "function brokerSendCustomerKey", "function adoptAtomicMasterForwardResult");
+  const buildHarness = new Function(`
+    let persisted = 0;
+    let remoteStateRevision = "old";
+    let state = {
+      orders: [
+        { id: "ORD-1", routingSubmissionId: "ROUTE-1", brokerActorId: "ACT-A", broker: "A", sourceCurrency: "USD", sourceAmountMinor: 100, payoutCurrency: "ETB", payoutAmountMinor: 5000, receiverName: "A receiver", accountNumber: "A-1", createdAt: "2026-01-01" },
+        { id: "ORD-1", routingSubmissionId: "ROUTE-1", brokerActorId: "ACT-B", broker: "B", sourceCurrency: "USD", sourceAmountMinor: 200, payoutCurrency: "ETB", payoutAmountMinor: 6000, receiverName: "B receiver", accountNumber: "B-1", createdAt: "2026-01-02" }
+      ],
+      receivables: [
+        { id: "REC-1", orderId: "ORD-1", borrowerActorId: "ACT-A", borrower: "A" },
+        { id: "REC-1", orderId: "ORD-1", borrowerActorId: "ACT-B", borrower: "B" }
+      ],
+      savedCustomers: [
+        { id: "CUST-1", actorId: "ACT-A", kind: "sender", name: "A sender" },
+        { id: "CUST-1", actorId: "ACT-B", kind: "sender", name: "B sender" }
+      ],
+      orderCounter: 1,
+      receivableCounter: 1,
+      customerCounter: 1,
+      orderState: "Pending Forward"
+    };
+    const mergeSharedState = () => true;
+    const persistOrderActionStateLocally = () => { persisted += 1; };
+    const recoveredOrderMatches = (left, right) => left?.brokerActorId === right?.brokerActorId
+      && left?.createdAt === right?.createdAt
+      && left?.sourceCurrency === right?.sourceCurrency
+      && left?.sourceAmountMinor === right?.sourceAmountMinor
+      && left?.payoutCurrency === right?.payoutCurrency
+      && left?.payoutAmountMinor === right?.payoutAmountMinor
+      && left?.receiverName === right?.receiverName
+      && left?.accountNumber === right?.accountNumber;
+    ${adoptionSource}
+    return {
+      run: (result, submittedOrder, submittedCustomers) => adoptAtomicBrokerSendResult(result, submittedOrder, "REC-1", submittedCustomers),
+      result: () => ({ state, persisted, remoteStateRevision })
+    };
+  `);
+  const harness = buildHarness();
+  const submittedOrder = {
+    id: "ORD-1", routingSubmissionId: "ROUTE-1", brokerActorId: "ACT-A", broker: "A",
+    sourceCurrency: "USD", sourceAmountMinor: 100, payoutCurrency: "ETB", payoutAmountMinor: 5000,
+    receiverName: "A receiver", accountNumber: "A-1", createdAt: "2026-01-01"
+  };
+  const submittedCustomers = [{ id: "CUST-1", actorId: "ACT-A", kind: "sender", name: "A sender" }];
+  const committed = harness.run({
+    atomicBrokerSend: true,
+    revision: "new",
+    order: { ...submittedOrder, id: "ORD-2", collisionSourceOrderId: "ORD-1", brokerOrderNumber: "A1", state: "Pending Forward" },
+    receivable: { id: "REC-2", orderId: "ORD-2", borrowerActorId: "ACT-A", borrower: "A" },
+    customers: [{ id: "CUST-2", actorId: "ACT-A", kind: "sender", name: "A sender" }],
+    orderCounter: 2,
+    receivableCounter: 2,
+    customerCounter: 2,
+    orderState: "Pending Forward"
+  }, submittedOrder, submittedCustomers);
+  assert.equal(committed.id, "ORD-2");
+  const adopted = harness.result();
+  assert.equal(adopted.state.orders.length, 2);
+  assert.ok(adopted.state.orders.some((order) => order.brokerActorId === "ACT-B" && order.id === "ORD-1"));
+  assert.ok(adopted.state.orders.some((order) => order.brokerActorId === "ACT-A" && order.id === "ORD-2"));
+  assert.equal(adopted.state.receivables.length, 2);
+  assert.ok(adopted.state.receivables.some((receivable) => receivable.borrowerActorId === "ACT-B" && receivable.id === "REC-1"));
+  assert.ok(adopted.state.receivables.some((receivable) => receivable.borrowerActorId === "ACT-A" && receivable.id === "REC-2"));
+  assert.equal(adopted.state.savedCustomers.length, 2);
+  assert.ok(adopted.state.savedCustomers.some((customer) => customer.actorId === "ACT-B" && customer.id === "CUST-1"));
+  assert.ok(adopted.state.savedCustomers.some((customer) => customer.actorId === "ACT-A" && customer.id === "CUST-2"));
+  assert.equal(adopted.remoteStateRevision, "new");
+  assert.equal(adopted.persisted, 1);
 });
 
 test("a queued generic save cannot absorb a later optimistic forwarding mutation", async () => {
@@ -819,7 +921,7 @@ test("an ambiguous retry reuses the complete original routing attempt", async ()
   const brokerSend = sectionBetween(index, 'confirmAction("Send this order to Master for routing?"', "els.cancelTransferEditButton.addEventListener");
   assert.match(brokerSend, /order\s*=\s*retryAttempt\?\.order\s*\?\s*structuredClone\(retryAttempt\.order\)/,
     "Broker retry must use the original complete order, not edited form values.");
-  assert.match(brokerSend, /persistRoutingActionOutbox\([\s\S]*?await\s+saveStateNow/,
+  assert.match(brokerSend, /persistRoutingActionOutbox\([\s\S]*?await\s+saveBrokerSendNow/,
     "Broker refresh recovery must be durable before the network save begins.");
   assert.match(brokerSend, /clearRoutingActionOutbox\(order\.routingSubmissionId\)/,
     "Broker recovery data must be removed only after acknowledgement or an authoritative winner.");
@@ -941,7 +1043,7 @@ test("routing rollback restores only touched records and never rewinds workspace
   const rollbackHelpers = sectionBetween(
     index,
     "function captureOrderActionRecord",
-    "async function authoritativeOrderActionState"
+    "function brokerSendCustomerKey"
   );
   assert.match(rollbackHelpers, /record:\s*index\s*>=\s*0\s*\?\s*structuredClone\(collection\[index\]\)\s*:\s*null/,
     "Rollback snapshots must clone an individual matching record.");
