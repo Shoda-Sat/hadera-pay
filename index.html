@@ -5526,7 +5526,39 @@
       return signedInRole() === "Owner";
     }
 
-    async function saveStateNow(stateSnapshot = null) {
+    async function retryStateSnapshotAfterConflict(conflictResolver, actionSession, initialError) {
+      let conflictError = initialError;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const remote = await api("/api/app-state");
+        if (!orderActionSessionIsCurrent(actionSession)) {
+          const sessionError = new Error("The signed-in workspace changed before this save finished.");
+          sessionError.code = "ORDER_ACTION_SESSION_CHANGED";
+          throw sessionError;
+        }
+        const resolution = conflictResolver(remote, attempt);
+        if (!resolution) throw conflictError;
+        remoteStateRevision = String(remote?.revision || remote?.state?._syncRevision || remoteStateRevision || "0");
+        if (resolution.acknowledged === true) {
+          if (remote?.state && !mergeSharedState(remote.state)) throw conflictError;
+          try {
+            localStorage.setItem(storageKey, JSON.stringify(state));
+          } catch {
+            // The confirmed server result remains authoritative when local cache storage is full.
+          }
+          return remote;
+        }
+        if (!resolution.state) throw conflictError;
+        try {
+          return await queueRemoteStateSave(resolution.state);
+        } catch (error) {
+          if (error?.status !== 409) throw error;
+          conflictError = error;
+        }
+      }
+      throw conflictError;
+    }
+
+    async function saveStateNow(stateSnapshot = null, conflictResolver = null) {
       if (subscriptionIsReadOnly()) return false;
       if (!stateSnapshot && orderActionIsOutstanding()) {
         saveState();
@@ -5539,10 +5571,19 @@
       if (stateSnapshot && saveTimer !== null) orderActionDeferredRemoteSave = true;
       clearTimeout(saveTimer);
       saveTimer = null;
+      const actionSession = currentOrderActionSession();
       try {
         const result = await queueRemoteStateSave(stateSnapshot);
         return stateSnapshot ? result : true;
-      } catch (error) {
+      } catch (caughtError) {
+        let error = caughtError;
+        if (error?.status === 409 && stateSnapshot && typeof conflictResolver === "function") {
+          try {
+            return await retryStateSnapshotAfterConflict(conflictResolver, actionSession, error);
+          } catch (retryError) {
+            error = retryError;
+          }
+        }
         if (error?.code === "ORDER_ACTION_SESSION_CHANGED") return false;
         handleRemoteSaveError(error);
         if (error?.status !== 409) {
@@ -5744,6 +5785,128 @@
       if (!sameOptionalForwardingTerm(candidate, submittedOrder, "forwardedPayoutPercent")) return false;
       if (!allowAdvanced) return candidate.state === "Assigned";
       return ["Assigned", "Returned", "Paid", "Void Requested", "Voided"].includes(candidate.state);
+    }
+
+    const masterForwardConflictOrderFields = [
+      "routingForwardAttemptId",
+      "agent",
+      "agentActorId",
+      "agentOrderNumber",
+      "agentOrderActor",
+      "agentOrderNumbers",
+      "agentOrderNumberCycles",
+      "forwardedPayoutDivider",
+      "forwardedPayoutPercent",
+      "manualSpecialPayoutDivider",
+      "manualSpecialPayoutPercent",
+      "manualMasterRateDivider",
+      "manualMasterRatePercent",
+      "state",
+      "assignedAt",
+      "updatedAt",
+      "returnedBy",
+      "returnedReason",
+      "returnedAt"
+    ];
+
+    function masterForwardOrderNumbers(order, targetActor) {
+      if (!order || !targetActor) return [];
+      const belongsToTarget = order.agentActorId && targetActor.id
+        ? order.agentActorId === targetActor.id
+        : order.agent === targetActor.name;
+      if (!belongsToTarget) return [];
+      return Array.from(new Set([
+        order.agentOrderNumber,
+        order.agentOrderNumbers?.[targetActor.name]
+      ].filter(Boolean).map(String)));
+    }
+
+    function resolveMasterForwardConflict(remote, context) {
+      const remoteState = remote?.state;
+      const submittedOrder = context?.submittedOrder;
+      const previousOrder = context?.previousOrder;
+      const targetActor = context?.targetActor;
+      if (!remoteState || !submittedOrder?.id || !previousOrder?.id || !targetActor?.id) return null;
+      const committedOrder = orderForActionId(
+        remoteState.orders,
+        submittedOrder.id,
+        (candidate) => masterRoutingCommitted(candidate, submittedOrder, targetActor, true)
+      );
+      if (committedOrder) return { acknowledged: true };
+
+      const currentOrder = orderForActionId(
+        remoteState.orders,
+        previousOrder.id,
+        (candidate) => candidate.state === "Pending Forward" && recoveredOrderMatches(candidate, previousOrder)
+      );
+      if (!currentOrder) return null;
+      if (previousOrder.routingSubmissionId && currentOrder.routingSubmissionId !== previousOrder.routingSubmissionId) return null;
+
+      const submittedNumbers = new Set(masterForwardOrderNumbers(submittedOrder, targetActor));
+      const remoteOrderRecords = [
+        ...(Array.isArray(remoteState.orders) ? remoteState.orders : []),
+        ...(Array.isArray(remoteState.archives)
+          ? remoteState.archives.flatMap((archive) => Array.isArray(archive?.orders) ? archive.orders : [])
+          : [])
+      ];
+      const numberCollision = remoteOrderRecords.some((candidate) =>
+        candidate?.id !== currentOrder.id && masterForwardOrderNumbers(candidate, targetActor)
+          .some((reference) => submittedNumbers.has(reference))
+      );
+      if (numberCollision) return null;
+
+      const rebasedState = structuredClone(remoteState);
+      const currentOrderIndex = rebasedState.orders.findIndex((candidate) => candidate?.id === currentOrder.id);
+      if (currentOrderIndex < 0) return null;
+      const rebasedOrder = { ...rebasedState.orders[currentOrderIndex] };
+      masterForwardConflictOrderFields.forEach((field) => {
+        if (Object.prototype.hasOwnProperty.call(submittedOrder, field)) {
+          rebasedOrder[field] = structuredClone(submittedOrder[field]);
+        } else {
+          delete rebasedOrder[field];
+        }
+      });
+      rebasedState.orders[currentOrderIndex] = rebasedOrder;
+      rebasedState.orderState = "Assigned";
+
+      const submittedReceivable = context.submittedReceivable;
+      if (submittedReceivable) {
+        const receivableIndex = (rebasedState.receivables || []).findIndex((candidate) =>
+          candidate?.id === submittedReceivable.id || candidate?.orderId === currentOrder.id
+        );
+        if (receivableIndex >= 0) {
+          const rebasedReceivable = { ...rebasedState.receivables[receivableIndex] };
+          ["brokerOrderNumber", "agentOrderNumber", "updatedAt"].forEach((field) => {
+            if (Object.prototype.hasOwnProperty.call(submittedReceivable, field)) {
+              rebasedReceivable[field] = structuredClone(submittedReceivable[field]);
+            }
+          });
+          rebasedState.receivables[receivableIndex] = rebasedReceivable;
+        }
+      }
+
+      const messageReference = context.messageReference;
+      if (messageReference) {
+        const submittedMessage = context.submittedMessage;
+        if (!submittedMessage) return null;
+        rebasedState.chatConversations ||= [];
+        let chatIndex = rebasedState.chatConversations.findIndex((chat) => chat?.id === messageReference.chatId);
+        if (chatIndex < 0) {
+          const submittedChat = context.submittedChat;
+          if (!submittedChat?.id || submittedChat.id !== messageReference.chatId) return null;
+          rebasedState.chatConversations.push({ ...structuredClone(submittedChat), messages: [] });
+          chatIndex = rebasedState.chatConversations.length - 1;
+        }
+        const messages = rebasedState.chatConversations[chatIndex].messages || [];
+        const existingMessage = messages.find((message) => message?.id === messageReference.messageId);
+        if (existingMessage) {
+          if (existingMessage.orderId !== submittedMessage.orderId || existingMessage.text !== submittedMessage.text) return null;
+        } else {
+          messages.push(structuredClone(submittedMessage));
+        }
+        rebasedState.chatConversations[chatIndex].messages = messages;
+      }
+      return { state: rebasedState };
     }
 
     function rollbackCachedRoutingAction(record) {
@@ -17701,6 +17864,14 @@
             order.returnedAt = "";
           }
           messageReference = sendOrderAssignmentToAgent(order, targetAgent, `MSG-${routingForwardAttemptId}`);
+          const submittedChat = messageReference
+            ? structuredClone(state.chatConversations.find((chat) => chat.id === messageReference.chatId) || null)
+            : null;
+          const submittedMessage = messageReference
+            ? structuredClone(state.chatConversations
+              .find((chat) => chat.id === messageReference.chatId)?.messages
+              .find((message) => message.id === messageReference.messageId) || null)
+            : null;
           state.orderState = "Assigned";
           const storedRetryAttempt = {
             order: structuredClone(order),
@@ -17727,7 +17898,16 @@
             throw new Error("The browser could not protect this forwarding for refresh. Free browser storage and try again.");
           }
           saveAttempted = true;
-          let saveAcknowledged = await saveStateNow(structuredClone(state));
+          const masterForwardConflictResolver = (remote) => resolveMasterForwardConflict(remote, {
+            previousOrder: orderSnapshot.record,
+            submittedOrder: order,
+            submittedReceivable: updatedReceivable,
+            submittedChat,
+            submittedMessage,
+            messageReference,
+            targetActor
+          });
+          let saveAcknowledged = await saveStateNow(structuredClone(state), masterForwardConflictResolver);
           if (!orderActionSessionIsCurrent(actionSession)) return;
           let committedOrder = orderForActionId(
             saveAcknowledged?.state?.orders,
