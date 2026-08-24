@@ -3932,7 +3932,7 @@
   <script>
     let storageKey = "haderapay.local.state.v1";
     let currentAuth = null;
-    const clientReleaseId = "master-forward-first-attempt-v1";
+    const clientReleaseId = "atomic-broker-send-v1";
     let currentLoginStartedAt = 0;
     let remoteStateReady = false;
     let remoteStateRevision = "0";
@@ -4750,6 +4750,33 @@
             }
           }
           throw new Error("The workspace could not be saved.");
+        } finally {
+          remoteSavePending = Math.max(0, remoteSavePending - 1);
+        }
+      });
+      remoteSaveChain = write.catch(() => {});
+      return write;
+    }
+
+    function queueRemoteBrokerSend(payload) {
+      const submittedSession = currentOrderActionSession();
+      const assertSubmittedSession = () => {
+        if (orderActionSessionIsCurrent(submittedSession)) return;
+        const error = new Error("The signed-in workspace changed before this order finished sending.");
+        error.code = "ORDER_ACTION_SESSION_CHANGED";
+        throw error;
+      };
+      const write = remoteSaveChain.then(async () => {
+        assertSubmittedSession();
+        remoteSavePending += 1;
+        try {
+          const result = await api("/api/app-state/submit-order", {
+            method: "POST",
+            keepalive: true,
+            body: { ...payload, expectedRevision: remoteStateRevision }
+          });
+          assertSubmittedSession();
+          return result;
         } finally {
           remoteSavePending = Math.max(0, remoteSavePending - 1);
         }
@@ -5621,6 +5648,36 @@
       }
     }
 
+    async function saveBrokerSendNow(payload, fallbackStateSnapshot) {
+      if (subscriptionIsReadOnly()) return false;
+      persistOrderActionStateLocally();
+      if (!currentAuth || !remoteStateReady || suppressRemoteSave) return false;
+      if (saveTimer !== null) orderActionDeferredRemoteSave = true;
+      clearTimeout(saveTimer);
+      saveTimer = null;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          const result = await queueRemoteBrokerSend(payload);
+          return { ...result, atomicBrokerSend: true };
+        } catch (error) {
+          if ([404, 405].includes(Number(error?.status))) {
+            const fallbackSnapshot = typeof fallbackStateSnapshot === "function"
+              ? fallbackStateSnapshot()
+              : fallbackStateSnapshot;
+            return saveStateNow(fallbackSnapshot);
+          }
+          if (error?.code === "ORDER_ACTION_SESSION_CHANGED" || brokerSendErrorIsDefinitive(error) || attempt === 1) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 150));
+        }
+      }
+      return false;
+    }
+
+    function brokerSendErrorIsDefinitive(error) {
+      const status = Number(error?.status);
+      return Number.isInteger(status) && status >= 400 && status < 500;
+    }
+
     async function saveMasterForwardNow(payload, fallbackStateSnapshot, fallbackConflictResolver) {
       if (subscriptionIsReadOnly()) return false;
       persistOrderActionStateLocally();
@@ -5911,6 +5968,61 @@
       if (optimisticChatIndex >= 0 && sameDirectMembers && (optimisticChat.messages || []).length === 0) {
         state.chatConversations.splice(optimisticChatIndex, 1);
       }
+    }
+
+    function brokerSendCustomerKey(customer) {
+      return [
+        String(customer?.actorId || ""),
+        String(customer?.kind || ""),
+        String(customer?.name || "").trim().toLocaleLowerCase()
+      ].join("|");
+    }
+
+    function adoptAtomicBrokerSendResult(result, submittedOrder, optimisticReceivableId = "", submittedCustomers = []) {
+      if (!result?.atomicBrokerSend || !result.order?.id || !result.revision || !submittedOrder?.routingSubmissionId) return null;
+      if (result.state && !mergeSharedState(result.state)) return null;
+      const actionOrders = state.orders.filter((candidate) =>
+        candidate?.routingSubmissionId === submittedOrder.routingSubmissionId && recoveredOrderMatches(candidate, submittedOrder)
+      );
+      const actionOrderIds = new Set([
+        submittedOrder.id,
+        submittedOrder.internalOrderId,
+        submittedOrder.collisionSourceOrderId,
+        ...actionOrders.flatMap((candidate) => [candidate?.id, candidate?.internalOrderId, candidate?.collisionSourceOrderId])
+      ].filter(Boolean).map(String));
+      state.orders = state.orders.filter((candidate) => !actionOrders.includes(candidate));
+      if (result.archived !== true) state.orders.unshift(structuredClone(result.order));
+
+      state.receivables = state.receivables.filter((candidate) => {
+        const belongsToSubmittingBroker = submittedOrder.brokerActorId && candidate?.borrowerActorId
+          ? String(candidate.borrowerActorId) === String(submittedOrder.brokerActorId)
+          : String(candidate?.borrower || "") === String(submittedOrder.broker || "");
+        const isOptimisticReceivable = optimisticReceivableId && belongsToSubmittingBroker &&
+          String(candidate?.id || "") === String(optimisticReceivableId);
+        const belongsToActionOrder = belongsToSubmittingBroker && actionOrderIds.has(String(candidate?.orderId || ""));
+        return !isOptimisticReceivable && !belongsToActionOrder;
+      });
+      if (result.receivable?.id) state.receivables.unshift(structuredClone(result.receivable));
+
+      const submittedCustomerIds = new Set(submittedCustomers.map((customer) => String(customer?.id || "")).filter(Boolean));
+      const submittedCustomerActorIds = new Set(submittedCustomers.map((customer) => String(customer?.actorId || "")).filter(Boolean));
+      const customerKeys = new Set([
+        ...submittedCustomers.map(brokerSendCustomerKey),
+        ...(result.customers || []).map(brokerSendCustomerKey)
+      ]);
+      state.savedCustomers = state.savedCustomers.filter((customer) =>
+        !(submittedCustomerIds.has(String(customer?.id || "")) && submittedCustomerActorIds.has(String(customer?.actorId || ""))) &&
+        !customerKeys.has(brokerSendCustomerKey(customer))
+      );
+      (result.customers || []).slice().reverse().forEach((customer) => state.savedCustomers.unshift(structuredClone(customer)));
+
+      state.orderCounter = Math.max(Number(state.orderCounter || 0), Number(result.orderCounter || 0));
+      state.receivableCounter = Math.max(Number(state.receivableCounter || 0), Number(result.receivableCounter || 0));
+      state.customerCounter = Math.max(Number(state.customerCounter || 0), Number(result.customerCounter || 0));
+      state.orderState = result.orderState || result.order.state || "Pending Forward";
+      remoteStateRevision = String(result.revision);
+      persistOrderActionStateLocally();
+      return structuredClone(result.order);
     }
 
     function adoptAtomicMasterForwardResult(result, optimisticMessageReference, optimisticReceivableId = "") {
@@ -17132,15 +17244,30 @@
             throw new Error("The browser could not protect this order for refresh. Free browser storage and try again.");
           }
           saveAttempted = true;
-          let saveAcknowledged = await saveStateNow(structuredClone(state));
+          const removeReceivable = Boolean(receivableSnapshot.record && !state.receivables.some((item) => item.id === receivableSnapshot.record.id));
+          let saveAcknowledged = await saveBrokerSendNow({
+            attemptId: order.routingSubmissionId,
+            order: structuredClone(order),
+            previousOrder: orderSnapshot.record ? structuredClone(orderSnapshot.record) : null,
+            receivable: createdReceivable ? structuredClone(createdReceivable) : null,
+            removeReceivable: removeReceivable,
+            customers: structuredClone(touchedCustomers),
+            orderCounter: Number(state.orderCounter || 0),
+            receivableCounter: Number(state.receivableCounter || 0),
+            customerCounter: Number(state.customerCounter || 0)
+          }, () => structuredClone(state));
           if (!orderActionSessionIsCurrent(actionSession)) return;
           let authoritativeState = saveAcknowledged?.state || null;
-          let committedOrder = orderForActionId(
-            authoritativeState?.orders,
-            order.id,
-            (candidate) => brokerRoutingCommitted(candidate, order, false)
-          );
+          let committedReceivable = saveAcknowledged?.receivable || null;
+          let committedOrder = saveAcknowledged?.atomicBrokerSend
+            ? adoptAtomicBrokerSendResult(saveAcknowledged, order, createdReceivable?.id || receivableSnapshot.record?.id || "", touchedCustomers)
+            : orderForActionId(
+                authoritativeState?.orders,
+                order.id,
+                (candidate) => brokerRoutingCommitted(candidate, order, false)
+              );
           saveAcknowledged = Boolean(committedOrder);
+          if (saveAcknowledged && !authoritativeState) authoritativeState = state;
           if (!saveAcknowledged) {
             const verification = await authoritativeOrderActionState(
               order.id,
@@ -17191,7 +17318,7 @@
           els.voidButton.disabled = true;
           clearOrderDetails();
           renderOrderActionStateWithoutRemoteSave();
-          const committedReceivable = createdReceivable
+          committedReceivable ||= createdReceivable
             ? (authoritativeState?.receivables || []).find((item) => item.orderId === committedOrder?.id || item.orderId === order.id)
             : null;
           if (committedReceivable) notifyEvent("Receivable registered", `${committedReceivable.id} recorded for ${committedReceivable.borrower}.`);
@@ -17199,7 +17326,11 @@
         } catch (error) {
           if (!orderActionSessionIsCurrent(actionSession)) return;
           if (localMutationApplied) rollbackLocalAction();
-          if (saveAttempted && !actionConfirmed) {
+          if (brokerSendErrorIsDefinitive(error)) {
+            unconfirmedOrderActions.delete(actionKey);
+            if (order?.id) brokerRoutingRetryAttempts.delete(order.id);
+            clearRoutingActionOutbox(order?.routingSubmissionId);
+          } else if (saveAttempted && !actionConfirmed) {
             state.editingOrderId = order?.id || previousEditingOrderId;
             persistOrderActionStateLocally();
             unconfirmedOrderActions.add(actionKey);

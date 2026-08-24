@@ -122,7 +122,9 @@ async function api<T>(path: string, options: ApiOptions = {}): Promise<ApiEnvelo
   const text = await response.text();
   const data = text ? JSON.parse(text) as ApiEnvelope<T> : {} as ApiEnvelope<T>;
   if (!response.ok) {
-    throw new Error(data.error || "HaderaPay could not complete this request.");
+    const error = new Error(data.error || "HaderaPay could not complete this request.") as Error & { status?: number };
+    error.status = response.status;
+    throw error;
   }
   return data;
 }
@@ -730,6 +732,139 @@ export async function saveWorkspaceState(state: WorkspaceState, routingSession?:
   }
 }
 
+interface AtomicBrokerSubmitResult {
+  ok: boolean;
+  revision?: string;
+  alreadyApplied?: boolean;
+  archived?: boolean;
+  order: OrderRecord;
+  receivable: ReceivableRecord | null;
+  customers: SavedCustomerRecord[];
+  orderCounter?: number;
+  receivableCounter?: number;
+  customerCounter?: number;
+  orderState?: WorkspaceState["orderState"];
+  state?: WorkspaceState;
+}
+
+function brokerSubmitCustomerKey(customer: SavedCustomerRecord): string {
+  return [customer.actorId, customer.kind, customer.name.trim().toLocaleLowerCase()].join("|");
+}
+
+function adoptAtomicBrokerSubmit(
+  localState: WorkspaceState,
+  submittedOrder: OrderRecord,
+  optimisticReceivableId: string,
+  submittedCustomers: SavedCustomerRecord[],
+  result: AtomicBrokerSubmitResult
+): WorkspaceState {
+  const next = normalizeState(JSON.parse(JSON.stringify(localState)) as WorkspaceState);
+  const actionOrders = next.orders.filter((candidate) => brokerRoutingOrderMatches(candidate, submittedOrder));
+  const actionOrderIds = new Set([
+    submittedOrder.id,
+    submittedOrder.internalOrderId,
+    submittedOrder.collisionSourceOrderId,
+    ...actionOrders.flatMap((candidate) => [candidate.id, candidate.internalOrderId, candidate.collisionSourceOrderId])
+  ].filter(Boolean).map(String));
+  next.orders = next.orders.filter((candidate) => !actionOrders.includes(candidate));
+  if (result.archived !== true) next.orders.unshift({ ...result.order });
+
+  next.receivables = next.receivables.filter((candidate) => {
+    const belongsToSubmittingBroker = submittedOrder.brokerActorId && candidate.borrowerActorId
+      ? candidate.borrowerActorId === submittedOrder.brokerActorId
+      : candidate.borrower === submittedOrder.broker;
+    const isOptimisticReceivable = Boolean(optimisticReceivableId) && belongsToSubmittingBroker && candidate.id === optimisticReceivableId;
+    const belongsToActionOrder = belongsToSubmittingBroker && actionOrderIds.has(String(candidate.orderId || ""));
+    return !isOptimisticReceivable && !belongsToActionOrder;
+  });
+  if (result.receivable) next.receivables.unshift({ ...result.receivable });
+
+  const submittedCustomerIds = new Set(submittedCustomers.map((customer) => customer.id));
+  const submittedCustomerActorIds = new Set(submittedCustomers.map((customer) => customer.actorId));
+  const customerKeys = new Set([
+    ...submittedCustomers.map(brokerSubmitCustomerKey),
+    ...(result.customers || []).map(brokerSubmitCustomerKey)
+  ]);
+  next.savedCustomers = next.savedCustomers.filter((customer) =>
+    !(submittedCustomerIds.has(customer.id) && submittedCustomerActorIds.has(customer.actorId)) &&
+    !customerKeys.has(brokerSubmitCustomerKey(customer))
+  );
+  [...(result.customers || [])].reverse().forEach((customer) => next.savedCustomers.unshift({ ...customer }));
+  next.orderCounter = Math.max(Number(next.orderCounter || 0), Number(result.orderCounter || 0));
+  next.receivableCounter = Math.max(Number(next.receivableCounter || 0), Number(result.receivableCounter || 0));
+  next.customerCounter = Math.max(Number(next.customerCounter || 0), Number(result.customerCounter || 0));
+  next.orderState = result.orderState || result.order.state || "Pending Forward";
+  return next;
+}
+
+async function saveBrokerSubmissionAtomic(
+  state: WorkspaceState,
+  session: UserSession,
+  input: {
+    order: OrderRecord;
+    previousOrder: OrderRecord | null;
+    receivable: ReceivableRecord | null;
+    removeReceivable: boolean;
+    customers: SavedCustomerRecord[];
+  }
+): Promise<WorkspaceState> {
+  if (state.offlineSnapshot) throw new Error("Reconnect to the internet before making financial changes.");
+  const submittedSession = currentWorkspaceSession();
+  const scope = workspaceSnapshotSessionKey(submittedSession);
+  if (!submittedSession || !scope) throw new Error("Sign in before changing this workspace.");
+  if (activeWorkspaceSaveScopes.has(scope)) throw new Error("Another workspace change is still being saved. Try again in a moment.");
+  assertUserSessionIsCurrent(session);
+  const expectedRevision = activeWorkspaceRevision;
+  const generation = ++activeWorkspaceMutationGeneration;
+  activeWorkspaceSaveScopes.add(scope);
+  let fallbackToFullSave = false;
+  try {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        assertWorkspaceRequestSession(submittedSession, generation);
+        assertUserSessionIsCurrent(session);
+        const result = await api<AtomicBrokerSubmitResult>("/api/app-state/submit-order", {
+          method: "POST",
+          body: {
+            attemptId: input.order.routingSubmissionId,
+            order: input.order,
+            previousOrder: input.previousOrder,
+            receivable: input.receivable,
+            removeReceivable: input.removeReceivable,
+            customers: input.customers,
+            orderCounter: state.orderCounter,
+            receivableCounter: state.receivableCounter,
+            customerCounter: state.customerCounter,
+            expectedRevision
+          }
+        });
+        assertWorkspaceRequestSession(submittedSession, generation);
+        assertUserSessionIsCurrent(session);
+        const savedState = result.state
+          ? normalizeState(result.state)
+          : adoptAtomicBrokerSubmit(state, input.order, input.receivable?.id || "", input.customers, result);
+        const synchronized = { ...savedState, offlineSnapshot: false, lastSyncedAt: new Date().toISOString() };
+        await rememberWorkspaceSnapshot(synchronized, result.revision, submittedSession, generation);
+        return synchronized;
+      } catch (error) {
+        assertWorkspaceRequestSession(submittedSession, generation);
+        assertUserSessionIsCurrent(session);
+        const status = Number((error as Error & { status?: number })?.status);
+        if ([404, 405].includes(status)) {
+          fallbackToFullSave = true;
+          break;
+        }
+        if ((Number.isInteger(status) && status >= 400 && status < 500) || attempt === 1) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      }
+    }
+  } finally {
+    activeWorkspaceSaveScopes.delete(scope);
+  }
+  if (fallbackToFullSave) return saveWorkspaceState(state, session);
+  throw new Error("The server did not confirm the exact order that was sent.");
+}
+
 export async function updateWorkspaceState(mutator: (state: WorkspaceState) => void): Promise<WorkspaceState> {
   const state = await loadWorkspaceStateForUpdate();
   mutator(state);
@@ -911,8 +1046,8 @@ function nextSavedCustomerId(state: WorkspaceState): string {
   return `CUST-${state.customerCounter}`;
 }
 
-function upsertSavedCustomer(state: WorkspaceState, actor: ActorRecord | undefined, details: Omit<SavedCustomerRecord, "id" | "actorId" | "updatedAt">): void {
-  if (!actor || (!details.name && !details.accountNumber && !details.phoneNumber && !details.remarks)) return;
+function upsertSavedCustomer(state: WorkspaceState, actor: ActorRecord | undefined, details: Omit<SavedCustomerRecord, "id" | "actorId" | "updatedAt">): SavedCustomerRecord | null {
+  if (!actor || (!details.name && !details.accountNumber && !details.phoneNumber && !details.remarks)) return null;
   const normalizedName = details.name.toLocaleLowerCase();
   const existing = state.savedCustomers.find((customer) =>
     customer.actorId === actor.id &&
@@ -933,10 +1068,11 @@ function upsertSavedCustomer(state: WorkspaceState, actor: ActorRecord | undefin
   };
   if (existing) Object.assign(existing, next);
   else state.savedCustomers.unshift(next);
+  return existing || next;
 }
 
-function rememberOrderCustomers(state: WorkspaceState, actor: ActorRecord | undefined, draft: TransferDraft): void {
-  upsertSavedCustomer(state, actor, {
+function rememberOrderCustomers(state: WorkspaceState, actor: ActorRecord | undefined, draft: TransferDraft): SavedCustomerRecord[] {
+  const sender = upsertSavedCustomer(state, actor, {
     kind: "sender",
     name: draft.senderName.trim(),
     receiverCity: "",
@@ -944,7 +1080,7 @@ function rememberOrderCustomers(state: WorkspaceState, actor: ActorRecord | unde
     phoneNumber: "",
     remarks: ""
   });
-  upsertSavedCustomer(state, actor, {
+  const receiver = upsertSavedCustomer(state, actor, {
     kind: "receiver",
     name: draft.receiverName.trim(),
     receiverCity: draft.receiverCity.trim(),
@@ -952,6 +1088,7 @@ function rememberOrderCustomers(state: WorkspaceState, actor: ActorRecord | unde
     phoneNumber: draft.phoneNumber.trim(),
     remarks: draft.remarks.trim()
   });
+  return [sender, receiver].filter((customer): customer is SavedCustomerRecord => Boolean(customer));
 }
 
 export async function submitTransferOrder(session: UserSession, draft: TransferDraft, editingOrderId = ""): Promise<SubmittedOrder> {
@@ -1031,6 +1168,7 @@ export async function submitTransferOrder(session: UserSession, draft: TransferD
         (existingOrder.brokerActorId ? existingOrder.brokerActorId !== (actor?.id || session.actorId) : existingOrder.broker !== session.actorName))) {
       throw new Error("This returned order is no longer available for modification.");
     }
+    const previousOrder = existingOrder ? { ...existingOrder } : null;
 
     let order: OrderRecord;
     if (unfinished) {
@@ -1157,18 +1295,28 @@ export async function submitTransferOrder(session: UserSession, draft: TransferD
     await persistMobileRoutingAction(session, submittedAttempt);
     persisted = true;
     state.orders = [order, ...state.orders.filter((item) => item.id !== order.id)];
-    rememberOrderCustomers(state, actor, effectiveDraft);
+    const submittedCustomers = rememberOrderCustomers(state, actor, effectiveDraft);
     const existingReceivableIndex = state.receivables.findIndex((item) => item.orderId === order.id);
     const existingReceivable = existingReceivableIndex >= 0 ? state.receivables[existingReceivableIndex] : undefined;
+    let submittedReceivable: ReceivableRecord | null = null;
+    let removeReceivable = false;
     if (effectiveDraft.fundingType === "credit") {
       const receivable = buildReceivable(session, effectiveDraft, order, state, existingReceivable);
+      submittedReceivable = receivable;
       if (existingReceivableIndex >= 0) state.receivables.splice(existingReceivableIndex, 1, receivable);
       else state.receivables.unshift(receivable);
     } else if (existingReceivable && existingReceivable.payments.reduce((sum, payment) => sum + Number(payment.amountMinor || 0), 0) === 0) {
       state.receivables.splice(existingReceivableIndex, 1);
+      removeReceivable = true;
     }
 
-    const savedState = await saveWorkspaceState(state, session);
+    const savedState = await saveBrokerSubmissionAtomic(state, session, {
+      order,
+      previousOrder,
+      receivable: submittedReceivable,
+      removeReceivable,
+      customers: submittedCustomers
+    });
     assertUserSessionIsCurrent(session);
     const acknowledged = savedState.orders.find((candidate) => brokerRoutingOrderMatches(candidate, order));
     if (!acknowledged) throw new Error("The server did not confirm the exact order that was sent.");
