@@ -4,9 +4,22 @@ This is the recommended production migration plan from `data/auth-db.json` to Po
 
 ## Important starting point
 
-`sql/schema.sql` is an architectural prototype, not a complete schema for the current application. It currently lacks workspace scoping and several live concepts, including Special Agents, returned and void-requested order states, receivables and their payments, manual journals, withdrawals, closed reports, saved customers, chats, attachment metadata, and the current authentication/session model.
+`sql/schema.sql` is an architectural prototype, not the production migration. Do not run it against the new Render database.
 
-Running that file unchanged against production data would omit or reject valid records. Expand it through versioned migrations first.
+The versioned schema in `sql/migrations/` and the `pg:*` commands provide the lossless staging importer. They preserve each original record as JSONB, expose indexed transactional fields, keep closed reports immutable, and verify exact reconstruction. They do not switch the live server to PostgreSQL.
+
+## Current safe state
+
+Keep these Render web-service environment variables while the migration is being prepared:
+
+```text
+DATABASE_URL=<Render internal database URL>
+PERSISTENCE_BACKEND=json
+```
+
+Do not add `POSTGRES_CUTOVER_CONFIRMED`, and do not set `PERSISTENCE_BACKEND=postgres`. The server remains on the existing JSON database until the application repository refactor, rehearsal, and final production reconciliation are complete.
+
+The PostgreSQL tools never run from `npm start`. A normal Render deployment therefore cannot import, erase, or switch financial records.
 
 ## Recommended target model
 
@@ -107,6 +120,40 @@ HAVING SUM(CASE direction WHEN 'DEBIT' THEN amount_minor ELSE -amount_minor END)
 3. Keep external database access restricted when it is not needed.
 4. Confirm point-in-time recovery is available and create a logical backup after the rehearsal and after the final import.
 5. A single Node pool is enough initially. Render's integrated PgBouncer can be enabled later if connection metrics show pressure; it uses transaction-level pooling, so avoid session-scoped database features when using its URL.
+
+## Tooling commands
+
+Run schema migrations from the Render web service Shell after deploying the migration-tooling commit:
+
+```bash
+npm run pg:migrate
+```
+
+Create a manifest and validate a JSON backup without writing PostgreSQL:
+
+```bash
+npm run pg:import -- \
+  --source "$DATA_DIR/auth-db.json" \
+  --migration-id rehearsal-YYYYMMDD-HHMM \
+  --dry-run
+```
+
+An actual import requires an explicit empty-target confirmation and still refuses a database containing any previous HaderaPay import:
+
+```bash
+npm run pg:import -- \
+  --source "$DATA_DIR/auth-db.json" \
+  --migration-id rehearsal-YYYYMMDD-HHMM \
+  --confirm-empty-target
+```
+
+Verify PostgreSQL against the exact source backup:
+
+```bash
+npm run pg:verify -- --source "$DATA_DIR/auth-db.json"
+```
+
+Never reuse a migration ID. Never run the actual import against the reserved production database as a rehearsal. Use a separate staging PostgreSQL instance, because the importer intentionally provides no automatic erase or overwrite command.
 
 Current Render references:
 

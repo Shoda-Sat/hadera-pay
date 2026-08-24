@@ -143,3 +143,16 @@ Credit MASTER_CASH
 ```
 
 For Special Brokers, compute the actor account balance by currency and settle only the net position.
+
+## PostgreSQL migration tooling
+
+Production remains on JSON while `PERSISTENCE_BACKEND=json`. The PostgreSQL commands are deliberately separate from `npm start` so a deploy cannot import or switch financial data automatically.
+
+```bash
+npm run pg:migrate
+npm run pg:import -- --source /absolute/path/auth-db.json --migration-id rehearsal-YYYYMMDD --dry-run
+npm run pg:import -- --source /absolute/path/auth-db.json --migration-id rehearsal-YYYYMMDD --confirm-empty-target
+npm run pg:verify -- --source /absolute/path/auth-db.json
+```
+
+The actual import refuses an occupied target database and a repeated migration ID. It also rolls back if any journal/currency group is unbalanced or if reconstruction differs from the source manifest. See `docs/postgresql-migration.md` before running anything except the dry run.

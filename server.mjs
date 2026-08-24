@@ -46,6 +46,13 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 const root = path.dirname(fileURLToPath(import.meta.url));
 const port = Number(process.env.PORT ?? 4173);
 const host = process.env.HOST ?? "0.0.0.0";
+const persistenceBackend = String(process.env.PERSISTENCE_BACKEND || "json").trim().toLowerCase();
+if (!["json", "postgres"].includes(persistenceBackend)) {
+  throw new Error("PERSISTENCE_BACKEND must be either json or postgres.");
+}
+if (persistenceBackend === "postgres") {
+  throw new Error("PostgreSQL cutover is not enabled in this release. Keep PERSISTENCE_BACKEND=json until reconciliation and the repository refactor are complete.");
+}
 const dataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(root, "data");
 const dbPath = path.join(dataDir, "auth-db.json");
 const inviteTtlMs = 1000 * 60 * 60;

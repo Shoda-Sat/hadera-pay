@@ -1,3 +1,5 @@
+-- Architectural prototype only. Do not run this file against production.
+-- Use the reviewed versioned migrations in sql/migrations instead.
 -- HaderaPay immutable double-entry ledger schema.
 -- Monetary values are always integer minor units: cents, satoshis, fils, etc.
 

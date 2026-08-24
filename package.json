@@ -7,13 +7,17 @@
     "dev": "node server.mjs",
     "start": "node server.mjs",
     "test": "node --test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "pg:migrate": "node scripts/postgres-migrate.mjs",
+    "pg:import": "node scripts/postgres-import.mjs",
+    "pg:verify": "node scripts/postgres-verify.mjs"
   },
   "devDependencies": {
     "typescript": "^5.5.4"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1093.0",
-    "@aws-sdk/s3-request-presigner": "^3.1093.0"
+    "@aws-sdk/s3-request-presigner": "^3.1093.0",
+    "pg": "^8.23.0"
   }
 }
