@@ -350,9 +350,14 @@ test("Master Forward uses the atomic endpoint and adopts only its authoritative 
   assert.equal(index, preview, "The served web app and preview must stay byte-identical.");
 
   const queueForward = sectionBetween(index, "function queueRemoteMasterForward", "function clientDeviceId");
+  const apiSource = sectionBetween(index, "async function api", "function normalizedUploadMimeType");
   assert.match(queueForward, /api\(\s*"\/api\/app-state\/forward-order"/,
     "Master Forward must call the dedicated server action.");
   assert.match(queueForward, /method:\s*"POST"/);
+  assert.match(queueForward, /keepalive:\s*true/,
+    "The small forwarding request must be allowed to finish when the Master refreshes immediately after clicking Forward.");
+  assert.match(apiSource, /keepalive:\s*options\.keepalive\s*===\s*true/,
+    "The API wrapper must pass the forwarding keepalive option to the browser request.");
   assert.match(queueForward, /body:\s*\{\s*\.\.\.payload,\s*expectedRevision:\s*remoteStateRevision\s*\}/,
     "The queued action must use the latest known revision only as a synchronization hint.");
   assert.doesNotMatch(queueForward, /body:\s*\{\s*state\b/,
@@ -362,6 +367,10 @@ test("Master Forward uses the atomic endpoint and adopts only its authoritative 
 
   const immediateForward = sectionBetween(index, "async function saveMasterForwardNow", "function orderActionIsOutstanding");
   assert.match(immediateForward, /await\s+queueRemoteMasterForward\(payload\)/);
+  assert.match(immediateForward, /for\s*\(let attempt\s*=\s*0;\s*attempt\s*<\s*2/,
+    "One ambiguous first response must automatically reuse the exact forwarding attempt.");
+  assert.match(immediateForward, /masterForwardErrorIsDefinitive\(error\)\s*\|\|\s*attempt\s*===\s*1/,
+    "Definitive rejections must not be retried, and the automatic retry must stay bounded.");
   assert.match(immediateForward, /\[404,\s*405\][\s\S]*typeof fallbackStateSnapshot\s*===\s*"function"[\s\S]*saveStateNow\(fallbackSnapshot,\s*fallbackConflictResolver\)/,
     "Only an unavailable endpoint may use the legacy full-state compatibility path.");
 
@@ -382,6 +391,44 @@ test("Master Forward uses the atomic endpoint and adopts only its authoritative 
     "The browser may advance its revision only after adopting the authoritative response.");
   assert.match(adoption, /result\.archived\s*===\s*true[\s\S]*state\.orders\s*=\s*state\.orders\.filter[\s\S]*return true/,
     "An idempotent archived acknowledgement must remove its optimistic open copy without recreating a closed order.");
+});
+
+test("Master Forward automatically reuses the same attempt after one ambiguous response", async () => {
+  const index = await readFile(path.join(repositoryRoot, "index.html"), "utf8");
+  const forwardSaveSource = sectionBetween(index, "async function saveMasterForwardNow", "function orderActionIsOutstanding");
+  const buildHarness = new Function(`
+    let currentAuth = { workspace: { id: "WS-1" } };
+    let remoteStateReady = true;
+    let suppressRemoteSave = false;
+    let saveTimer = null;
+    let orderActionDeferredRemoteSave = false;
+    let calls = 0;
+    let fallbackCalls = 0;
+    const submittedPayloads = [];
+    const subscriptionIsReadOnly = () => false;
+    const persistOrderActionStateLocally = () => {};
+    const queueRemoteMasterForward = async (payload) => {
+      calls += 1;
+      submittedPayloads.push(structuredClone(payload));
+      if (calls === 1) throw new Error("The first response was interrupted.");
+      return { ok: true, revision: "revision-2", order: { id: payload.orderId } };
+    };
+    const saveStateNow = async () => { fallbackCalls += 1; return false; };
+    ${forwardSaveSource}
+    return {
+      run: (payload) => saveMasterForwardNow(payload, () => ({ fallback: true }), () => null),
+      result: () => ({ calls, fallbackCalls, submittedPayloads }),
+    };
+  `);
+  const harness = buildHarness();
+  const payload = { orderId: "ORD-1", attemptId: "ROUTE-FORWARD-1", targetActorId: "ACT-1" };
+  const result = await harness.run(payload);
+  assert.equal(result.atomicMasterForward, true);
+  assert.equal(result.order.id, "ORD-1");
+  assert.equal(harness.result().calls, 2);
+  assert.equal(harness.result().fallbackCalls, 0);
+  assert.deepEqual(harness.result().submittedPayloads, [payload, payload],
+    "The automatic second request must reuse the exact order, target, and idempotency token.");
 });
 
 test("a queued generic save cannot absorb a later optimistic forwarding mutation", async () => {
