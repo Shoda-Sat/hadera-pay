@@ -3932,7 +3932,7 @@
   <script>
     let storageKey = "haderapay.local.state.v1";
     let currentAuth = null;
-    const clientReleaseId = "atomic-broker-send-v1";
+    const clientReleaseId = "runtime-memory-safety-v1";
     let currentLoginStartedAt = 0;
     let remoteStateReady = false;
     let remoteStateRevision = "0";
@@ -3942,6 +3942,9 @@
     let saveTimer = null;
     let suppressRemoteSave = false;
     let remoteRefreshTimer = null;
+    let remoteRefreshPending = false;
+    let accountDeviceWarningRefreshPending = false;
+    let lastAccountDeviceWarningRefreshAt = 0;
     let actorPermissionSavePending = 0;
     let inactivityCheckTimer = null;
     let lastSessionActivityPingAt = 0;
@@ -5354,25 +5357,30 @@
 
     async function refreshSharedState() {
       if (!currentAuth || !remoteStateReady) return;
-      refreshAccountDeviceWarning();
-      if (pendingOrderActionSaves.size > 0 || unconfirmedOrderActions.size > 0 || actorPermissionSavePending > 0 || remoteSavePending > 0 || saveTimer !== null || workspaceInputIsFocused()) return;
-      const version = await api("/api/app-state/version").catch(() => null);
-      if (version?.clientReleaseId && version.clientReleaseId !== clientReleaseId) {
-        if (!clientUpdateNoticeShown) {
-          clientUpdateNoticeShown = true;
-          notifyEvent("Update available", "Refresh the page when convenient to load the newest version. Your current work will not be interrupted.");
-        }
-      }
-      if (!version?.revision || String(version.revision) === String(remoteStateRevision)) return;
-      const remote = await api("/api/app-state").catch(() => null);
-      if (pendingOrderActionSaves.size > 0 || unconfirmedOrderActions.size > 0 || actorPermissionSavePending > 0 || remoteSavePending > 0 || saveTimer !== null || workspaceInputIsFocused()) return;
-      if (!mergeSharedState(remote?.state)) return;
-      remoteStateRevision = String(remote?.revision || remote?.state?._syncRevision || remoteStateRevision || "0");
-      suppressRemoteSave = true;
+      if (remoteRefreshPending || pendingOrderActionSaves.size > 0 || unconfirmedOrderActions.size > 0 || actorPermissionSavePending > 0 || remoteSavePending > 0 || saveTimer !== null || workspaceInputIsFocused()) return;
+      remoteRefreshPending = true;
       try {
-        renderAll();
+        if (Date.now() - lastAccountDeviceWarningRefreshAt >= 15000) await refreshAccountDeviceWarning();
+        const version = await api("/api/app-state/version").catch(() => null);
+        if (version?.clientReleaseId && version.clientReleaseId !== clientReleaseId) {
+          if (!clientUpdateNoticeShown) {
+            clientUpdateNoticeShown = true;
+            notifyEvent("Update available", "Refresh the page when convenient to load the newest version. Your current work will not be interrupted.");
+          }
+        }
+        if (!version?.revision || String(version.revision) === String(remoteStateRevision)) return;
+        const remote = await api("/api/app-state").catch(() => null);
+        if (pendingOrderActionSaves.size > 0 || unconfirmedOrderActions.size > 0 || actorPermissionSavePending > 0 || remoteSavePending > 0 || saveTimer !== null || workspaceInputIsFocused()) return;
+        if (!mergeSharedState(remote?.state)) return;
+        remoteStateRevision = String(remote?.revision || remote?.state?._syncRevision || remoteStateRevision || "0");
+        suppressRemoteSave = true;
+        try {
+          renderAll();
+        } finally {
+          suppressRemoteSave = false;
+        }
       } finally {
-        suppressRemoteSave = false;
+        remoteRefreshPending = false;
       }
     }
 
@@ -5401,19 +5409,26 @@
     }
 
     async function refreshAccountDeviceWarning() {
+      if (accountDeviceWarningRefreshPending) return;
       if (!currentAuth || currentAuth.membership?.role === "Owner") {
         showAccountDeviceWarning(null);
         return;
       }
-      const result = await api("/api/auth/device-warning").catch(() => null);
-      if (result) {
-        showAccountDeviceWarning(result.warning);
-        if (currentAuth && result.subscription) {
-          const wasReadOnly = subscriptionIsReadOnly();
-          currentAuth = { ...currentAuth, subscription: result.subscription };
-          renderSubscriptionExpiryWarning();
-          if (wasReadOnly !== subscriptionIsReadOnly()) renderAll();
+      accountDeviceWarningRefreshPending = true;
+      lastAccountDeviceWarningRefreshAt = Date.now();
+      try {
+        const result = await api("/api/auth/device-warning").catch(() => null);
+        if (result) {
+          showAccountDeviceWarning(result.warning);
+          if (currentAuth && result.subscription) {
+            const wasReadOnly = subscriptionIsReadOnly();
+            currentAuth = { ...currentAuth, subscription: result.subscription };
+            renderSubscriptionExpiryWarning();
+            if (wasReadOnly !== subscriptionIsReadOnly()) renderAll();
+          }
         }
+      } finally {
+        accountDeviceWarningRefreshPending = false;
       }
     }
 

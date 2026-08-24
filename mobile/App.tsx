@@ -398,13 +398,16 @@ export default function App() {
   useEffect(() => {
     if (!session || session.role === "Owner") return;
     let mounted = true;
+    let requestPending = false;
     const timer = setInterval(() => {
-      if (AppState.currentState !== "active" || routingActionRef.current || routingActionBusyRef.current) return;
+      if (requestPending || AppState.currentState !== "active" || routingActionRef.current || routingActionBusyRef.current) return;
+      requestPending = true;
       loadWorkspaceStateIfChanged()
         .then((state) => {
           if (mounted && state && !routingActionRef.current && !routingActionBusyRef.current) setWorkspaceState(state);
         })
-        .catch(() => undefined);
+        .catch(() => undefined)
+        .finally(() => { requestPending = false; });
     }, 3000);
     return () => {
       mounted = false;
@@ -418,7 +421,10 @@ export default function App() {
       return;
     }
     let mounted = true;
+    let requestPending = false;
     const refreshWarning = () => {
+      if (requestPending) return;
+      requestPending = true;
       getAccountDeviceWarning()
         .then(({ warning, session: refreshedSession }) => {
           if (!mounted) return;
@@ -438,12 +444,13 @@ export default function App() {
             accountDeviceWarningTimerRef.current = null;
           }, Math.min(60000, remaining));
         })
-        .catch(() => undefined);
+        .catch(() => undefined)
+        .finally(() => { requestPending = false; });
     };
     refreshWarning();
     const interval = setInterval(() => {
       if (AppState.currentState === "active") refreshWarning();
-    }, 3000);
+    }, 15000);
     return () => {
       mounted = false;
       clearInterval(interval);

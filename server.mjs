@@ -1,9 +1,11 @@
 import http from "node:http";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { pipeline } from "node:stream/promises";
 import {
   backfillAllClosedActorOrderSnapshots,
   backfillClosedParticipantOrderSnapshots,
@@ -106,6 +108,13 @@ const attachmentRules = new Map([
   }],
 ]);
 let saveQueue = Promise.resolve();
+let pendingDbWriteCount = 0;
+const maxPendingDbWrites = 3;
+const runtimeSessionActivity = new Map();
+const runtimeSessionActivityRetentionMs = 24 * 60 * 60 * 1000;
+const sessionActivityPersistenceIntervalMs = 5 * 60 * 1000;
+let runtimeApiMetadata = null;
+let runtimeApiMetadataLoad = null;
 const allowedSessionIdleSeconds = new Set([0, 10, 20, 30, 60, 300, 900, 1800, 3600, 7200]);
 const defaultSessionIdleSeconds = 7200;
 const persistentSessionCookieMaxAgeSeconds = 10 * 365 * 24 * 60 * 60;
@@ -158,6 +167,36 @@ async function readPersistedDb() {
     if (error?.code === "ENOENT") return null;
     throw new Error(`The HaderaPay database could not be read safely: ${error instanceof Error ? error.message : "unknown error"}`);
   }
+}
+
+function apiMetadataFromDb(db) {
+  const source = db || blankDb();
+  return {
+    users: (source.users || []).map(({ passwordHash, ...user }) => ({ ...user })),
+    workspaces: (source.workspaces || []).map((workspace) => ({ ...workspace })),
+    memberships: (source.memberships || []).map((membership) => ({ ...membership })),
+    sessions: (source.sessions || []).map((session) => ({ ...session })),
+    appStates: Object.fromEntries(Object.entries(source.appStates || {}).map(([workspaceId, state]) => [
+      workspaceId,
+      { _syncRevision: String(state?._syncRevision || "0") },
+    ])),
+    ownerIdleTimeoutSeconds: source.ownerIdleTimeoutSeconds,
+  };
+}
+
+function rememberRuntimeApiMetadata(db) {
+  runtimeApiMetadata = apiMetadataFromDb(db);
+  return runtimeApiMetadata;
+}
+
+async function loadRuntimeApiMetadata() {
+  if (runtimeApiMetadata) return runtimeApiMetadata;
+  if (!runtimeApiMetadataLoad) {
+    runtimeApiMetadataLoad = readPersistedDb()
+      .then((db) => runtimeApiMetadata || rememberRuntimeApiMetadata(db || blankDb()))
+      .finally(() => { runtimeApiMetadataLoad = null; });
+  }
+  return runtimeApiMetadataLoad;
 }
 
 function mergeRecordsById(existingItems = [], incomingItems = []) {
@@ -263,30 +302,44 @@ async function writePersistedDbAtomic(db) {
   const tempPath = `${dbPath}.${process.pid}.${Date.now()}.tmp`;
   await writeFile(tempPath, JSON.stringify(db, null, 2));
   await rename(tempPath, dbPath);
+  rememberRuntimeApiMetadata(db);
+  markRuntimeSessionsPersisted(db);
 }
 
 function enqueueDbWrite(operation) {
+  if (pendingDbWriteCount >= maxPendingDbWrites) {
+    return Promise.reject(httpError(503, "The database is busy. Please retry this exact action in a moment."));
+  }
+  pendingDbWriteCount += 1;
   const queued = saveQueue.then(operation, operation);
-  saveQueue = queued.then(() => undefined, () => undefined);
-  return queued;
+  const tracked = queued.finally(() => {
+    pendingDbWriteCount = Math.max(0, pendingDbWriteCount - 1);
+  });
+  saveQueue = tracked.then(() => undefined, () => undefined);
+  return tracked;
 }
 
-async function saveDb(db, options = {}) {
-  await enqueueDbWrite(async () => {
+function saveDb(db, options = {}) {
+  const incomingMetadata = { ...(db || blankDb()) };
+  delete incomingMetadata.appStates;
+  const expectedAppStateRevisions = { ...(options.expectedAppStateRevisions || {}) };
+  const appStateUpdates = { ...(options.appStateUpdates || {}) };
+  const replace = options.replace === true;
+  return enqueueDbWrite(async () => {
     const persistedDb = await readPersistedDb();
-    for (const [workspaceId, expectedRevision] of Object.entries(options.expectedAppStateRevisions || {})) {
+    for (const [workspaceId, expectedRevision] of Object.entries(expectedAppStateRevisions)) {
       if (workspaceStateRevision(persistedDb || blankDb(), workspaceId) !== String(expectedRevision || "0")) {
         throw httpError(409, "The workspace changed before this action finished. Refresh and try again.");
       }
     }
-    const nextDb = options.replace === true
+    const nextDb = replace
       ? {
           ...blankDb(),
-          ...db,
+          ...incomingMetadata,
           appStates: { ...(persistedDb?.appStates || {}) },
         }
-      : mergeDatabase(persistedDb, db);
-    for (const [workspaceId, nextState] of Object.entries(options.appStateUpdates || {})) {
+      : mergeDatabase(persistedDb, incomingMetadata);
+    for (const [workspaceId, nextState] of Object.entries(appStateUpdates)) {
       if (nextState === null) delete nextDb.appStates[workspaceId];
       else nextDb.appStates[workspaceId] = nextState;
     }
@@ -857,9 +910,76 @@ function sessionIsExpired(session, now = Date.now()) {
   return Number.isFinite(lastActivityAt) && lastActivityAt > 0 && now - lastActivityAt >= idleMs;
 }
 
+function pruneRuntimeSessionActivity(now = Date.now()) {
+  for (const [sessionId, activity] of runtimeSessionActivity) {
+    if (!activity || now - Number(activity.observedAt || 0) >= runtimeSessionActivityRetentionMs) {
+      runtimeSessionActivity.delete(sessionId);
+    }
+  }
+}
+
+function applyRuntimeSessionActivity(session) {
+  if (!session?.id) return session;
+  const activity = runtimeSessionActivity.get(session.id);
+  if (!activity) return session;
+  const persistedActivity = new Date(session.lastActivityAt || 0).getTime();
+  const runtimeActivity = new Date(activity.lastActivityAt || 0).getTime();
+  if (Number.isFinite(runtimeActivity) && (!Number.isFinite(persistedActivity) || runtimeActivity > persistedActivity)) {
+    session.lastActivityAt = activity.lastActivityAt;
+    session.expiresAt = activity.expiresAt;
+  }
+  if (!session.deviceId && activity.deviceId) session.deviceId = activity.deviceId;
+  return session;
+}
+
+function rememberRuntimeSessionActivity(session, now = Date.now()) {
+  if (!session?.id) return;
+  const previous = runtimeSessionActivity.get(session.id);
+  const previousPersistedAt = Number(previous?.persistedAt || 0);
+  const storedActivityAt = new Date(session.lastActivityAt || 0).getTime();
+  runtimeSessionActivity.set(session.id, {
+    lastActivityAt: session.lastActivityAt || "",
+    expiresAt: session.expiresAt || "",
+    deviceId: session.deviceId || previous?.deviceId || "",
+    observedAt: now,
+    persistedAt: previousPersistedAt || (Number.isFinite(storedActivityAt) ? storedActivityAt : now),
+  });
+}
+
+function runtimeSessionActivityNeedsPersistence(sessionId, now = Date.now()) {
+  const activity = runtimeSessionActivity.get(String(sessionId || ""));
+  return Boolean(activity) && now - Number(activity.persistedAt || 0) >= sessionActivityPersistenceIntervalMs;
+}
+
+function persistRuntimeSessionActivity(sessionId) {
+  return enqueueDbWrite(async () => {
+    const latestDb = await readPersistedDb();
+    if (!latestDb) throw httpError(503, "The session database is unavailable.");
+    const session = latestDb.sessions.find((item) => item.id === sessionId);
+    if (!session) throw httpError(401, "Please log in.");
+    applyRuntimeSessionActivity(session);
+    if (sessionIsExpired(session)) throw httpError(401, "Please log in.");
+    await writePersistedDbAtomic(latestDb);
+  });
+}
+
+function markRuntimeSessionsPersisted(db) {
+  for (const session of Array.isArray(db?.sessions) ? db.sessions : []) {
+    const activity = runtimeSessionActivity.get(session?.id);
+    if (!activity) continue;
+    const persistedAt = new Date(session.lastActivityAt || 0).getTime();
+    const runtimeAt = new Date(activity.lastActivityAt || 0).getTime();
+    if (Number.isFinite(persistedAt) && persistedAt >= runtimeAt) activity.persistedAt = persistedAt;
+  }
+}
+
 function activeSessionRecord(db, sessionId, now = Date.now()) {
   const session = db.sessions.find((item) => item.id === sessionId);
-  return session && !sessionIsExpired(session, now) ? session : null;
+  if (!session) return null;
+  applyRuntimeSessionActivity(session);
+  if (!sessionIsExpired(session, now)) return session;
+  runtimeSessionActivity.delete(session.id);
+  return null;
 }
 
 function touchSession(session, now = Date.now()) {
@@ -868,6 +988,7 @@ function touchSession(session, now = Date.now()) {
   session.idleTimeoutSeconds = idleTimeoutSeconds;
   session.lastActivityAt = timestamp;
   session.expiresAt = idleTimeoutSeconds === 0 ? "" : new Date(now + idleTimeoutSeconds * 1000).toISOString();
+  rememberRuntimeSessionActivity(session, now);
 }
 
 function setSessionCookie(response, session) {
@@ -881,8 +1002,14 @@ function clearSessionCookie(response) {
 }
 
 function purgeExpiredSessions(db) {
+  const now = Date.now();
   const before = db.sessions.length;
-  db.sessions = db.sessions.filter((session) => !sessionIsExpired(session));
+  db.sessions = db.sessions.filter((session) => {
+    applyRuntimeSessionActivity(session);
+    const expired = sessionIsExpired(session, now);
+    if (expired) runtimeSessionActivity.delete(session.id);
+    return !expired;
+  });
   return db.sessions.length !== before;
 }
 
@@ -4735,10 +4862,10 @@ async function requireSession(request, response, db, { touch = true, deferPersis
   const currentDeviceId = requestDeviceId(request);
   const deviceIdAdded = Boolean(sessionRecord && !sessionRecord.deviceId && currentDeviceId);
   if (deviceIdAdded) sessionRecord.deviceId = currentDeviceId;
-  if (touch && !deferPersistence) {
+  if (touch) {
     touchSession(sessionRecord);
     setSessionCookie(response, sessionRecord);
-    await saveDb(db);
+    if (!deferPersistence) await saveDb(db);
   } else if (deviceIdAdded && !deferPersistence) {
     await saveDb(db);
   }
@@ -4771,7 +4898,41 @@ function createSession(db, userId, workspaceId, deviceId = "") {
   return session;
 }
 
+async function handleFastPollingApi(request, response, url) {
+  const method = request.method || "GET";
+  const fastRead = method === "GET" && ["/api/app-state/version", "/api/auth/device-warning"].includes(url.pathname);
+  const fastActivity = method === "POST" && url.pathname === "/api/auth/activity";
+  if (!fastRead && !fastActivity) {
+    return false;
+  }
+  const db = await loadRuntimeApiMetadata();
+  db.sessions.forEach((session) => applyRuntimeSessionActivity(session));
+  const session = await requireSession(request, response, db, { touch: fastActivity, deferPersistence: true });
+  if (!session) return true;
+  if (fastActivity) {
+    request.resume();
+    const sessionId = parseCookies(request).hp_session;
+    if (runtimeSessionActivityNeedsPersistence(sessionId)) await persistRuntimeSessionActivity(sessionId);
+    sendJson(response, 200, { ok: true });
+    return true;
+  }
+  if (url.pathname === "/api/app-state/version") {
+    sendJson(response, 200, {
+      revision: workspaceStateRevision(db, session.workspace.id),
+      clientReleaseId: "runtime-memory-safety-v1",
+    });
+    return true;
+  }
+  const sessionId = parseCookies(request).hp_session;
+  sendJson(response, 200, {
+    warning: accountDeviceLoginWarning(db, activeSessionRecord(db, sessionId)),
+    subscription: session.subscription,
+  });
+  return true;
+}
+
 async function handleApi(request, response, url) {
+  pruneRuntimeSessionActivity();
   const db = await loadDb();
   const method = request.method || "GET";
   const removedExpiredInvites = purgeExpiredInvites(db);
@@ -4989,6 +5150,7 @@ async function handleApi(request, response, url) {
     const sessionId = parseCookies(request).hp_session;
     const nextDb = { ...db, sessions: db.sessions.filter((item) => item.id !== sessionId) };
     await saveDb(nextDb, { replace: true });
+    runtimeSessionActivity.delete(sessionId);
     clearSessionCookie(response);
     sendJson(response, 200, { ok: true });
     return;
@@ -4998,10 +5160,7 @@ async function handleApi(request, response, url) {
     ["/api/app-state", "/api/app-state/version", "/api/auth/device-warning", "/api/files/status"].includes(url.pathname) ||
     /^\/api\/files\/[^/]+\/(?:download-url|content)$/.test(url.pathname)
   );
-  const deferredSessionPersistence = method === "POST" && [
-    "/api/app-state/submit-order",
-    "/api/app-state/forward-order",
-  ].includes(url.pathname);
+  const deferredSessionPersistence = true;
   const session = await requireSession(request, response, db, {
     touch: !backgroundRead,
     deferPersistence: deferredSessionPersistence,
@@ -5154,14 +5313,18 @@ async function handleApi(request, response, url) {
       Key: file.key,
     }));
     if (!storedObject.Body) throw httpError(404, "This attachment is unavailable.");
-    const body = Buffer.from(await storedObject.Body.transformToByteArray());
+    const contentLength = Number(storedObject.ContentLength || file.size || 0);
     response.writeHead(200, {
       "Content-Type": file.mimeType,
-      "Content-Length": body.length,
+      ...(contentLength > 0 ? { "Content-Length": contentLength } : {}),
       "Content-Disposition": `inline; filename="${safeAttachmentFileName(file.fileName)}"`,
       "Cache-Control": "private, no-store",
     });
-    response.end(body);
+    if (typeof storedObject.Body.pipe === "function") {
+      await pipeline(storedObject.Body, response);
+    } else {
+      response.end(Buffer.from(await storedObject.Body.transformToByteArray()));
+    }
     return;
   }
 
@@ -5192,6 +5355,8 @@ async function handleApi(request, response, url) {
   }
 
   if (url.pathname === "/api/auth/activity" && method === "POST") {
+    const sessionId = parseCookies(request).hp_session;
+    if (runtimeSessionActivityNeedsPersistence(sessionId)) await saveDb(db);
     sendJson(response, 200, { ok: true });
     return;
   }
@@ -5573,7 +5738,7 @@ async function handleApi(request, response, url) {
   }
 
   if (url.pathname === "/api/app-state/version" && method === "GET") {
-    sendJson(response, 200, { revision: workspaceStateRevision(db, session.workspace.id), clientReleaseId: "atomic-broker-send-v1" });
+    sendJson(response, 200, { revision: workspaceStateRevision(db, session.workspace.id), clientReleaseId: "runtime-memory-safety-v1" });
     return;
   }
 
@@ -5797,6 +5962,7 @@ const server = http.createServer(async (request, response) => {
   try {
     const url = new URL(request.url ?? "/", `http://${host}:${port}`);
     if (url.pathname.startsWith("/api/")) {
+      if (await handleFastPollingApi(request, response, url)) return;
       await handleApi(request, response, url);
       return;
     }
@@ -5823,12 +5989,18 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
-    const body = await readFile(filePath);
+    const fileStats = await stat(filePath);
+    if (!fileStats.isFile()) throw httpError(404, "Not found");
     response.writeHead(200, {
       "content-type": contentTypes.get(path.extname(filePath)) ?? "application/octet-stream",
+      "content-length": fileStats.size,
     });
-    response.end(body);
+    await pipeline(createReadStream(filePath), response);
   } catch (error) {
+    if (response.headersSent) {
+      response.destroy();
+      return;
+    }
     if (request.url?.startsWith("/api/")) {
       const statusCode = Number(error?.statusCode);
       sendJson(response, Number.isInteger(statusCode) && statusCode >= 400 && statusCode <= 599 ? statusCode : 500, {

@@ -33,6 +33,8 @@ Master can open **Settings > Private File Storage** in either client to verify t
 
 R2 is object storage, not the financial database. Accounts, orders, transfers, journals, and reports remain in the application database and should eventually be migrated to PostgreSQL.
 
+Follow [the staged PostgreSQL migration guide](docs/postgresql-migration.md) before moving production data. The existing `sql/schema.sql` is a prototype and must not be applied to the live JSON database unchanged.
+
 This starter implements the core of a multi-tier payment routing and settlement system around an immutable double-entry ledger.
 
 The design has one non-negotiable rule: financial truth lives in `journal_entries` and `ledger_lines`. Actor balances are derived by summing ledger lines. There is no mutable `balance` column on users, wallets, orders, or transfers.
