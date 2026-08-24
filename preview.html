@@ -4361,7 +4361,9 @@
           actor: archive.kind === "master-transactions" || archive.actor === "Master Transactions"
             ? "Transfer Transactions"
             : archive.actor,
-          orders: Array.isArray(archive.orders) ? archive.orders : [],
+          orders: archive._reportDetailLoaded === false && Array.isArray(archive._orderRefs)
+            ? archive._orderRefs
+            : Array.isArray(archive.orders) ? archive.orders : [],
           receivables: Array.isArray(archive.receivables) ? archive.receivables : [],
           transfers: Array.isArray(archive.transfers) ? archive.transfers : [],
           ledger: Array.isArray(archive.ledger) ? archive.ledger : []
@@ -4664,6 +4666,23 @@
 
     const state = loadState();
 
+    function lightweightReportState(sourceState) {
+      const copy = structuredClone(sourceState || {});
+      copy.archives = (Array.isArray(copy.archives) ? copy.archives : []).map((archive) => {
+        if (!archive?._reportKey) return archive;
+        const { orders, receivables, transfers, ledger, ...summary } = archive;
+        return {
+          ...summary,
+          _reportDetailLoaded: false,
+          orderCount: Number(archive.orderCount ?? orders?.length ?? 0),
+          receivableCount: Number(archive.receivableCount ?? receivables?.length ?? 0),
+          transferCount: Number(archive.transferCount ?? transfers?.length ?? 0),
+          ledgerLineCount: Number(archive.ledgerLineCount ?? ledger?.length ?? 0)
+        };
+      });
+      return copy;
+    }
+
     function assignCurrentMasterTransactionCycle() {
       const cycle = Number(state.masterTransactionCycle || 0);
       state.transfers = state.transfers.map((transfer) =>
@@ -4693,7 +4712,7 @@
     function saveState() {
       if (subscriptionIsReadOnly()) return;
       try {
-        localStorage.setItem(storageKey, JSON.stringify(state));
+        localStorage.setItem(storageKey, JSON.stringify(lightweightReportState(state)));
       } catch {
         // Large proof images can exceed browser storage; keep remote saving alive.
       }
@@ -4717,6 +4736,18 @@
 
     function queueRemoteStateSave(stateSnapshot = null) {
       const submittedState = structuredClone(stateSnapshot || state);
+      submittedState.archives = (Array.isArray(submittedState.archives) ? submittedState.archives : []).map((archive) => {
+        if (!archive?._reportKey) return archive;
+        const { orders, receivables, transfers, ledger, ...summary } = archive;
+        return {
+          ...summary,
+          _reportDetailLoaded: false,
+          orderCount: Number(archive.orderCount ?? orders?.length ?? 0),
+          receivableCount: Number(archive.receivableCount ?? receivables?.length ?? 0),
+          transferCount: Number(archive.transferCount ?? transfers?.length ?? 0),
+          ledgerLineCount: Number(archive.ledgerLineCount ?? ledger?.length ?? 0)
+        };
+      });
       const submittedSession = typeof currentOrderActionSession === "function" ? currentOrderActionSession() : null;
       const submittedStorageKey = storageKey;
       const assertSubmittedSession = () => {
@@ -4739,7 +4770,21 @@
               remoteStateRevision = String(result.revision || result.state?._syncRevision || remoteStateRevision || "0");
               if (result.state) mergeSharedState(result.state);
               try {
-                localStorage.setItem(submittedStorageKey, JSON.stringify(state));
+                localStorage.setItem(submittedStorageKey, JSON.stringify({
+                  ...state,
+                  archives: (Array.isArray(state.archives) ? state.archives : []).map((archive) => {
+                    if (!archive?._reportKey) return archive;
+                    const { orders, receivables, transfers, ledger, ...summary } = archive;
+                    return {
+                      ...summary,
+                      _reportDetailLoaded: false,
+                      orderCount: Number(archive.orderCount ?? orders?.length ?? 0),
+                      receivableCount: Number(archive.receivableCount ?? receivables?.length ?? 0),
+                      transferCount: Number(archive.transferCount ?? transfers?.length ?? 0),
+                      ledgerLineCount: Number(archive.ledgerLineCount ?? ledger?.length ?? 0)
+                    };
+                  })
+                }));
               } catch {
                 // Keep the authoritative remote save even if local storage is full.
               }
@@ -4832,13 +4877,16 @@
 
     async function api(path, options = {}) {
       const method = String(options.method || "GET").toUpperCase();
+      const requestPath = method === "GET" && path === "/api/app-state"
+        ? "/api/app-state?reports=summary"
+        : path;
       const readOnlyWriteAllowed = path === "/api/auth/activity" || path === "/api/auth/logout";
       if (subscriptionIsReadOnly() && method !== "GET" && !readOnlyWriteAllowed) {
         throw new Error(subscriptionReadOnlyMessage());
       }
       let response;
       try {
-        response = await fetch(path, {
+        response = await fetch(requestPath, {
           method,
           headers: { "content-type": "application/json", "x-haderapay-device-id": clientDeviceId() },
           keepalive: options.keepalive === true,
@@ -12007,9 +12055,9 @@
       `;
     }
 
-    function exportArchiveExcel() {
+    async function exportArchiveExcel() {
       if (warnSubscriptionReadOnly()) return;
-      const records = archiveRecordsForExport();
+      const records = await archiveRecordsForExport();
       if (!records.length) return;
       const title = archiveExportTitle();
       const rows = archiveExportRows(records);
@@ -12019,7 +12067,7 @@
 
     async function exportArchivePdf() {
       if (warnSubscriptionReadOnly()) return;
-      const records = archiveRecordsForExport();
+      const records = await archiveRecordsForExport();
       if (!records.length) return;
       const title = archiveExportTitle();
       const options = {
@@ -14224,10 +14272,32 @@
       });
     }
 
-    function archiveRecordsForExport() {
+    async function loadClosedReportDetail(archive) {
+      if (!archive || archive._reportDetailLoaded !== false) return archive;
+      const reportKey = String(archive._reportKey || "");
+      if (!reportKey) throw new Error("This report has no database reference. Refresh and try again.");
+      const result = await api(`/api/closed-reports/${encodeURIComponent(reportKey)}`);
+      const detail = result?.report;
+      if (!detail) throw new Error("The closed report could not be loaded.");
+      const index = state.archives.findIndex((item) =>
+        String(item?._reportKey || "") === reportKey || (detail.id && item?.id === detail.id)
+      );
+      if (index >= 0) state.archives[index] = detail;
+      return detail;
+    }
+
+    async function loadClosedReportsForExport(archives) {
+      const loaded = [];
+      for (const archive of archives) loaded.push(await loadClosedReportDetail(archive));
+      return loaded;
+    }
+
+    async function archiveRecordsForExport() {
       const actor = selectedActor();
       const filters = archiveFilterValues();
-      return sortedArchiveStatements(filteredArchiveStatements(actor, filters))
+      const archives = sortedArchiveStatements(filteredArchiveStatements(actor, filters));
+      const loadedArchives = await loadClosedReportsForExport(archives);
+      return loadedArchives
         .flatMap((archive) => sortedTransactionRows(
           archiveRecordRows(archive, actor, filters),
           els.archiveTransactionSort?.value || "date-desc",
@@ -14279,6 +14349,24 @@
         const actorRows = [`<tr><td colspan="8"><strong>${escapeHtml(actorName)}</strong></td></tr>`];
         sortedArchiveStatements(archives)
           .forEach((archive) => {
+            if (archive._reportDetailLoaded === false) {
+              const summaryCount = Number(archive.orderCount || 0)
+                + Number(archive.receivableCount || 0)
+                + Number(archive.transferCount || 0)
+                + Number(archive.ledgerLineCount || 0);
+              recordCount += summaryCount;
+              actorRows.push(`
+                <tr>
+                  <td colspan="8">
+                    <strong>${escapeHtml(archiveMonthLabel(archiveMonthKey(archive.closedAt)))} closed statement</strong>
+                    - ${escapeHtml(displayDate(archive.closedAt))} - ${escapeHtml(archive.id || "")}
+                    - ${summaryCount} archived row${summaryCount === 1 ? "" : "s"}
+                    <button class="btn secondary open-closed-report" type="button" data-report-key="${escapeHtml(archive._reportKey || "")}">Open report</button>
+                  </td>
+                </tr>
+              `);
+              return;
+            }
             const records = sortedTransactionRows(
               archiveRecordRows(archive, actor, filters),
               els.archiveTransactionSort?.value || "date-desc",
@@ -15483,6 +15571,7 @@
       document.querySelectorAll(".nav button").forEach((button) => button.classList.toggle("active", button.dataset.view === viewId));
       els.pageTitle.textContent = title;
       els.pageSubtitle.textContent = subtitle;
+      if (viewId === "archive") renderArchive();
       if (viewId === "settings" && signedInAsMaster()) refreshR2StorageStatus();
     }
 
@@ -18691,6 +18780,22 @@
     els.exportLedgerPdfButton.addEventListener("click", () => confirmFileExport("PDF", "the current ledger", exportLedgerPdf));
     els.exportArchiveExcelButton.addEventListener("click", () => confirmFileExport("Excel", "the selected report", exportArchiveExcel));
     els.exportArchivePdfButton.addEventListener("click", () => confirmFileExport("PDF", "the selected report", exportArchivePdf));
+    els.archiveRows.addEventListener("click", async (event) => {
+      const button = event.target.closest(".open-closed-report");
+      if (!button) return;
+      const archive = state.archives.find((item) => String(item?._reportKey || "") === String(button.dataset.reportKey || ""));
+      if (!archive) return;
+      button.disabled = true;
+      button.textContent = "Loading...";
+      try {
+        await loadClosedReportDetail(archive);
+        renderArchive();
+      } catch (error) {
+        notifyEvent("Report unavailable", error?.message || "The closed report could not be loaded.");
+        button.disabled = false;
+        button.textContent = "Open report";
+      }
+    });
 
     els.closeMasterTransactionsButton.addEventListener("click", () => {
       if (selectedActor()?.role !== "Master") return;
@@ -18812,7 +18917,6 @@
       renderLedger();
       renderMasterBankAccount();
       renderSettlements();
-      renderArchive();
       const readOnly = subscriptionIsReadOnly();
       [
         els.exportLedgerExcelButton,

@@ -381,6 +381,13 @@ export interface SettlementRecord {
 }
 
 export interface ArchiveRecord {
+  _reportKey?: string;
+  _reportDetailLoaded?: boolean;
+  _orderRefs?: Array<Partial<Pick<OrderRecord, "id" | "internalOrderId" | "collisionSourceOrderId" | "journal">>>;
+  orderCount?: number;
+  receivableCount?: number;
+  transferCount?: number;
+  ledgerLineCount?: number;
   id?: string;
   actor?: string;
   actorId?: string;

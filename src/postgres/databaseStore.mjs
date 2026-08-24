@@ -1,5 +1,4 @@
-import { reconstructDatabaseFromPostgres } from "./importer.mjs";
-import { postgresPool } from "./pool.mjs";
+import { loadRuntimePostgresDatabase } from "./runtimeStore.mjs";
 
 export function selectedPersistenceBackend() {
   const backend = String(process.env.PERSISTENCE_BACKEND || "json").trim().toLowerCase();
@@ -20,10 +19,5 @@ export function assertPostgresCutoverAuthorized() {
 
 export async function loadImportedPostgresDatabase() {
   assertPostgresCutoverAuthorized();
-  const client = await postgresPool().connect();
-  try {
-    return await reconstructDatabaseFromPostgres(client);
-  } finally {
-    client.release();
-  }
+  return loadRuntimePostgresDatabase();
 }

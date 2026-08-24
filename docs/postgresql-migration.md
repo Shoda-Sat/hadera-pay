@@ -6,7 +6,7 @@ This is the recommended production migration plan from `data/auth-db.json` to Po
 
 `sql/schema.sql` is an architectural prototype, not the production migration. Do not run it against the new Render database.
 
-The versioned schema in `sql/migrations/` and the `pg:*` commands provide the lossless staging importer. They preserve each original record as JSONB, expose indexed transactional fields, keep closed reports immutable, and verify exact reconstruction. They do not switch the live server to PostgreSQL.
+The versioned schema in `sql/migrations/`, the `pg:*` commands, and the runtime repository provide the lossless importer and live PostgreSQL persistence. They preserve each original record as JSONB, expose indexed transactional fields, keep closed reports immutable, verify exact reconstruction, and support an explicitly guarded live cutover.
 
 Legacy record IDs remain searchable but are deliberately not unique in staging. Historical counters could reuse values such as `TFR-1`, so each imported row receives a separate internal key based on its source position and content. The importer preserves every collided row exactly and never resolves a collision by deleting or merging financial records.
 
@@ -19,13 +19,20 @@ DATABASE_URL=<Render internal database URL>
 PERSISTENCE_BACKEND=json
 ```
 
-Do not add `POSTGRES_CUTOVER_CONFIRMED`, and do not set `PERSISTENCE_BACKEND=postgres`. The server remains on the existing JSON database until the application repository refactor, rehearsal, and final production reconciliation are complete.
+Do not add `POSTGRES_CUTOVER_CONFIRMED`, and do not set `PERSISTENCE_BACKEND=postgres` until the final production import and reconciliation are complete. During preparation, the server remains on the existing JSON database.
 
-The PostgreSQL tools never run from `npm start`. A normal Render deployment therefore cannot import, erase, or switch financial records.
+The PostgreSQL import and schema tools never run from `npm start`. A normal deployment cannot import or erase financial records. The live server selects PostgreSQL only when both of these exact values are set after reconciliation:
+
+```text
+PERSISTENCE_BACKEND=postgres
+POSTGRES_CUTOVER_CONFIRMED=reconciled-production-import
+```
+
+PostgreSQL runtime writes are transactional and validate workspace revision and journal balance before commit. Existing closed-report rows are never updated or deleted; a transaction may only append a new report.
 
 ## Recommended target model
 
-Every financial row must include `workspace_id`, and legacy JSON identifiers should be preserved in a `legacy_id` column with a unique constraint scoped to the workspace.
+Every financial row includes `workspace_id`, and legacy JSON identifiers are preserved in a searchable `legacy_id` column. Legacy IDs are intentionally non-unique because historical counters produced genuine collisions; PostgreSQL uses collision-safe internal record keys instead.
 
 Create these transactional tables first:
 
@@ -59,15 +66,13 @@ Required database rules:
 - Keep closed reports immutable. Preserve their exact historical snapshot in `jsonb`, with separately indexed actor, cycle and closing timestamps.
 - Add indexes for workspace plus state/date, actor/date, journal/date and order participant lookups.
 
-## Application changes before importing data
+## Implemented application persistence
 
-1. Add the `pg` Node.js driver and create one process-wide connection pool. For the current one-CPU web service, start with a maximum of four database connections.
-2. Add `DATABASE_URL` and `PERSISTENCE_BACKEND=json|postgres`. Never commit a connection URL.
-3. Put persistence behind repository functions instead of reading or writing the database directly from request handlers.
-4. Implement each financial action as one PostgreSQL transaction with row locking where sequencing is required.
-5. Keep the existing atomic Broker-send and Master-forward idempotency tokens as database unique keys.
-6. Add versioned SQL migrations and a `schema_migrations` table. Schema migrations must run as a Render pre-deploy step, not concurrently in every web-service process.
-7. Make `/api/app-state/version` a small indexed query. Paginate orders, ledger lines, messages and reports instead of returning every historical record.
+The application now has one process-wide PostgreSQL pool, guarded JSON/PostgreSQL backend selection, transactional normalized workspace writes, revision locking, balanced-journal validation, and versioned migrations. Normal signed-in reads are scoped to one workspace. `/api/app-state/version` uses lightweight metadata, and normal web/mobile state loads request closed-report summaries only.
+
+Closed-report summaries contain balances, dates, row counts, and minimal order identity references needed to preserve participant-retention safety. They do not contain report transaction details. Web and mobile fetch one full immutable report from `/api/closed-reports/:reportKey` only when it is opened; an export fetches only its currently filtered reports.
+
+Schema migrations must still be run deliberately from the Render Shell before cutover; they are not run concurrently by `npm start`.
 
 ## Build an idempotent importer
 
@@ -176,7 +181,7 @@ Use a maintenance-window cutover for the first migration. It is safer for accoun
 7. Wait for all current JSON writes to finish, then create and hash the final JSON backup.
 8. Import that exact backup into an empty production PostgreSQL database.
 9. Run reconciliation. Do not continue if even one balance, count or closed-report hash differs.
-10. Set `PERSISTENCE_BACKEND=postgres`, deploy, and run smoke tests before reopening writes.
+10. Set `PERSISTENCE_BACKEND=postgres` and `POSTGRES_CUTOVER_CONFIRMED=reconciled-production-import`, deploy, and run smoke tests before reopening writes.
 11. Keep the final JSON backup immutable and private. Do not let the PostgreSQL application continue writing to it.
 
 ## Rollback rule

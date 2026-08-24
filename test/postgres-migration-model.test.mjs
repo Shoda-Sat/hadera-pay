@@ -15,6 +15,11 @@ import {
   assertPostgresCutoverAuthorized,
   selectedPersistenceBackend,
 } from "../src/postgres/databaseStore.mjs";
+import {
+  closedReportSummary,
+  identifyNewImmutableReports,
+  jsonClosedReportKey,
+} from "../src/postgres/runtimeStore.mjs";
 
 function balancedDatabase() {
   return {
@@ -120,6 +125,7 @@ test("PostgreSQL cutover requires both the backend choice and reconciliation con
 test("PostgreSQL schema makes closed reports immutable and keeps transactional indexes", async () => {
   const sql = await readFile(new URL("../sql/migrations/001_lossless_import.sql", import.meta.url), "utf8");
   const collisionMigration = await readFile(new URL("../sql/migrations/002_allow_legacy_id_collisions.sql", import.meta.url), "utf8");
+  const runtimeMigration = await readFile(new URL("../sql/migrations/003_postgres_runtime.sql", import.meta.url), "utf8");
   assert.match(sql, /CREATE TABLE hp_closed_reports/);
   assert.match(sql, /BEFORE UPDATE OR DELETE ON hp_closed_reports/);
   assert.match(sql, /CREATE TABLE hp_ledger_lines/);
@@ -128,10 +134,37 @@ test("PostgreSQL schema makes closed reports immutable and keeps transactional i
   assert.match(collisionMigration, /DROP INDEX IF EXISTS hp_transfers_legacy_id_idx/);
   assert.match(collisionMigration, /CREATE INDEX hp_transfers_legacy_id_idx/);
   assert.doesNotMatch(collisionMigration, /CREATE UNIQUE INDEX/);
+  assert.match(runtimeMigration, /DROP CONSTRAINT IF EXISTS hp_closed_reports_ordinal_check/);
 });
 
-test("the live server refuses an accidental PostgreSQL cutover before repository wiring", async () => {
+test("the live server wires PostgreSQL through the guarded runtime repository", async () => {
   const server = await readFile(new URL("../server.mjs", import.meta.url), "utf8");
-  assert.match(server, /PostgreSQL cutover is not enabled in this release/);
-  assert.match(server, /Keep PERSISTENCE_BACKEND=json/);
+  assert.match(server, /assertPostgresCutoverAuthorized\(\)/);
+  assert.match(server, /loadRuntimePostgresDatabase/);
+  assert.match(server, /saveRuntimePostgresDatabase/);
+  assert.match(server, /url\.searchParams\.get\("reports"\) === "summary"/);
+});
+
+test("closed report summaries omit transaction payloads and immutable rows can only be appended", () => {
+  const report = {
+    id: "ARC-1",
+    actor: "Nahom",
+    orders: [{ id: "ORD-1" }],
+    receivables: [{ id: "REC-1" }],
+    transfers: [{ id: "TFR-1" }],
+    ledger: [{ journal: "JRN-1" }],
+  };
+  const key = jsonClosedReportKey(report, 0);
+  const summary = closedReportSummary(report, key);
+  assert.equal(summary._reportKey, key);
+  assert.equal(summary._reportDetailLoaded, false);
+  assert.equal(summary.orderCount, 1);
+  assert.equal(summary.receivableCount, 1);
+  assert.equal(summary.transferCount, 1);
+  assert.equal(summary.ledgerLineCount, 1);
+  assert.equal(Object.hasOwn(summary, "orders"), false);
+  const existing = [{ payloadSha256: sha256Json(report) }];
+  const incoming = [{ payloadSha256: sha256Json(report) }, { payloadSha256: sha256Json({ id: "ARC-2" }) }];
+  assert.deepEqual(identifyNewImmutableReports(existing, incoming), [incoming[1]]);
+  assert.throws(() => identifyNewImmutableReports(existing, []), /immutable/);
 });

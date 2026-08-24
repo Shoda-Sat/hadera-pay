@@ -21,7 +21,7 @@ test("closed Report repair is guarded, backed up, and Master-only", async () => 
   assert.match(server, /afterPlan\.repairedCount !== 0 \|\| afterPlan\.skippedCount !== 0/);
 
   const backupPosition = server.indexOf("await createOrderArchiveRepairBackup(rawDatabase");
-  const writePosition = server.indexOf("await writePersistedDbAtomic(latestDb)", backupPosition);
+  const writePosition = server.indexOf("await writePersistedDbAtomic(latestDb,", backupPosition);
   assert.ok(backupPosition > 0 && writePosition > backupPosition, "A verified backup must finish before repaired data is written.");
   assert.match(server, /crypto\.scryptSync\(ownerPassword, salt, 32\)/);
   assert.match(server, /crypto\.createCipheriv\("aes-256-gcm"/);

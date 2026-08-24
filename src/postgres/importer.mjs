@@ -21,7 +21,7 @@ function groupByWorkspace(rows) {
   return grouped;
 }
 
-async function insertRows(client, table, columns, rows, valuesForRow) {
+export async function insertRows(client, table, columns, rows, valuesForRow) {
   for (let offset = 0; offset < rows.length; offset += batchSize) {
     const batch = rows.slice(offset, offset + batchSize);
     const values = [];
@@ -36,6 +36,76 @@ async function insertRows(client, table, columns, rows, valuesForRow) {
     });
     await client.query(`INSERT INTO ${table} (${columns.join(", ")}) VALUES ${tuples.join(", ")}`, values);
   }
+}
+
+export async function insertPreparedWorkspace(client, workspace, options = {}) {
+  const includeClosedReports = options.includeClosedReports !== false;
+  await insertRows(client, "hp_actors", [
+    "workspace_id", "record_key", "legacy_id", "ordinal", "actor_name", "actor_role", "base_currency", "payload", "payload_sha256",
+  ], workspace.actors, (row) => [
+    row.workspaceId, row.recordKey, row.legacyId, row.ordinal, row.actorName, row.actorRole, row.baseCurrency,
+    jsonParameter(row.payload), row.payloadSha256,
+  ]);
+  await insertRows(client, "hp_orders", [
+    "workspace_id", "record_key", "legacy_id", "ordinal", "journal", "order_state", "broker_actor_id", "agent_actor_id",
+    "created_at_text", "updated_at_text", "payload", "payload_sha256",
+  ], workspace.orders, (row) => [
+    row.workspaceId, row.recordKey, row.legacyId, row.ordinal, row.journal, row.orderState, row.brokerActorId, row.agentActorId,
+    row.createdAtText, row.updatedAtText, jsonParameter(row.payload), row.payloadSha256,
+  ]);
+  await insertRows(client, "hp_receivables", [
+    "workspace_id", "record_key", "legacy_id", "ordinal", "order_id", "journal", "borrower_actor_id", "created_at_text",
+    "updated_at_text", "payload", "payload_sha256",
+  ], workspace.receivables, (row) => [
+    row.workspaceId, row.recordKey, row.legacyId, row.ordinal, row.orderId, row.journal, row.borrowerActorId, row.createdAtText,
+    row.updatedAtText, jsonParameter(row.payload), row.payloadSha256,
+  ]);
+  await insertRows(client, "hp_transfers", [
+    "workspace_id", "record_key", "legacy_id", "ordinal", "journal", "transfer_state", "from_actor_id", "to_actor_id",
+    "created_at_text", "updated_at_text", "payload", "payload_sha256",
+  ], workspace.transfers, (row) => [
+    row.workspaceId, row.recordKey, row.legacyId, row.ordinal, row.journal, row.transferState, row.fromActorId, row.toActorId,
+    row.createdAtText, row.updatedAtText, jsonParameter(row.payload), row.payloadSha256,
+  ]);
+  await insertRows(client, "hp_journal_entries", [
+    "workspace_id", "journal_entry_key", "journal", "source", "order_id", "transfer_id", "first_ordinal", "metadata",
+  ], workspace.journalEntries, (row) => [
+    row.workspaceId, row.journalEntryKey, row.journal, row.source, row.orderId, row.transferId, row.firstOrdinal,
+    jsonParameter(row.metadata),
+  ]);
+  await insertRows(client, "hp_ledger_lines", [
+    "workspace_id", "journal_entry_key", "record_key", "ordinal", "journal", "source", "order_id", "transfer_id", "actor_id",
+    "account", "direction", "currency", "amount_minor", "posted_at_text", "payload", "payload_sha256",
+  ], workspace.ledgerLines, (row) => [
+    row.workspaceId, row.journalEntryKey, row.recordKey, row.ordinal, row.journal, row.source, row.orderId, row.transferId, row.actorId,
+    row.account, row.direction, row.currency, row.amountMinor, row.postedAtText, jsonParameter(row.payload), row.payloadSha256,
+  ]);
+  if (includeClosedReports) {
+    await insertRows(client, "hp_closed_reports", [
+      "workspace_id", "record_key", "legacy_id", "ordinal", "actor_id", "actor_name", "closed_at_text", "payload", "payload_sha256",
+    ], workspace.closedReports, (row) => [
+      row.workspaceId, row.recordKey, row.legacyId, row.ordinal, row.actorId, row.actorName, row.closedAtText,
+      jsonParameter(row.payload), row.payloadSha256,
+    ]);
+  }
+  await insertRows(client, "hp_saved_customers", [
+    "workspace_id", "record_key", "legacy_id", "ordinal", "actor_id", "updated_at_text", "payload", "payload_sha256",
+  ], workspace.savedCustomers, (row) => [
+    row.workspaceId, row.recordKey, row.legacyId, row.ordinal, row.actorId, row.updatedAtText,
+    jsonParameter(row.payload), row.payloadSha256,
+  ]);
+  await insertRows(client, "hp_master_bank_entries", [
+    "workspace_id", "record_key", "legacy_id", "ordinal", "reference", "currency", "posted_at_text", "payload", "payload_sha256",
+  ], workspace.masterBankEntries, (row) => [
+    row.workspaceId, row.recordKey, row.legacyId, row.ordinal, row.reference, row.currency, row.postedAtText,
+    jsonParameter(row.payload), row.payloadSha256,
+  ]);
+  await insertRows(client, "hp_settlements", [
+    "workspace_id", "record_key", "ordinal", "actor_name", "currency", "net_minor", "payload", "payload_sha256",
+  ], workspace.settlements, (row) => [
+    row.workspaceId, row.recordKey, row.ordinal, row.actorName, row.currency, row.netMinor,
+    jsonParameter(row.payload), row.payloadSha256,
+  ]);
 }
 
 async function assertEmptyImportTarget(client, migrationId) {
@@ -86,70 +156,7 @@ export async function importPreparedDatabase(client, prepared, migrationId, opti
   );
 
   for (const workspace of prepared.workspaces) {
-    await insertRows(client, "hp_actors", [
-      "workspace_id", "record_key", "legacy_id", "ordinal", "actor_name", "actor_role", "base_currency", "payload", "payload_sha256",
-    ], workspace.actors, (row) => [
-      row.workspaceId, row.recordKey, row.legacyId, row.ordinal, row.actorName, row.actorRole, row.baseCurrency,
-      jsonParameter(row.payload), row.payloadSha256,
-    ]);
-    await insertRows(client, "hp_orders", [
-      "workspace_id", "record_key", "legacy_id", "ordinal", "journal", "order_state", "broker_actor_id", "agent_actor_id",
-      "created_at_text", "updated_at_text", "payload", "payload_sha256",
-    ], workspace.orders, (row) => [
-      row.workspaceId, row.recordKey, row.legacyId, row.ordinal, row.journal, row.orderState, row.brokerActorId, row.agentActorId,
-      row.createdAtText, row.updatedAtText, jsonParameter(row.payload), row.payloadSha256,
-    ]);
-    await insertRows(client, "hp_receivables", [
-      "workspace_id", "record_key", "legacy_id", "ordinal", "order_id", "journal", "borrower_actor_id", "created_at_text",
-      "updated_at_text", "payload", "payload_sha256",
-    ], workspace.receivables, (row) => [
-      row.workspaceId, row.recordKey, row.legacyId, row.ordinal, row.orderId, row.journal, row.borrowerActorId, row.createdAtText,
-      row.updatedAtText, jsonParameter(row.payload), row.payloadSha256,
-    ]);
-    await insertRows(client, "hp_transfers", [
-      "workspace_id", "record_key", "legacy_id", "ordinal", "journal", "transfer_state", "from_actor_id", "to_actor_id",
-      "created_at_text", "updated_at_text", "payload", "payload_sha256",
-    ], workspace.transfers, (row) => [
-      row.workspaceId, row.recordKey, row.legacyId, row.ordinal, row.journal, row.transferState, row.fromActorId, row.toActorId,
-      row.createdAtText, row.updatedAtText, jsonParameter(row.payload), row.payloadSha256,
-    ]);
-    await insertRows(client, "hp_journal_entries", [
-      "workspace_id", "journal_entry_key", "journal", "source", "order_id", "transfer_id", "first_ordinal", "metadata",
-    ], workspace.journalEntries, (row) => [
-      row.workspaceId, row.journalEntryKey, row.journal, row.source, row.orderId, row.transferId, row.firstOrdinal,
-      jsonParameter(row.metadata),
-    ]);
-    await insertRows(client, "hp_ledger_lines", [
-      "workspace_id", "journal_entry_key", "record_key", "ordinal", "journal", "source", "order_id", "transfer_id", "actor_id",
-      "account", "direction", "currency", "amount_minor", "posted_at_text", "payload", "payload_sha256",
-    ], workspace.ledgerLines, (row) => [
-      row.workspaceId, row.journalEntryKey, row.recordKey, row.ordinal, row.journal, row.source, row.orderId, row.transferId, row.actorId,
-      row.account, row.direction, row.currency, row.amountMinor, row.postedAtText, jsonParameter(row.payload), row.payloadSha256,
-    ]);
-    await insertRows(client, "hp_closed_reports", [
-      "workspace_id", "record_key", "legacy_id", "ordinal", "actor_id", "actor_name", "closed_at_text", "payload", "payload_sha256",
-    ], workspace.closedReports, (row) => [
-      row.workspaceId, row.recordKey, row.legacyId, row.ordinal, row.actorId, row.actorName, row.closedAtText,
-      jsonParameter(row.payload), row.payloadSha256,
-    ]);
-    await insertRows(client, "hp_saved_customers", [
-      "workspace_id", "record_key", "legacy_id", "ordinal", "actor_id", "updated_at_text", "payload", "payload_sha256",
-    ], workspace.savedCustomers, (row) => [
-      row.workspaceId, row.recordKey, row.legacyId, row.ordinal, row.actorId, row.updatedAtText,
-      jsonParameter(row.payload), row.payloadSha256,
-    ]);
-    await insertRows(client, "hp_master_bank_entries", [
-      "workspace_id", "record_key", "legacy_id", "ordinal", "reference", "currency", "posted_at_text", "payload", "payload_sha256",
-    ], workspace.masterBankEntries, (row) => [
-      row.workspaceId, row.recordKey, row.legacyId, row.ordinal, row.reference, row.currency, row.postedAtText,
-      jsonParameter(row.payload), row.payloadSha256,
-    ]);
-    await insertRows(client, "hp_settlements", [
-      "workspace_id", "record_key", "ordinal", "actor_name", "currency", "net_minor", "payload", "payload_sha256",
-    ], workspace.settlements, (row) => [
-      row.workspaceId, row.recordKey, row.ordinal, row.actorName, row.currency, row.netMinor,
-      jsonParameter(row.payload), row.payloadSha256,
-    ]);
+    await insertPreparedWorkspace(client, workspace);
     await client.query(
       `INSERT INTO hp_workspace_manifests(workspace_id, migration_id, manifest, manifest_sha256)
        VALUES ($1, $2, $3::jsonb, $4)`,
@@ -164,27 +171,50 @@ export async function importPreparedDatabase(client, prepared, migrationId, opti
   );
 }
 
-async function payloadRows(client, table) {
-  const result = await client.query(`SELECT workspace_id, payload FROM ${table} ORDER BY workspace_id, ordinal`);
+async function payloadRows(client, table, workspaceIds = []) {
+  const cleanWorkspaceIds = (workspaceIds || []).map(String).filter(Boolean);
+  const result = cleanWorkspaceIds.length
+    ? await client.query(
+        `SELECT workspace_id, payload FROM ${table} WHERE workspace_id = ANY($1::text[]) ORDER BY workspace_id, ordinal`,
+        [cleanWorkspaceIds]
+      )
+    : await client.query(`SELECT workspace_id, payload FROM ${table} ORDER BY workspace_id, ordinal`);
   return groupByWorkspace(result.rows);
 }
 
-export async function reconstructDatabaseFromPostgres(client) {
+export async function reconstructDatabaseFromPostgres(client, options = {}) {
+  const workspaceIds = (options.workspaceIds || []).map(String).filter(Boolean);
+  const metadataOnly = options.metadataOnly === true;
+  const includeClosedReports = options.includeClosedReports !== false;
   const metadataResult = await client.query("SELECT document FROM hp_database_metadata WHERE singleton = true");
   if (metadataResult.rowCount !== 1) throw new Error("PostgreSQL does not contain exactly one HaderaPay metadata record.");
-  const workspaceResult = await client.query(
-    "SELECT workspace_id, revision, settings, collection_presence, source_sha256 FROM hp_workspace_states ORDER BY workspace_id"
-  );
+  const workspaceResult = workspaceIds.length
+    ? await client.query(
+        "SELECT workspace_id, revision, settings, collection_presence, source_sha256 FROM hp_workspace_states WHERE workspace_id = ANY($1::text[]) ORDER BY workspace_id",
+        [workspaceIds]
+      )
+    : await client.query(
+        "SELECT workspace_id, revision, settings, collection_presence, source_sha256 FROM hp_workspace_states ORDER BY workspace_id"
+      );
+  if (metadataOnly) {
+    return {
+      ...(metadataResult.rows[0].document || {}),
+      appStates: Object.fromEntries(workspaceResult.rows.map((row) => [
+        String(row.workspace_id),
+        { _syncRevision: String(row.revision || "0") },
+      ])),
+    };
+  }
   const [actors, orders, receivables, transfers, ledger, archives, savedCustomers, masterBankEntries, settlements] = await Promise.all([
-    payloadRows(client, "hp_actors"),
-    payloadRows(client, "hp_orders"),
-    payloadRows(client, "hp_receivables"),
-    payloadRows(client, "hp_transfers"),
-    payloadRows(client, "hp_ledger_lines"),
-    payloadRows(client, "hp_closed_reports"),
-    payloadRows(client, "hp_saved_customers"),
-    payloadRows(client, "hp_master_bank_entries"),
-    payloadRows(client, "hp_settlements"),
+    payloadRows(client, "hp_actors", workspaceIds),
+    payloadRows(client, "hp_orders", workspaceIds),
+    payloadRows(client, "hp_receivables", workspaceIds),
+    payloadRows(client, "hp_transfers", workspaceIds),
+    payloadRows(client, "hp_ledger_lines", workspaceIds),
+    includeClosedReports ? payloadRows(client, "hp_closed_reports", workspaceIds) : Promise.resolve(new Map()),
+    payloadRows(client, "hp_saved_customers", workspaceIds),
+    payloadRows(client, "hp_master_bank_entries", workspaceIds),
+    payloadRows(client, "hp_settlements", workspaceIds),
   ]);
   const prepared = {
     metadata: metadataResult.rows[0].document,
@@ -195,7 +225,9 @@ export async function reconstructDatabaseFromPostgres(client) {
         workspaceId,
         revision: String(row.revision || "0"),
         settings: row.settings || {},
-        collectionPresence: row.collection_presence || {},
+        collectionPresence: includeClosedReports
+          ? (row.collection_presence || {})
+          : { ...(row.collection_presence || {}), archives: false },
         actors: wrap(actors),
         orders: wrap(orders),
         receivables: wrap(receivables),

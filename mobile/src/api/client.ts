@@ -294,6 +294,18 @@ function workspaceCacheKey(workspaceId: string): string {
 function cacheableWorkspaceState(state: WorkspaceState): WorkspaceState {
   return {
     ...state,
+    archives: state.archives.map((archive) => {
+      if (!archive._reportKey) return archive;
+      const { orders, receivables, transfers, ledger, ...summary } = archive;
+      return {
+        ...summary,
+        _reportDetailLoaded: false,
+        orderCount: Number(archive.orderCount ?? orders?.length ?? 0),
+        receivableCount: Number(archive.receivableCount ?? receivables?.length ?? 0),
+        transferCount: Number(archive.transferCount ?? transfers?.length ?? 0),
+        ledgerLineCount: Number(archive.ledgerLineCount ?? ledger?.length ?? 0)
+      };
+    }),
     orders: state.orders.map((order) => order.paymentProof ? {
       ...order,
       paymentProof: { ...order.paymentProof, dataUri: "" }
@@ -364,7 +376,9 @@ function archiveSnapshotItemKey(type: ArchiveCollection, item: unknown): string 
 function normalizeArchiveSnapshots(value: ArchiveRecord[] | undefined): ArchiveRecord[] {
   const archives = (Array.isArray(value) ? value : []).map((archive) => ({
     ...archive,
-    orders: Array.isArray(archive.orders) ? archive.orders : [],
+    orders: archive._reportDetailLoaded === false && Array.isArray(archive._orderRefs)
+      ? archive._orderRefs as OrderRecord[]
+      : Array.isArray(archive.orders) ? archive.orders : [],
     receivables: Array.isArray(archive.receivables) ? archive.receivables : [],
     transfers: Array.isArray(archive.transfers) ? archive.transfers : [],
     ledger: Array.isArray(archive.ledger) ? archive.ledger : []
@@ -605,7 +619,7 @@ export async function loadWorkspaceState(): Promise<WorkspaceState> {
   const generation = activeWorkspaceMutationGeneration;
   if (!submittedSession?.workspaceId) throw new Error("Sign in before loading this workspace.");
   try {
-    const result = await api<{ state: WorkspaceState; revision?: string }>("/api/app-state");
+    const result = await api<{ state: WorkspaceState; revision?: string }>("/api/app-state?reports=summary");
     assertWorkspaceRequestSession(submittedSession, generation);
     const state = { ...normalizeState(result.state), offlineSnapshot: false, lastSyncedAt: new Date().toISOString() };
     await rememberWorkspaceSnapshot(state, result.revision, submittedSession, generation);
@@ -622,6 +636,14 @@ export async function loadWorkspaceState(): Promise<WorkspaceState> {
     activeWorkspaceRevision = null;
     return state;
   }
+}
+
+export async function loadClosedReportDetail(reportKey: string): Promise<ArchiveRecord> {
+  const cleanReportKey = String(reportKey || "").trim();
+  if (!cleanReportKey) throw new Error("This report has no database reference. Refresh and try again.");
+  const result = await api<{ report: ArchiveRecord }>(`/api/closed-reports/${encodeURIComponent(cleanReportKey)}`);
+  if (!result.report) throw new Error("The closed report could not be loaded.");
+  return result.report;
 }
 
 export async function loadWorkspaceStateIfChanged(): Promise<WorkspaceState | null> {

@@ -34,6 +34,15 @@ import {
   recoveredOrderMatches,
   removeRecoveredOrderAliases,
 } from "./src/orderIntegrity.mjs";
+import { assertPostgresCutoverAuthorized } from "./src/postgres/databaseStore.mjs";
+import {
+  findJsonClosedReport,
+  getPostgresClosedReport,
+  jsonClosedReportSummaries,
+  listPostgresClosedReportSummaries,
+  loadRuntimePostgresDatabase,
+  saveRuntimePostgresDatabase,
+} from "./src/postgres/runtimeStore.mjs";
 import {
   DeleteObjectCommand,
   GetObjectCommand,
@@ -51,7 +60,7 @@ if (!["json", "postgres"].includes(persistenceBackend)) {
   throw new Error("PERSISTENCE_BACKEND must be either json or postgres.");
 }
 if (persistenceBackend === "postgres") {
-  throw new Error("PostgreSQL cutover is not enabled in this release. Keep PERSISTENCE_BACKEND=json until reconciliation and the repository refactor are complete.");
+  assertPostgresCutoverAuthorized();
 }
 const dataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(root, "data");
 const dbPath = path.join(dataDir, "auth-db.json");
@@ -167,7 +176,14 @@ const blankDb = () => ({
   loginAttempts: {},
 });
 
-async function readPersistedDb() {
+async function readPersistedDb(options = {}) {
+  if (persistenceBackend === "postgres") {
+    try {
+      return { ...blankDb(), ...await loadRuntimePostgresDatabase(options) };
+    } catch (error) {
+      throw new Error(`The HaderaPay PostgreSQL database could not be read safely: ${error instanceof Error ? error.message : "unknown error"}`);
+    }
+  }
   try {
     return { ...blankDb(), ...JSON.parse(await readFile(dbPath, "utf8")) };
   } catch (error) {
@@ -192,14 +208,21 @@ function apiMetadataFromDb(db) {
 }
 
 function rememberRuntimeApiMetadata(db) {
-  runtimeApiMetadata = apiMetadataFromDb(db);
+  const nextMetadata = apiMetadataFromDb(db);
+  if (persistenceBackend === "postgres" && runtimeApiMetadata) {
+    nextMetadata.appStates = {
+      ...(runtimeApiMetadata.appStates || {}),
+      ...(nextMetadata.appStates || {}),
+    };
+  }
+  runtimeApiMetadata = nextMetadata;
   return runtimeApiMetadata;
 }
 
 async function loadRuntimeApiMetadata() {
   if (runtimeApiMetadata) return runtimeApiMetadata;
   if (!runtimeApiMetadataLoad) {
-    runtimeApiMetadataLoad = readPersistedDb()
+    runtimeApiMetadataLoad = readPersistedDb({ metadataOnly: true })
       .then((db) => runtimeApiMetadata || rememberRuntimeApiMetadata(db || blankDb()))
       .finally(() => { runtimeApiMetadataLoad = null; });
   }
@@ -291,9 +314,9 @@ function mergeDatabase(existingDb, incomingDb) {
   };
 }
 
-async function loadDb() {
-  await mkdir(dataDir, { recursive: true });
-  const db = await readPersistedDb();
+async function loadDb(options = {}) {
+  if (persistenceBackend === "json") await mkdir(dataDir, { recursive: true });
+  const db = await readPersistedDb(options);
   if (db) return db;
   try {
     const db = blankDb();
@@ -304,7 +327,13 @@ async function loadDb() {
   }
 }
 
-async function writePersistedDbAtomic(db) {
+async function writePersistedDbAtomic(db, options = {}) {
+  if (persistenceBackend === "postgres") {
+    await saveRuntimePostgresDatabase(db, options);
+    rememberRuntimeApiMetadata(db);
+    markRuntimeSessionsPersisted(db);
+    return;
+  }
   await mkdir(dataDir, { recursive: true });
   const tempPath = `${dbPath}.${process.pid}.${Date.now()}.tmp`;
   await writeFile(tempPath, JSON.stringify(db, null, 2));
@@ -333,7 +362,17 @@ function saveDb(db, options = {}) {
   const appStateUpdates = { ...(options.appStateUpdates || {}) };
   const replace = options.replace === true;
   return enqueueDbWrite(async () => {
-    const persistedDb = await readPersistedDb();
+    const affectedWorkspaceIds = Array.from(new Set([
+      ...Object.keys(expectedAppStateRevisions),
+      ...Object.keys(appStateUpdates),
+    ]));
+    const persistedDb = await readPersistedDb(
+      persistenceBackend === "postgres"
+        ? affectedWorkspaceIds.length
+          ? { workspaceIds: affectedWorkspaceIds }
+          : { metadataOnly: true }
+        : {}
+    );
     for (const [workspaceId, expectedRevision] of Object.entries(expectedAppStateRevisions)) {
       if (workspaceStateRevision(persistedDb || blankDb(), workspaceId) !== String(expectedRevision || "0")) {
         throw httpError(409, "The workspace changed before this action finished. Refresh and try again.");
@@ -350,17 +389,26 @@ function saveDb(db, options = {}) {
       if (nextState === null) delete nextDb.appStates[workspaceId];
       else nextDb.appStates[workspaceId] = nextState;
     }
-    await writePersistedDbAtomic(nextDb);
+    await writePersistedDbAtomic(nextDb, {
+      workspaceIds: Object.keys(appStateUpdates),
+      expectedAppStateRevisions,
+    });
   });
 }
 
 async function mutateLatestWorkspaceStateAtLatest(workspaceId, mutate) {
   return enqueueDbWrite(async () => {
-    const latestDb = await readPersistedDb();
+    const latestDb = await readPersistedDb(
+      persistenceBackend === "postgres" ? { workspaceIds: [workspaceId] } : {}
+    );
     if (!latestDb) throw httpError(503, "The workspace database is unavailable.");
     const currentState = latestDb.appStates?.[workspaceId] || {};
+    const expectedRevision = workspaceStateRevision(latestDb, workspaceId);
     const result = await mutate(latestDb, currentState);
-    await writePersistedDbAtomic(latestDb);
+    await writePersistedDbAtomic(latestDb, {
+      workspaceIds: [workspaceId],
+      expectedAppStateRevisions: { [workspaceId]: expectedRevision },
+    });
     return result;
   });
 }
@@ -960,7 +1008,9 @@ function runtimeSessionActivityNeedsPersistence(sessionId, now = Date.now()) {
 
 function persistRuntimeSessionActivity(sessionId) {
   return enqueueDbWrite(async () => {
-    const latestDb = await readPersistedDb();
+    const latestDb = await readPersistedDb(
+      persistenceBackend === "postgres" ? { metadataOnly: true } : {}
+    );
     if (!latestDb) throw httpError(503, "The session database is unavailable.");
     const session = latestDb.sessions.find((item) => item.id === sessionId);
     if (!session) throw httpError(401, "Please log in.");
@@ -2667,8 +2717,11 @@ async function createOrderArchiveRepairBackup(rawDatabase, { workspaceId, revisi
 
 async function applyOrderArchiveRepair(session, input = {}) {
   return enqueueDbWrite(async () => {
-    const rawDatabase = await readFile(dbPath);
-    const latestDb = { ...blankDb(), ...JSON.parse(rawDatabase.toString("utf8")) };
+    const latestDb = await readPersistedDb(
+      persistenceBackend === "postgres" ? { workspaceIds: [session.workspace.id] } : {}
+    );
+    if (!latestDb) throw httpError(503, "The workspace database is unavailable.");
+    const rawDatabase = Buffer.from(JSON.stringify(latestDb));
     const workspaceId = session.workspace.id;
     const currentState = latestDb.appStates?.[workspaceId] || {};
     const target = orderArchiveRepairTarget(currentState, input);
@@ -2689,7 +2742,10 @@ async function applyOrderArchiveRepair(session, input = {}) {
     latestDb.appStates ||= {};
     latestDb.appStates[workspaceId] = nextState;
     const nextRevision = markWorkspaceStateChanged(latestDb, workspaceId, nextState);
-    await writePersistedDbAtomic(latestDb);
+    await writePersistedDbAtomic(latestDb, {
+      workspaceIds: [workspaceId],
+      expectedAppStateRevisions: { [workspaceId]: revision },
+    });
     return {
       ok: true,
       restoredCount: plan.candidateCount,
@@ -2709,8 +2765,9 @@ async function applyOrderArchiveRepair(session, input = {}) {
 
 async function applyOwnerOrderArchiveRepairs(input = {}) {
   return enqueueDbWrite(async () => {
-    const rawDatabase = await readFile(dbPath);
-    const latestDb = { ...blankDb(), ...JSON.parse(rawDatabase.toString("utf8")) };
+    const latestDb = await readPersistedDb();
+    if (!latestDb) throw httpError(503, "The workspace database is unavailable.");
+    const rawDatabase = Buffer.from(JSON.stringify(latestDb));
     const plan = ownerOrderArchiveRepairPlan(latestDb);
     const expectedCount = Number(input.expectedCount);
     if (!Number.isSafeInteger(expectedCount) || expectedCount <= 0) {
@@ -2741,7 +2798,12 @@ async function applyOwnerOrderArchiveRepairs(input = {}) {
         throw httpError(500, "The restored database did not pass its final idempotency check, so no report data was changed.");
       }
     }
-    await writePersistedDbAtomic(latestDb);
+    await writePersistedDbAtomic(latestDb, {
+      workspaceIds: eligiblePlans.map((workspace) => workspace.workspaceId),
+      expectedAppStateRevisions: Object.fromEntries(
+        eligiblePlans.map((workspace) => [workspace.workspaceId, workspace.revision])
+      ),
+    });
     return {
       ok: true,
       restoredCount: plan.candidateCount,
@@ -4940,8 +5002,39 @@ async function handleFastPollingApi(request, response, url) {
 
 async function handleApi(request, response, url) {
   pruneRuntimeSessionActivity();
-  const db = await loadDb();
   const method = request.method || "GET";
+  const lazyReportRead = method === "GET" && (
+    (url.pathname === "/api/app-state" && url.searchParams.get("reports") === "summary")
+    || /^\/api\/closed-reports\/[^/]+$/.test(url.pathname)
+  );
+  let db;
+  if (persistenceBackend === "postgres") {
+    const metadataDb = await loadDb({ metadataOnly: true });
+    rememberRuntimeApiMetadata(metadataDb);
+    const sessionId = parseCookies(request).hp_session;
+    const requestSession = metadataDb.sessions.find((item) => item.id === sessionId);
+    const ownerRequest = requestSession?.userId === "__owner";
+    const signupNeedsHistoricalIdentityChecks = url.pathname === "/api/auth/signup" && method === "POST";
+    const workspaceLoadsInsideMutation = method === "POST" && [
+      "/api/app-state/submit-order",
+      "/api/app-state/forward-order",
+      "/api/app-state/close-balance",
+    ].includes(url.pathname) || (method === "PUT" && url.pathname === "/api/app-state");
+    if (ownerRequest || signupNeedsHistoricalIdentityChecks) {
+      db = await loadDb(lazyReportRead ? { includeClosedReports: false } : {});
+    } else if (workspaceLoadsInsideMutation) {
+      db = metadataDb;
+    } else if (requestSession?.workspaceId && requestSession.workspaceId !== "__owner") {
+      db = await loadDb({
+        workspaceIds: [requestSession.workspaceId],
+        ...(lazyReportRead ? { includeClosedReports: false } : {}),
+      });
+    } else {
+      db = metadataDb;
+    }
+  } else {
+    db = await loadDb(lazyReportRead ? { includeClosedReports: false } : {});
+  }
   const removedExpiredInvites = purgeExpiredInvites(db);
   const removedExpiredSessions = purgeExpiredSessions(db);
   const addedMissingSubscriptions = ensureMasterSubscriptions(db);
@@ -5082,7 +5175,7 @@ async function handleApi(request, response, url) {
     const rawLogin = String(body.email || body.username || "").trim();
     const rawPassword = String(body.password || "").trim();
     return withLoginOperationLock(rawLogin, async () => {
-      const loginDb = await loadDb();
+      const loginDb = await loadDb(persistenceBackend === "postgres" ? { metadataOnly: true } : {});
       const now = Date.now();
       const { attempt } = activeLoginAttempt(loginDb, rawLogin, now);
       const lockedUntil = new Date(attempt?.lockedUntil || 0).getTime();
@@ -5165,6 +5258,7 @@ async function handleApi(request, response, url) {
 
   const backgroundRead = method === "GET" && (
     ["/api/app-state", "/api/app-state/version", "/api/auth/device-warning", "/api/files/status"].includes(url.pathname) ||
+    /^\/api\/closed-reports\/[^/]+$/.test(url.pathname) ||
     /^\/api\/files\/[^/]+\/(?:download-url|content)$/.test(url.pathname)
   );
   const deferredSessionPersistence = true;
@@ -5818,18 +5912,55 @@ async function handleApi(request, response, url) {
   }
 
   if (url.pathname === "/api/app-state" && method === "GET") {
-    const currentState = db.appStates[session.workspace.id] || {};
+    const persistedState = db.appStates[session.workspace.id] || {};
+    const reportSummaries = url.searchParams.get("reports") === "summary"
+      ? persistenceBackend === "postgres"
+        ? await listPostgresClosedReportSummaries(session.workspace.id)
+        : jsonClosedReportSummaries(persistedState.archives || [])
+      : null;
+    const currentState = reportSummaries
+      ? {
+          ...persistedState,
+          archives: reportSummaries.map((archive) => ({
+            ...archive,
+            orders: Array.isArray(archive._orderRefs) ? archive._orderRefs : [],
+          })),
+        }
+      : persistedState;
+    db.appStates[session.workspace.id] = currentState;
     const state = mergeWorkspaceState(db, session.workspace.id, currentState);
     let revision = workspaceStateRevision(db, session.workspace.id);
-    if (state.__workspaceIsolationRepairApplied === true) {
+    if (!reportSummaries && state.__workspaceIsolationRepairApplied === true) {
       const expectedRevision = revision;
       revision = markWorkspaceStateChanged(db, session.workspace.id, state);
       await saveDb(db, { replace: true, ...workspaceStateSaveOptions(db, session.workspace.id, expectedRevision) });
     }
     sendJson(response, 200, {
-      state: stripRestrictedCreditReminders(state, session),
+      state: stripRestrictedCreditReminders(
+        reportSummaries ? { ...state, archives: reportSummaries } : state,
+        session
+      ),
       revision,
     });
+    return;
+  }
+
+  const closedReportMatch = url.pathname.match(/^\/api\/closed-reports\/([^/]+)$/);
+  if (closedReportMatch && method === "GET") {
+    const reportKey = decodeURIComponent(closedReportMatch[1]);
+    const report = persistenceBackend === "postgres"
+      ? await getPostgresClosedReport(session.workspace.id, reportKey)
+      : findJsonClosedReport(db.appStates?.[session.workspace.id]?.archives || [], reportKey);
+    if (!report) return sendJson(response, 404, { error: "Closed report not found." });
+    if (session.membership.role !== "Master") {
+      const reportActorId = String(report.actorId || "").trim();
+      const reportActorName = String(report.actor || "").trim();
+      const sameActor = reportActorId
+        ? reportActorId === String(session.membership.actorId || "")
+        : reportActorName === String(session.membership.actorName || "");
+      if (!sameActor) return sendJson(response, 403, { error: "You can only open your own closed reports." });
+    }
+    sendJson(response, 200, { report });
     return;
   }
 

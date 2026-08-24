@@ -45,6 +45,7 @@ import {
   getAccountDeviceWarning,
   getLastSessionActivityAt,
   getCurrentSession,
+  loadClosedReportDetail,
   loadWorkspaceState,
   loadWorkspaceStateIfChanged,
   login,
@@ -779,6 +780,7 @@ export default function App() {
               workspaceState={workspaceState}
               stateLoading={stateLoading}
               onRefresh={refreshWorkspace}
+              onState={setWorkspaceState}
             />
           )}
           {orderFlowAllowed && currentScreen === "newOrder" && (
@@ -1173,12 +1175,14 @@ function ArchiveScreen({
   session,
   workspaceState,
   stateLoading,
-  onRefresh
+  onRefresh,
+  onState
 }: {
   session: UserSession;
   workspaceState: WorkspaceState | null;
   stateLoading: boolean;
   onRefresh: () => void;
+  onState: (state: WorkspaceState) => void;
 }) {
   const [selectedMonth, setSelectedMonth] = useState("");
   const [monthMenuOpen, setMonthMenuOpen] = useState(false);
@@ -1189,6 +1193,7 @@ function ArchiveScreen({
   const [statementDetailLimits, setStatementDetailLimits] = useState<Record<string, number>>({});
   const [receivableDetailLimits, setReceivableDetailLimits] = useState<Record<string, number>>({});
   const [pdfExporting, setPdfExporting] = useState(false);
+  const [loadingReports, setLoadingReports] = useState<string[]>([]);
   const archives = visibleArchivesFor(session, workspaceState);
   const months = Array.from(new Set(archives.map((archive) => archiveMonthKey(archive.closedAt)).filter(Boolean))).sort().reverse();
   const activeMonth = months.includes(selectedMonth) ? selectedMonth : "";
@@ -1208,6 +1213,10 @@ function ArchiveScreen({
       return !linkedOrder || !orderRecordIsVoided(linkedOrder);
     })
     .map((receivable) => ({ archive, receivable })));
+  const archivedReceivableCount = filteredArchives.reduce((total, archive) =>
+    total + (archive._reportDetailLoaded === false
+      ? Number(archive.receivableCount || 0)
+      : Number(archive.receivables?.length || 0)), 0);
   const receivableMonths = Array.from(new Set(archivedReceivables.map(({ archive, receivable }) => archiveMonthKey(receivable.archivedAt || archive.closedAt)).filter(Boolean))).sort().reverse();
 
   useEffect(() => {
@@ -1215,10 +1224,45 @@ function ArchiveScreen({
     setReceivableDetailLimits({});
   }, [activeMonth, transactionSort]);
 
-  const toggleStatement = (statementId: string) => {
-    setExpandedStatements((current) => current.includes(statementId)
-      ? current.filter((id) => id !== statementId)
-      : [...current, statementId]);
+  const hydrateReports = async (reports: ArchiveRecord[]): Promise<ArchiveRecord[]> => {
+    if (!workspaceState) return reports;
+    const loadedByKey = new Map<string, ArchiveRecord>();
+    const keys = reports
+      .filter((archive) => archive._reportDetailLoaded === false && archive._reportKey)
+      .map((archive) => String(archive._reportKey));
+    if (keys.length) setLoadingReports((current) => Array.from(new Set([...current, ...keys])));
+    try {
+      for (const archive of reports) {
+        const reportKey = String(archive._reportKey || "");
+        if (archive._reportDetailLoaded === false && reportKey) {
+          loadedByKey.set(reportKey, await loadClosedReportDetail(reportKey));
+        }
+      }
+      if (loadedByKey.size) {
+        onState({
+          ...workspaceState,
+          archives: workspaceState.archives.map((archive) =>
+            loadedByKey.get(String(archive._reportKey || "")) || archive
+          )
+        });
+      }
+      return reports.map((archive) => loadedByKey.get(String(archive._reportKey || "")) || archive);
+    } finally {
+      if (keys.length) setLoadingReports((current) => current.filter((key) => !keys.includes(key)));
+    }
+  };
+
+  const toggleStatement = async (statementId: string, archive: ArchiveRecord) => {
+    if (expandedStatements.includes(statementId)) {
+      setExpandedStatements((current) => current.filter((id) => id !== statementId));
+      return;
+    }
+    try {
+      await hydrateReports([archive]);
+      setExpandedStatements((current) => current.includes(statementId) ? current : [...current, statementId]);
+    } catch (error) {
+      Alert.alert("Report unavailable", error instanceof Error ? error.message : "The closed report could not be loaded.");
+    }
   };
 
   const exportReportPdf = async () => {
@@ -1232,7 +1276,8 @@ function ArchiveScreen({
     setPdfExporting(true);
     try {
       const fontBase64 = await reportPdfFontBase64();
-      const html = buildArchiveReportPdfHtml(title, filteredArchives, workspaceState.actors, session, fontBase64);
+      const loadedArchives = await hydrateReports(filteredArchives);
+      const html = buildArchiveReportPdfHtml(title, loadedArchives, workspaceState.actors, session, fontBase64);
       const result = await Print.printToFileAsync({ html, base64: false });
       if (!(await Sharing.isAvailableAsync())) {
         throw new Error("PDF sharing is unavailable on this device.");
@@ -1320,11 +1365,19 @@ function ArchiveScreen({
         />
       </Panel>
 
-      <Panel title="Collected receivables" badge={String(archivedReceivables.length)} badgeTone="good">
+      <Panel title="Collected receivables" badge={String(archivedReceivableCount)} badgeTone="good">
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={receivablesExpanded ? "Collapse collected receivables" : "Expand collected receivables"}
-          onPress={() => setReceivablesExpanded((current) => !current)}
+          onPress={() => {
+            if (receivablesExpanded) {
+              setReceivablesExpanded(false);
+              return;
+            }
+            void hydrateReports(filteredArchives)
+              .then(() => setReceivablesExpanded(true))
+              .catch((error) => Alert.alert("Report unavailable", error instanceof Error ? error.message : "The closed reports could not be loaded."));
+          }}
           style={styles.archiveToggle}
         >
           <Text style={styles.archiveToggleText}>{receivablesExpanded ? "Hide monthly receivables" : "Show monthly receivables"}</Text>
@@ -1412,7 +1465,9 @@ function ArchiveScreen({
         }).slice().sort((a, b) => transactionSort === "Date"
           ? new Date(b.postedAt || 0).getTime() - new Date(a.postedAt || 0).getTime()
           : referenceCompare(String(a.journal || a.orderId || a.transferId || a.entryId || ""), String(b.journal || b.orderId || b.transferId || b.entryId || "")));
-        const detailCount = orders.length + transfers.length + ledger.length;
+        const detailCount = archive._reportDetailLoaded === false
+          ? Number(archive.orderCount || 0) + Number(archive.transferCount || 0) + Number(archive.ledgerLineCount || 0)
+          : orders.length + transfers.length + ledger.length;
         const detailLimit = statementDetailLimits[statementId] || 30;
         const displayedOrders = orders.slice(0, detailLimit);
         const transferLimit = Math.max(0, detailLimit - displayedOrders.length);
@@ -1457,10 +1512,10 @@ function ArchiveScreen({
             <Pressable
               accessibilityRole="button"
               accessibilityLabel={expanded ? "Hide statement details" : "Show statement details"}
-              onPress={() => toggleStatement(statementId)}
+              onPress={() => void toggleStatement(statementId, archive)}
               style={styles.archiveToggle}
             >
-              <Text style={styles.archiveToggleText}>{expanded ? "Hide details" : `Show details (${detailCount})`}</Text>
+              <Text style={styles.archiveToggleText}>{loadingReports.includes(String(archive._reportKey || "")) ? "Loading report..." : expanded ? "Hide details" : `Show details (${detailCount})`}</Text>
               {expanded ? <ChevronUp size={18} color={colors.accent} /> : <ChevronDown size={18} color={colors.accent} />}
             </Pressable>
 

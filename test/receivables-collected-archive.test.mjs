@@ -190,7 +190,7 @@ test("closed receivable snapshots retain reminders and reports keep them separat
   assert.match(index, /type: "Closed Receivable"[\s\S]*status: voided \? "Voided - Excluded" : "Collected"/);
   assert.match(index, /receivable\.creditReminder \? `Credit Reminder: \$\{receivable\.creditReminder\}` : ""/);
 
-  assert.match(mobileApp, /<Panel title="Collected receivables" badge=\{String\(archivedReceivables\.length\)\} badgeTone="good">/);
+  assert.match(mobileApp, /<Panel title="Collected receivables" badge=\{String\(archivedReceivableCount\)\} badgeTone="good">/);
   assert.match(mobileApp, /receivable\.creditReminder \? <Text style=\{styles\.archiveDetailMeta\}>Credit Reminder: \{receivable\.creditReminder\}<\/Text> : null/);
 });
 

@@ -144,11 +144,11 @@ test("Owner can safely plan and atomically repair closed reports across workspac
   assert.match(server, /\/api\/owner\/repair-order-archives\/plan-all[\s\S]*requireOwner/);
   assert.match(server, /\/api\/owner\/repair-order-archives\/apply-all[\s\S]*requireOwner/);
   assert.match(server, /applyOwnerOrderArchiveRepairs[\s\S]*enqueueDbWrite/);
-  assert.match(server, /readFile\(dbPath\)[\s\S]*planDigest[\s\S]*expectedCount !== plan\.candidateCount/);
+  assert.match(server, /readPersistedDb\(\)[\s\S]*planDigest[\s\S]*expectedCount !== plan\.candidateCount/);
   assert.match(server, /validateWorkspaceWideOrderArchiveRepair[\s\S]*orderArchiveRepairInvariantState/);
   assert.match(server, /beforeOrders[\s\S]*afterOrders\.slice\(0, beforeOrders\.length\)/);
   assert.match(server, /backfillAllClosedActorOrderSnapshots\(result\.state\)[\s\S]*repairedCount !== 0/);
-  assert.match(server, /createOrderArchiveRepairBackup\(rawDatabase[\s\S]*writePersistedDbAtomic\(latestDb\)/);
+  assert.match(server, /createOrderArchiveRepairBackup\(rawDatabase[\s\S]*writePersistedDbAtomic\(latestDb,/);
   assert.match(server, /decipher\.setAuthTag[\s\S]*restoredDatabase\.equals\(rawDatabase\)/);
 
   assert.match(index, /id="ownerOrderArchiveRepairButton"/);
