@@ -258,11 +258,13 @@ test("routing saves submit immutable snapshots and reconcile ambiguous results w
     "An ambiguous write result must be resolved by reading authoritative workspace state.");
 
   const actionSections = [
-    ["Broker Send", sectionBetween(index, 'confirmAction("Send this order to Master for routing?"', "els.cancelTransferEditButton.addEventListener")],
-    ["Master Forward", sectionBetween(index, 'const forwardButton = event.target.closest(".forward-order")', 'const masterReturnButton = event.target.closest(".master-return-order")')],
+    ["Broker Send", sectionBetween(index, 'confirmAction("Send this order to Master for routing?"', "els.cancelTransferEditButton.addEventListener"),
+      /await\s+saveStateNow\(\s*structuredClone\(state\)\s*\)/],
+    ["Master Forward", sectionBetween(index, 'const forwardButton = event.target.closest(".forward-order")', 'const masterReturnButton = event.target.closest(".master-return-order")'),
+      /await\s+saveStateNow\(\s*structuredClone\(state\)\s*,\s*masterForwardConflictResolver\s*\)/],
   ];
-  for (const [label, section] of actionSections) {
-    assert.match(section, /await\s+saveStateNow\(\s*structuredClone\(state\)\s*\)/,
+  for (const [label, section, savePattern] of actionSections) {
+    assert.match(section, savePattern,
       `${label} must submit an immutable point-in-time workspace snapshot.`);
     const saveIndex = matchIndex(section, /await\s+saveStateNow\(/, `${label} save was not found.`);
     const afterSave = section.slice(saveIndex);
@@ -310,6 +312,165 @@ test("routing acknowledgement proves the exact attempt and stale snapshot confli
     "Ambiguous writes must keep checking when an early GET still shows the old order.");
   assert.match(authoritative, /orderForActionId\(remote\.state\.orders,\s*orderId,\s*predicate\)/,
     "Reconciliation must poll for the exact expected attempt, not mere ID presence.");
+});
+
+test("Master Forward rebases only its routing delta after a concurrent Broker save", async () => {
+  const [index, preview] = await Promise.all([
+    readFile(path.join(repositoryRoot, "index.html"), "utf8"),
+    readFile(path.join(repositoryRoot, "preview.html"), "utf8"),
+  ]);
+  assert.equal(index, preview, "The served web app and preview must stay byte-identical.");
+
+  const retrySave = sectionBetween(index, "async function retryStateSnapshotAfterConflict", "function orderActionIsOutstanding");
+  assert.match(retrySave, /for\s*\(let attempt\s*=\s*0;\s*attempt\s*<\s*3/,
+    "A bounded retry should tolerate another revision arriving during the first rebase.");
+  assert.match(retrySave, /const remote\s*=\s*await api\("\/api\/app-state"\)/,
+    "A stale Master snapshot must first load the latest Broker changes.");
+  assert.match(retrySave, /conflictResolver\(remote,\s*attempt\)/,
+    "The latest state must be rebuilt by the action-specific resolver.");
+  assert.match(retrySave, /queueRemoteStateSave\(resolution\.state\)/,
+    "Only the newly rebased snapshot may be submitted after a conflict.");
+
+  const helperSource = sectionBetween(index, "const masterForwardConflictOrderFields", "function rollbackCachedRoutingAction");
+  const resolveMasterForwardConflict = new Function(`
+    const orderForActionId = (orders, id, predicate = () => true) =>
+      (orders || []).find((order) => order?.id === id && predicate(order)) || null;
+    const recoveredOrderMatches = (left, right) => left?.id === right?.id
+      && left?.brokerActorId === right?.brokerActorId
+      && left?.sourceAmountMinor === right?.sourceAmountMinor
+      && left?.payoutAmountMinor === right?.payoutAmountMinor;
+    const masterRoutingCommitted = (candidate, submitted, target) => candidate?.routingForwardAttemptId === submitted?.routingForwardAttemptId
+      && candidate?.agentActorId === target?.id
+      && ["Assigned", "Returned", "Paid", "Void Requested", "Voided"].includes(candidate?.state);
+    ${helperSource}
+    return resolveMasterForwardConflict;
+  `)();
+
+  const previousOrder = {
+    id: "ORD-1",
+    state: "Pending Forward",
+    brokerActorId: "ACT-BROKER",
+    broker: "Broker One",
+    routingSubmissionId: "ROUTE-SEND-1",
+    sourceCurrency: "USD",
+    sourceAmountMinor: 10_000,
+    payoutCurrency: "ETB",
+    payoutAmountMinor: 550_000,
+    receiverName: "Receiver"
+  };
+  const submittedOrder = {
+    ...previousOrder,
+    state: "Assigned",
+    routingForwardAttemptId: "ROUTE-FORWARD-1",
+    agent: "Payer One",
+    agentActorId: "ACT-PAYER",
+    agentOrderNumber: "001_BRK001",
+    agentOrderActor: "Payer One",
+    agentOrderNumbers: { "Payer One": "001_BRK001" },
+    agentOrderNumberCycles: { "Payer One": 0 },
+    forwardedPayoutDivider: 2,
+    assignedAt: "2026-08-24T10:00:00.000Z",
+    updatedAt: "2026-08-24T10:00:00.000Z"
+  };
+  const concurrentBrokerOrder = {
+    id: "ORD-2",
+    state: "Pending Forward",
+    brokerActorId: "ACT-OTHER-BROKER",
+    routingSubmissionId: "ROUTE-SEND-2",
+    sourceAmountMinor: 20_000,
+    payoutAmountMinor: 1_100_000
+  };
+  const remoteState = {
+    orders: [structuredClone(previousOrder), structuredClone(concurrentBrokerOrder)],
+    archives: [],
+    receivables: [
+      { id: "REC-1", orderId: "ORD-1", creditReminder: "new server reminder", agentOrderNumber: "" },
+      { id: "REC-2", orderId: "ORD-2", creditReminder: "concurrent Broker credit" }
+    ],
+    chatConversations: [{
+      id: "CHAT-PAYER",
+      messages: [{ id: "MSG-BROKER", text: "Concurrent Broker message" }]
+    }],
+    orderCounter: 47,
+    messageCounter: 88
+  };
+  const context = {
+    previousOrder,
+    submittedOrder,
+    submittedReceivable: {
+      id: "REC-1",
+      orderId: "ORD-1",
+      creditReminder: "old local reminder",
+      brokerOrderNumber: "BRK001",
+      agentOrderNumber: "001_BRK001",
+      updatedAt: "2026-08-24T10:00:00.000Z"
+    },
+    submittedMessage: {
+      id: "MSG-ROUTE-FORWARD-1",
+      orderId: "ORD-1",
+      text: "Order 001_BRK001 assigned to you."
+    },
+    submittedChat: {
+      id: "CHAT-PAYER",
+      type: "direct",
+      members: ["Master", "Payer One"],
+      messages: []
+    },
+    messageReference: { chatId: "CHAT-PAYER", messageId: "MSG-ROUTE-FORWARD-1" },
+    targetActor: { id: "ACT-PAYER", name: "Payer One" }
+  };
+  const beforeRemote = structuredClone(remoteState);
+  const resolution = resolveMasterForwardConflict({ state: remoteState, revision: "r2" }, context);
+  assert.ok(resolution?.state, "An unchanged pending order should be safely rebased after a Broker save.");
+  assert.deepEqual(remoteState, beforeRemote, "Building the retry must not mutate the authoritative GET response.");
+  assert.deepEqual(resolution.state.orders.find((order) => order.id === "ORD-2"), concurrentBrokerOrder,
+    "The simultaneous Broker order must be preserved byte-for-byte.");
+  assert.equal(resolution.state.orders.find((order) => order.id === "ORD-1").state, "Assigned");
+  assert.equal(resolution.state.orders.find((order) => order.id === "ORD-1").routingForwardAttemptId, "ROUTE-FORWARD-1");
+  assert.equal(resolution.state.orderState, "Assigned");
+  assert.equal(resolution.state.receivables.find((item) => item.id === "REC-1").creditReminder, "new server reminder",
+    "Forwarding must not overwrite a Broker's concurrent credit reminder.");
+  assert.deepEqual(resolution.state.receivables.find((item) => item.id === "REC-2"), remoteState.receivables[1]);
+  assert.deepEqual(resolution.state.chatConversations[0].messages.map((message) => message.id),
+    ["MSG-BROKER", "MSG-ROUTE-FORWARD-1"],
+    "The assignment message must be appended without losing the concurrent Broker message.");
+  assert.equal(resolution.state.orderCounter, 47);
+  assert.equal(resolution.state.messageCounter, 88);
+
+  const withoutExistingChat = resolveMasterForwardConflict({
+    state: { ...structuredClone(remoteState), chatConversations: [] }
+  }, context);
+  assert.deepEqual(withoutExistingChat?.state?.chatConversations?.[0]?.messages?.map((message) => message.id),
+    ["MSG-ROUTE-FORWARD-1"],
+    "A newly created payer chat must carry only the deterministic assignment message into the rebase.");
+
+  const committed = resolveMasterForwardConflict({
+    state: { ...structuredClone(remoteState), orders: [structuredClone(submittedOrder), structuredClone(concurrentBrokerOrder)] }
+  }, context);
+  assert.equal(committed?.acknowledged, true, "The exact already-committed attempt must not be sent twice.");
+
+  const otherMasterWon = resolveMasterForwardConflict({
+    state: {
+      ...structuredClone(remoteState),
+      orders: [{ ...previousOrder, state: "Assigned", routingForwardAttemptId: "OTHER", agentActorId: "ACT-OTHER" }, concurrentBrokerOrder]
+    }
+  }, context);
+  assert.equal(otherMasterWon, null, "A concurrent change to the same order must never be overwritten.");
+
+  const numberCollision = resolveMasterForwardConflict({
+    state: {
+      ...structuredClone(remoteState),
+      orders: [previousOrder, {
+        ...concurrentBrokerOrder,
+        state: "Assigned",
+        agent: "Payer One",
+        agentActorId: "ACT-PAYER",
+        agentOrderNumber: "001_BRK001",
+        agentOrderNumbers: { "Payer One": "001_BRK001" }
+      }]
+    }
+  }, context);
+  assert.equal(numberCollision, null, "A payer-number collision must stay blocked for review.");
 });
 
 test("ordinary saves are deferred while a routing result is pending or unconfirmed", async () => {
