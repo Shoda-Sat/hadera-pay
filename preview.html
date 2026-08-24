@@ -3932,7 +3932,7 @@
   <script>
     let storageKey = "haderapay.local.state.v1";
     let currentAuth = null;
-    const clientReleaseId = "participant-order-retention-v1";
+    const clientReleaseId = "atomic-master-forward-v1";
     let currentLoginStartedAt = 0;
     let remoteStateReady = false;
     let remoteStateRevision = "0";
@@ -4713,7 +4713,7 @@
     }
 
     function queueRemoteStateSave(stateSnapshot = null) {
-      const submittedState = stateSnapshot || state;
+      const submittedState = structuredClone(stateSnapshot || state);
       const submittedSession = typeof currentOrderActionSession === "function" ? currentOrderActionSession() : null;
       const submittedStorageKey = storageKey;
       const assertSubmittedSession = () => {
@@ -4750,6 +4750,32 @@
             }
           }
           throw new Error("The workspace could not be saved.");
+        } finally {
+          remoteSavePending = Math.max(0, remoteSavePending - 1);
+        }
+      });
+      remoteSaveChain = write.catch(() => {});
+      return write;
+    }
+
+    function queueRemoteMasterForward(payload) {
+      const submittedSession = currentOrderActionSession();
+      const assertSubmittedSession = () => {
+        if (orderActionSessionIsCurrent(submittedSession)) return;
+        const error = new Error("The signed-in workspace changed before this forwarding finished.");
+        error.code = "ORDER_ACTION_SESSION_CHANGED";
+        throw error;
+      };
+      const write = remoteSaveChain.then(async () => {
+        assertSubmittedSession();
+        remoteSavePending += 1;
+        try {
+          const result = await api("/api/app-state/forward-order", {
+            method: "POST",
+            body: { ...payload, expectedRevision: remoteStateRevision }
+          });
+          assertSubmittedSession();
+          return result;
         } finally {
           remoteSavePending = Math.max(0, remoteSavePending - 1);
         }
@@ -5593,6 +5619,30 @@
       }
     }
 
+    async function saveMasterForwardNow(payload, fallbackStateSnapshot, fallbackConflictResolver) {
+      if (subscriptionIsReadOnly()) return false;
+      persistOrderActionStateLocally();
+      if (!currentAuth || !remoteStateReady || suppressRemoteSave) return false;
+      if (saveTimer !== null) orderActionDeferredRemoteSave = true;
+      clearTimeout(saveTimer);
+      saveTimer = null;
+      try {
+        const result = await queueRemoteMasterForward(payload);
+        return { ...result, atomicMasterForward: true };
+      } catch (error) {
+        if (![404, 405].includes(Number(error?.status))) throw error;
+        const fallbackSnapshot = typeof fallbackStateSnapshot === "function"
+          ? fallbackStateSnapshot()
+          : fallbackStateSnapshot;
+        return saveStateNow(fallbackSnapshot, fallbackConflictResolver);
+      }
+    }
+
+    function masterForwardErrorIsDefinitive(error) {
+      const status = Number(error?.status);
+      return Number.isInteger(status) && status >= 400 && status < 500;
+    }
+
     function orderActionIsOutstanding() {
       return pendingOrderActionSaves.size > 0 || unconfirmedOrderActions.size > 0;
     }
@@ -5819,6 +5869,113 @@
         order.agentOrderNumber,
         order.agentOrderNumbers?.[targetActor.name]
       ].filter(Boolean).map(String)));
+    }
+
+    function masterForwardExpectedOrderIdentity(order) {
+      const identity = {};
+      [
+        "id",
+        "brokerActorId",
+        "broker",
+        "createdAt",
+        "sentAt",
+        "sourceCurrency",
+        "sourceAmountMinor",
+        "payoutCurrency",
+        "payoutAmountMinor",
+        "receiverName",
+        "accountNumber",
+        "phoneNumber"
+      ].forEach((field) => {
+        if (Object.prototype.hasOwnProperty.call(order || {}, field)) identity[field] = structuredClone(order[field]);
+      });
+      return identity;
+    }
+
+    function removeEmptyOptimisticForwardChat(optimisticMessageReference, authoritativeChat) {
+      if (!optimisticMessageReference?.chatId || !authoritativeChat?.id || optimisticMessageReference.chatId === authoritativeChat.id) return;
+      const optimisticChatIndex = state.chatConversations.findIndex((chat) => chat?.id === optimisticMessageReference.chatId);
+      const optimisticChat = state.chatConversations[optimisticChatIndex];
+      const expectedMembers = new Set((authoritativeChat.members || []).map(String));
+      const optimisticMembers = (optimisticChat?.members || []).map(String);
+      const sameDirectMembers = optimisticChat?.type === "direct" && authoritativeChat.type === "direct" &&
+        optimisticMembers.length === expectedMembers.size && optimisticMembers.every((member) => expectedMembers.has(member));
+      if (optimisticChatIndex >= 0 && sameDirectMembers && (optimisticChat.messages || []).length === 0) {
+        state.chatConversations.splice(optimisticChatIndex, 1);
+      }
+    }
+
+    function adoptAtomicMasterForwardResult(result, optimisticMessageReference, optimisticReceivableId = "") {
+      if (!result?.atomicMasterForward || !result.order?.id || !result.revision) return false;
+      removeOrderActionChatMessage(optimisticMessageReference);
+      if (result.state && !mergeSharedState(result.state)) return false;
+      if (result.archived === true) {
+        const committedAttemptId = String(result.order.routingForwardAttemptId || "");
+        if (committedAttemptId) {
+          state.orders = state.orders.filter((candidate) => String(candidate?.routingForwardAttemptId || "") !== committedAttemptId);
+        }
+        if (optimisticReceivableId) {
+          state.receivables = state.receivables.filter((candidate) => String(candidate?.id || "") !== String(optimisticReceivableId));
+        }
+        removeEmptyOptimisticForwardChat(optimisticMessageReference, result.chat);
+        remoteStateRevision = String(result.revision);
+        persistOrderActionStateLocally();
+        return true;
+      }
+
+      const committedAttemptId = String(result.order.routingForwardAttemptId || "");
+      let orderIndex = committedAttemptId
+        ? state.orders.findIndex((candidate) => String(candidate?.routingForwardAttemptId || "") === committedAttemptId)
+        : -1;
+      if (orderIndex < 0) {
+        orderIndex = state.orders.findIndex((candidate) =>
+          String(candidate?.id || "") === String(result.order.id || "") && recoveredOrderMatches(candidate, result.order)
+        );
+      }
+      if (orderIndex >= 0) state.orders[orderIndex] = structuredClone(result.order);
+      else state.orders.push(structuredClone(result.order));
+
+      if (result.receivable === null && optimisticReceivableId) {
+        state.receivables = state.receivables.filter((candidate) => String(candidate?.id || "") !== String(optimisticReceivableId));
+      } else if (result.receivable?.id) {
+        let receivableIndex = state.receivables.findIndex((candidate) => candidate?.id === result.receivable.id);
+        if (receivableIndex < 0) {
+          const orderReceivables = state.receivables
+            .map((candidate, index) => ({ candidate, index }))
+            .filter(({ candidate }) => candidate?.orderId === result.receivable.orderId);
+          if (orderReceivables.length === 1) receivableIndex = orderReceivables[0].index;
+        }
+        if (receivableIndex >= 0) state.receivables[receivableIndex] = structuredClone(result.receivable);
+        else state.receivables.push(structuredClone(result.receivable));
+      }
+
+      if (result.chat?.id) {
+        if (result.message?.id) {
+          state.chatConversations.forEach((chat) => {
+            chat.messages = (chat.messages || []).filter((message) => message?.id !== result.message.id);
+          });
+        }
+        let chat = state.chatConversations.find((candidate) => candidate?.id === result.chat.id);
+        if (!chat) {
+          chat = { ...structuredClone(result.chat), messages: [] };
+          state.chatConversations.push(chat);
+        } else {
+          const messages = chat.messages || [];
+          Object.assign(chat, structuredClone(result.chat), { messages });
+        }
+        if (result.message?.id) {
+          chat.messages.push(structuredClone(result.message));
+          chat.messages.sort((left, right) => new Date(left.createdAt || 0).getTime() - new Date(right.createdAt || 0).getTime());
+        }
+      }
+
+      removeEmptyOptimisticForwardChat(optimisticMessageReference, result.chat);
+
+      state.chatCounter = Math.max(Number(state.chatCounter || 0), Number(result.chatCounter || 0));
+      state.orderState = result.orderState || result.order.state || "Assigned";
+      remoteStateRevision = String(result.revision);
+      persistOrderActionStateLocally();
+      return true;
     }
 
     function resolveMasterForwardConflict(remote, context) {
@@ -17907,13 +18064,41 @@
             messageReference,
             targetActor
           });
-          let saveAcknowledged = await saveStateNow(structuredClone(state), masterForwardConflictResolver);
-          if (!orderActionSessionIsCurrent(actionSession)) return;
-          let committedOrder = orderForActionId(
-            saveAcknowledged?.state?.orders,
-            order.id,
-            (candidate) => masterRoutingCommitted(candidate, order, targetActor, false)
+          const masterForwardRequest = {
+            orderId: orderSnapshot.record?.id || order.id,
+            targetActorId: targetActor.id,
+            attemptId: routingForwardAttemptId,
+            preferredChatId: messageReference?.chatId || "",
+            expectedRoutingSubmissionId: orderSnapshot.record?.routingSubmissionId || "",
+            expectedOrderUpdatedAt: orderSnapshot.record?.updatedAt || "",
+            expectedOrder: masterForwardExpectedOrderIdentity(orderSnapshot.record || order),
+            payoutDivider: dividerText ? forwardedDivider : null,
+            payoutPercent: percentText ? forwardedPercent : null
+          };
+          let saveAcknowledged = await saveMasterForwardNow(
+            masterForwardRequest,
+            () => structuredClone(state),
+            masterForwardConflictResolver
           );
+          if (!orderActionSessionIsCurrent(actionSession)) return;
+          const atomicForward = saveAcknowledged?.atomicMasterForward === true;
+          let committedOrder = atomicForward
+            ? (masterRoutingCommitted(saveAcknowledged?.order, order, targetActor, true) ? saveAcknowledged.order : null)
+            : orderForActionId(
+              saveAcknowledged?.state?.orders,
+              order.id,
+              (candidate) => masterRoutingCommitted(candidate, order, targetActor, false)
+            );
+          if (committedOrder && atomicForward) {
+            if (!adoptAtomicMasterForwardResult(saveAcknowledged, messageReference, updatedReceivable?.id || "")) committedOrder = null;
+            else {
+              committedOrder = orderForActionId(
+                state.orders,
+                committedOrder.id,
+                (candidate) => masterRoutingCommitted(candidate, order, targetActor, true)
+              ) || committedOrder;
+            }
+          }
           saveAcknowledged = Boolean(committedOrder);
           if (!saveAcknowledged) {
             const verification = await authoritativeOrderActionState(
@@ -17959,8 +18144,21 @@
         } catch (error) {
           if (!orderActionSessionIsCurrent(actionSession)) return;
           if (localMutationApplied) rollbackLocalAction();
-          if (saveAttempted && !actionConfirmed) unconfirmedOrderActions.add(actionKey);
-          else masterRoutingRetryAttempts.delete(order.id);
+          if (masterForwardErrorIsDefinitive(error)) {
+            localMutationApplied = false;
+            unconfirmedOrderActions.delete(actionKey);
+            masterRoutingRetryAttempts.delete(order.id);
+            clearRoutingActionOutbox(routingForwardAttemptId);
+            if (Number(error?.status) === 409) {
+              const remote = await api("/api/app-state").catch(() => null);
+              if (!orderActionSessionIsCurrent(actionSession)) return;
+              if (remote?.state && adoptAuthoritativeOrderActionState(remote)) persistOrderActionStateLocally();
+            }
+          } else if (saveAttempted && !actionConfirmed) {
+            unconfirmedOrderActions.add(actionKey);
+          } else {
+            masterRoutingRetryAttempts.delete(order.id);
+          }
           notifyEvent("Order not forwarded", error?.message || (saveAttempted
             ? "Forwarding was not confirmed. Keep this page open and retry after the connection returns."
             : "The forwarding could not be prepared. The order is still ready to forward; please retry."));

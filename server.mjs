@@ -294,17 +294,24 @@ async function saveDb(db, options = {}) {
   });
 }
 
-async function mutateLatestWorkspaceState(workspaceId, expectedRevision, mutate) {
+async function mutateLatestWorkspaceStateAtLatest(workspaceId, mutate) {
   return enqueueDbWrite(async () => {
     const latestDb = await readPersistedDb();
     if (!latestDb) throw httpError(503, "The workspace database is unavailable.");
+    const currentState = latestDb.appStates?.[workspaceId] || {};
+    const result = await mutate(latestDb, currentState);
+    await writePersistedDbAtomic(latestDb);
+    return result;
+  });
+}
+
+async function mutateLatestWorkspaceState(workspaceId, expectedRevision, mutate) {
+  return mutateLatestWorkspaceStateAtLatest(workspaceId, async (latestDb, currentState) => {
     const actualRevision = workspaceStateRevision(latestDb, workspaceId);
     if (String(expectedRevision || "") !== actualRevision) {
       throw httpError(409, "The workspace changed before this action finished. Refresh and try again.");
     }
-    const result = await mutate(latestDb, latestDb.appStates?.[workspaceId] || {});
-    await writePersistedDbAtomic(latestDb);
-    return result;
+    return mutate(latestDb, currentState);
   });
 }
 
@@ -3849,6 +3856,501 @@ function sanitizeIncomingWorkspaceState(state, session, db) {
   return sanitized;
 }
 
+const masterForwardPayoutRoles = new Set(["Agent", "Special Agent", "Special Broker"]);
+const masterForwardAdvancedStates = new Set(["Assigned", "Returned", "Paid", "Void Requested", "Voided"]);
+
+function masterForwardActorCanPayoutCurrency(actor, currency) {
+  if (!actor || actor.active === false || !masterForwardPayoutRoles.has(String(actor.role || ""))) return false;
+  if (["Special Agent", "Special Broker"].includes(String(actor.role || ""))) {
+    return (Array.isArray(actor.workingCurrencies) ? actor.workingCurrencies : [actor.currency]).includes(currency);
+  }
+  return actor.currency === currency;
+}
+
+function masterForwardOrderRecords(state = {}) {
+  return [
+    ...(Array.isArray(state.orders) ? state.orders : []).map((order) => ({ order, current: true, closedAt: "" })),
+    ...(Array.isArray(state.archives) ? state.archives : []).flatMap((archive) =>
+      (Array.isArray(archive?.orders) ? archive.orders : []).map((order) => ({
+        order,
+        current: false,
+        closedAt: archive.closedAt || order?.archivedAt || "",
+      }))
+    ),
+  ];
+}
+
+function masterForwardLatestActorClose(state, actorName) {
+  return (Array.isArray(state.archives) ? state.archives : [])
+    .filter((archive) => archive?.actor === actorName)
+    .reduce((latest, archive) => {
+      const time = new Date(archive?.closedAt || 0).getTime();
+      return Number.isFinite(time) ? Math.max(latest, time) : latest;
+    }, 0);
+}
+
+function masterForwardOrderRecordCounts(state, record, actorName) {
+  if (record.current) return true;
+  if (record.order?.state === "Voided" || record.order?.voidedAt || record.order?.voidJournal) return true;
+  const latestClose = masterForwardLatestActorClose(state, actorName);
+  if (!latestClose) return true;
+  const recordClose = new Date(record.closedAt || record.order?.archivedAt || 0).getTime();
+  return Number.isFinite(recordClose) && recordClose > latestClose;
+}
+
+function masterForwardAgentNumbersForActor(order, actorName) {
+  const numbers = [];
+  if (order?.agentOrderNumbers && typeof order.agentOrderNumbers === "object" && order.agentOrderNumbers[actorName]) {
+    numbers.push(order.agentOrderNumbers[actorName]);
+  }
+  if ((order?.agentOrderActor === actorName || order?.agent === actorName) && order?.agentOrderNumber) {
+    numbers.push(order.agentOrderNumber);
+  }
+  return Array.from(new Set(numbers.map((value) => String(value || "").trim()).filter(Boolean)));
+}
+
+function masterForwardActorOrderReferences(state, actor) {
+  const actorName = actor.name;
+  const numberingCycle = Math.max(0, Math.floor(Number(actor.numberingCycle || 0)));
+  const references = [];
+  masterForwardOrderRecords(state).forEach((record) => {
+    if (!masterForwardOrderRecordCounts(state, record, actorName)) return;
+    const order = record.order || {};
+    const postedAt = order.paidAt || order.assignedAt || order.sentAt || order.createdAt || record.closedAt || "";
+    const isBroker = actor.id && order.brokerActorId
+      ? order.brokerActorId === actor.id
+      : order.broker === actorName;
+    if (isBroker && Number(order.brokerOrderNumberCycle || 0) === numberingCycle) {
+      const brokerNumber = String(order.brokerOrderNumber || order.id || "").trim();
+      if (brokerNumber) references.push({ reference: brokerNumber, postedAt });
+    }
+    if (Number(order.agentOrderNumberCycles?.[actorName] || 0) === numberingCycle) {
+      masterForwardAgentNumbersForActor(order, actorName)
+        .forEach((reference) => references.push({ reference, postedAt }));
+    }
+  });
+  return references;
+}
+
+function masterForwardLedgerSequenceDetails(reference, actor) {
+  const leading = String(reference || "").match(/^(\d+)_/);
+  if (leading) return { value: Number(leading[1]), width: leading[1].length };
+  const prefix = brokerCodeForActor(actor).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const broker = String(reference || "").match(new RegExp(`^${prefix}(\\d+)$`, "i"));
+  return broker ? { value: Number(broker[1]), width: broker[1].length } : null;
+}
+
+function masterForwardUsedActorSequences(state, actor) {
+  const used = new Set();
+  masterForwardActorOrderReferences(state, actor).forEach(({ reference }) => {
+    const details = masterForwardLedgerSequenceDetails(reference, actor);
+    if (details && Number.isFinite(details.value) && details.value > 0) used.add(details.value);
+  });
+  (Array.isArray(state.ledger) ? state.ledger : [])
+    .filter((line) =>
+      line?.archived !== true &&
+      line.source !== "TRANSFER_REVERSAL" &&
+      (line.account === actor.name || line.account === `${actor.name} ACTOR_CLEARING`)
+    )
+    .forEach((line) => {
+      const match = String(line.actorLedgerNumber || "").match(/^(\d+)_/);
+      if (match) used.add(Number(match[1]));
+    });
+  return used;
+}
+
+function masterForwardActorSequenceWidth(state, actor) {
+  const ledgerWidth = (Array.isArray(state.ledger) ? state.ledger : [])
+    .filter((line) =>
+      line?.archived !== true &&
+      (line.account === actor.name || line.account === `${actor.name} ACTOR_CLEARING`)
+    )
+    .map((line) => String(line.actorLedgerNumber || "").match(/^(\d+)_/)?.[1]?.length || 0)
+    .find((width) => width > 0);
+  if (ledgerWidth) return ledgerWidth;
+  const latestReference = masterForwardActorOrderReferences(state, actor)
+    .map((item) => ({ ...item, details: masterForwardLedgerSequenceDetails(item.reference, actor) }))
+    .filter((item) => item.details)
+    .sort((left, right) => new Date(right.postedAt || 0).getTime() - new Date(left.postedAt || 0).getTime())[0];
+  return latestReference ? Math.max(1, latestReference.details.width) : 4;
+}
+
+function assignMasterForwardAgentNumber(state, order, actor) {
+  const actorName = actor.name;
+  const numberingCycle = Math.max(0, Math.floor(Number(actor.numberingCycle || 0)));
+  const numbers = order.agentOrderNumbers && typeof order.agentOrderNumbers === "object"
+    ? { ...order.agentOrderNumbers }
+    : {};
+  const cycles = order.agentOrderNumberCycles && typeof order.agentOrderNumberCycles === "object"
+    ? { ...order.agentOrderNumberCycles }
+    : {};
+  if (order.agentOrderNumber && order.agentOrderActor && !numbers[order.agentOrderActor]) {
+    numbers[order.agentOrderActor] = order.agentOrderNumber;
+  }
+  if (!numbers[actorName] || Number(cycles[actorName] || 0) !== numberingCycle) {
+    const used = masterForwardUsedActorSequences(state, actor);
+    const nextSequence = Math.max(0, ...used) + 1;
+    const brokerNumber = String(order.brokerOrderNumber || order.id || "");
+    numbers[actorName] = `${String(nextSequence).padStart(masterForwardActorSequenceWidth(state, actor), "0")}_${brokerNumber}`;
+    cycles[actorName] = numberingCycle;
+  }
+  order.agentOrderNumbers = numbers;
+  order.agentOrderNumberCycles = cycles;
+  order.agentOrderNumber = numbers[actorName];
+  order.agentOrderActor = actorName;
+}
+
+function parseMasterForwardPayoutTerm(value, field) {
+  if (value === null || value === undefined || value === "") return null;
+  const numeric = Number(value);
+  const valid = field === "divider" ? numeric > 0 : numeric >= 0;
+  if (!Number.isFinite(numeric) || !valid) {
+    throw httpError(400, field === "divider"
+      ? "The payout divisor must be greater than zero."
+      : "The payer percentage must be zero or greater.");
+  }
+  return numeric;
+}
+
+function masterForwardTermsMatch(order, divider, percent) {
+  const dividerMatches = divider === null
+    ? !Object.prototype.hasOwnProperty.call(order || {}, "forwardedPayoutDivider")
+    : Number(order?.forwardedPayoutDivider) === divider;
+  const percentMatches = percent === null
+    ? !Object.prototype.hasOwnProperty.call(order || {}, "forwardedPayoutPercent")
+    : Number(order?.forwardedPayoutPercent) === percent;
+  return dividerMatches && percentMatches;
+}
+
+function masterForwardExpectedIdentity(body) {
+  const expected = body?.expectedOrder;
+  return expected && typeof expected === "object" && !Array.isArray(expected) ? expected : null;
+}
+
+function findMasterForwardOrderIndex(state, orderId, expectedOrder) {
+  const orders = Array.isArray(state.orders) ? state.orders : [];
+  const candidates = orders
+    .map((order, index) => ({ order, index }))
+    .filter(({ order }) => [order?.id, order?.internalOrderId, order?.collisionSourceOrderId]
+      .some((value) => String(value || "") === orderId));
+  if (candidates.length === 1 && (!expectedOrder || recoveredOrderMatches(candidates[0].order, expectedOrder))) {
+    return candidates[0].index;
+  }
+  const matched = expectedOrder ? candidates.filter(({ order }) => recoveredOrderMatches(order, expectedOrder)) : [];
+  return matched.length === 1 ? matched[0].index : -1;
+}
+
+function masterForwardOrdersShareLogicalIdentity(left, right) {
+  const leftIds = orderIdentityValues(left);
+  const rightIds = orderIdentityValues(right);
+  return recoveredOrderMatches(left, right) && Array.from(leftIds).some((value) => rightIds.has(value));
+}
+
+function masterForwardArchivedReplayOrder(state, orderId, expectedOrder, attemptId) {
+  const candidates = masterForwardOrderRecords(state)
+    .filter((record) => !record.current)
+    .map((record) => record.order)
+    .filter((order) =>
+      [order?.id, order?.internalOrderId, order?.collisionSourceOrderId]
+        .some((value) => String(value || "") === orderId) &&
+      recoveredOrderMatches(order, expectedOrder) &&
+      String(order?.routingForwardAttemptId || "") === attemptId
+    );
+  if (!candidates.length) return null;
+  const first = candidates[0];
+  return candidates.every((order) => masterForwardOrdersShareLogicalIdentity(first, order)) ? first : null;
+}
+
+function masterForwardAttemptBelongsToAnotherOrder(state, selectedOrder, attemptId) {
+  return masterForwardOrderRecords(state).some(({ order }) =>
+    String(order?.routingForwardAttemptId || "") === attemptId &&
+    !masterForwardOrdersShareLogicalIdentity(order, selectedOrder)
+  );
+}
+
+function masterForwardReceivableForOrder(state, order, { includeArchives = false } = {}) {
+  const orderIds = orderIdentityValues(order);
+  return [
+    ...(Array.isArray(state.receivables) ? state.receivables : []),
+    ...(includeArchives && Array.isArray(state.archives) ? state.archives : [])
+      .flatMap((archive) => Array.isArray(archive?.receivables) ? archive.receivables : []),
+  ].find((item) => orderIds.has(String(item?.orderId || "").trim())) || null;
+}
+
+function masterForwardWorkspaceActors(latestDb, state, workspaceId) {
+  const deletedActorIds = new Set((Array.isArray(state.deletedActorIds) ? state.deletedActorIds : [])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean));
+  const persistedActors = (Array.isArray(state.actors) ? state.actors : [])
+    .filter((actor) => {
+      const actorId = String(actor?.id || "").trim();
+      const actorWorkspaceId = String(actor?.workspaceId || "").trim();
+      return actorId && !deletedActorIds.has(actorId) && (!actorWorkspaceId || actorWorkspaceId === workspaceId);
+    });
+  return mergeById(
+    workspaceActors(latestDb, workspaceId).filter((actor) => !deletedActorIds.has(String(actor?.id || ""))),
+    persistedActors
+  );
+}
+
+function masterForwardChatId(state, preferredChatId = "") {
+  const conversations = Array.isArray(state.chatConversations) ? state.chatConversations : [];
+  const deletedChatIds = Array.isArray(state.deletedChatIds) ? state.deletedChatIds : [];
+  const reserved = new Set([
+    ...conversations.map((chat) => String(chat?.id || "")),
+    ...deletedChatIds.map((chatId) => String(chatId || "")),
+  ].filter(Boolean));
+  const highest = Array.from(reserved).reduce((value, chatId) => {
+    const match = chatId.match(/^CHAT-(\d+)$/);
+    const sequence = match ? Number(match[1]) : 0;
+    return Number.isSafeInteger(sequence) && sequence > 0 ? Math.max(value, sequence) : value;
+  }, 0);
+  const storedCounter = Number(state.chatCounter);
+  let counter = Math.max(Number.isSafeInteger(storedCounter) && storedCounter >= 0 ? storedCounter : 0, highest);
+  const preferred = String(preferredChatId || "").trim();
+  const preferredMatch = preferred.match(/^CHAT-(\d+)$/);
+  const preferredSequence = preferredMatch ? Number(preferredMatch[1]) : 0;
+  if (Number.isSafeInteger(preferredSequence) && preferredSequence > 0 && !reserved.has(preferred)) {
+    state.chatCounter = Math.max(counter, preferredSequence);
+    return preferred;
+  }
+  let chatId = "";
+  do {
+    counter += 1;
+    chatId = `CHAT-${counter}`;
+  } while (reserved.has(chatId));
+  state.chatCounter = counter;
+  return chatId;
+}
+
+function masterForwardMoney(currency, amountMinor) {
+  const decimals = currencyDecimalPlaces[currency] ?? 0;
+  const major = Number(amountMinor || 0) / (10 ** decimals);
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency,
+    currencyDisplay: "code",
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  }).format(major);
+}
+
+function masterForwardAssignmentMessage(state, order, targetActor, masterName, attemptId, assignedAt, preferredChatId = "") {
+  state.chatConversations = Array.isArray(state.chatConversations) ? state.chatConversations : [];
+  let chat = state.chatConversations.find((candidate) =>
+    candidate?.type === "direct" &&
+    Array.isArray(candidate.members) &&
+    candidate.members.includes(masterName) &&
+    candidate.members.includes(targetActor.name)
+  );
+  if (!chat) {
+    chat = {
+      id: masterForwardChatId(state, preferredChatId),
+      type: "direct",
+      name: targetActor.name,
+      members: [masterName, targetActor.name],
+      messages: [],
+      createdAt: assignedAt,
+    };
+    state.chatConversations.push(chat);
+  }
+  chat.messages = Array.isArray(chat.messages) ? chat.messages : [];
+  const messageId = `MSG-${attemptId}`;
+  const existingElsewhere = state.chatConversations.some((candidate) =>
+    candidate !== chat && (candidate?.messages || []).some((message) => message?.id === messageId)
+  );
+  if (existingElsewhere) throw httpError(409, "This forwarding attempt is already attached to another conversation.");
+  const existing = chat.messages.find((message) => message?.id === messageId);
+  const message = {
+    id: messageId,
+    from: masterName,
+    text: `Order ${order.agentOrderNumber || order.brokerOrderNumber || order.id} assigned to you. Pay ${masterForwardMoney(order.payoutCurrency || order.sourceCurrency || "USD", order.payoutAmountMinor || order.sourceAmountMinor || 0)} to ${order.receiverName || order.phoneNumber || order.accountNumber || "the receiver"}.`,
+    kind: "text",
+    media: "",
+    fileName: "",
+    orderId: order.id,
+    orderNumber: order.agentOrderNumber || order.brokerOrderNumber || order.id,
+    replyTo: "",
+    reactions: {},
+    readBy: [masterName],
+    createdAt: assignedAt,
+  };
+  if (existing) {
+    if (existing.orderId !== message.orderId || existing.orderNumber !== message.orderNumber || existing.text !== message.text) {
+      throw httpError(409, "This forwarding attempt conflicts with an existing assignment message.");
+    }
+    return { chat, message: existing };
+  }
+  chat.messages.push(message);
+  return { chat, message };
+}
+
+function masterForwardResponse(state, session, revision, order, receivable, chat, message, alreadyApplied, includeState, archived = false) {
+  return {
+    ok: true,
+    revision,
+    alreadyApplied,
+    archived: archived === true,
+    order: structuredClone(order),
+    receivable: receivable ? structuredClone(receivable) : null,
+    chat: chat ? {
+      id: chat.id,
+      type: chat.type,
+      name: chat.name,
+      members: structuredClone(chat.members || []),
+      createdAt: chat.createdAt || "",
+    } : null,
+    message: message ? structuredClone(message) : null,
+    chatCounter: Number(state.chatCounter || 0),
+    orderState: order.state || state.orderState || "Assigned",
+    ...(includeState ? { state: stripRestrictedCreditReminders(state, session) } : {}),
+  };
+}
+
+function applyAtomicMasterForward(latestDb, state, session, body = {}) {
+  const orderId = String(body.orderId || "").trim();
+  const targetActorId = String(body.targetActorId || "").trim();
+  const attemptId = String(body.attemptId || "").trim();
+  const expectedOrder = masterForwardExpectedIdentity(body);
+  const hasExpectedRoutingSubmissionId = Object.prototype.hasOwnProperty.call(body, "expectedRoutingSubmissionId");
+  const hasExpectedOrderUpdatedAt = Object.prototype.hasOwnProperty.call(body, "expectedOrderUpdatedAt");
+  if (!orderId || !targetActorId || !attemptId || attemptId.length > 512 ||
+    !expectedOrder || String(expectedOrder.id || "").trim() !== orderId ||
+    !hasExpectedRoutingSubmissionId || !hasExpectedOrderUpdatedAt) {
+    throw httpError(400, "The forwarding request is incomplete.");
+  }
+  const divider = parseMasterForwardPayoutTerm(body.payoutDivider, "divider");
+  const percent = parseMasterForwardPayoutTerm(body.payoutPercent, "percent");
+  const preMutationRevision = workspaceStateRevision(latestDb, session.workspace.id);
+  const expectedRevision = String(body.expectedRevision || "");
+  const includeState = Boolean(expectedRevision && expectedRevision !== preMutationRevision);
+  const orderIndex = findMasterForwardOrderIndex(state, orderId, expectedOrder);
+  const currentOrder = orderIndex >= 0 ? state.orders[orderIndex] : null;
+  const archivedReplayOrder = masterForwardArchivedReplayOrder(state, orderId, expectedOrder, attemptId);
+  const replayOrder = String(currentOrder?.routingForwardAttemptId || "") === attemptId
+    ? currentOrder
+    : archivedReplayOrder;
+  const replayIsArchived = Boolean(replayOrder && replayOrder === archivedReplayOrder && replayOrder !== currentOrder);
+
+  if (replayOrder) {
+    if (masterForwardAttemptBelongsToAnotherOrder(state, replayOrder, attemptId)) {
+      throw httpError(409, "This forwarding attempt belongs to another order.");
+    }
+    if (String(replayOrder.agentActorId || "") !== targetActorId || !masterForwardTermsMatch(replayOrder, divider, percent) ||
+      !masterForwardAdvancedStates.has(String(replayOrder.state || ""))) {
+      throw httpError(409, "This forwarding attempt conflicts with the order's current routing.");
+    }
+    const receivable = masterForwardReceivableForOrder(state, replayOrder, { includeArchives: replayIsArchived });
+    const messageId = `MSG-${attemptId}`;
+    const chat = (state.chatConversations || []).find((candidate) =>
+      (candidate?.messages || []).some((message) => message?.id === messageId)
+    ) || null;
+    const message = chat?.messages?.find((candidate) => candidate?.id === messageId) || null;
+    return masterForwardResponse(
+      state,
+      session,
+      preMutationRevision,
+      replayOrder,
+      receivable,
+      chat,
+      message,
+      true,
+      includeState || replayIsArchived,
+      replayIsArchived
+    );
+  }
+
+  if (orderIndex < 0) throw httpError(409, "The order changed before forwarding. Refresh and review it.");
+  if (!recoveredOrderMatches(currentOrder, expectedOrder)) {
+    throw httpError(409, "The selected order no longer matches the forwarding request.");
+  }
+  if (masterForwardAttemptBelongsToAnotherOrder(state, currentOrder, attemptId)) {
+    throw httpError(409, "This forwarding attempt belongs to another order.");
+  }
+  if (currentOrder.state !== "Pending Forward") {
+    throw httpError(409, `The order is already ${currentOrder.state || "changed"} and cannot be forwarded again.`);
+  }
+  const expectedRoutingSubmissionId = String(body.expectedRoutingSubmissionId || "");
+  if (String(currentOrder.routingSubmissionId || "") !== expectedRoutingSubmissionId) {
+    throw httpError(409, "A newer Broker submission replaced this order. Refresh and review it.");
+  }
+  if (String(currentOrder.updatedAt || "") !== String(body.expectedOrderUpdatedAt || "")) {
+    throw httpError(409, "The order was updated before forwarding. Refresh and review it.");
+  }
+  const actors = masterForwardWorkspaceActors(latestDb, state, session.workspace.id);
+  const targetActor = actors.find((actor) => String(actor?.id || "") === targetActorId);
+  if (!targetActor || !masterForwardActorCanPayoutCurrency(targetActor, currentOrder.payoutCurrency)) {
+    throw httpError(400, `Choose an active ${currentOrder.payoutCurrency || "matching-currency"} payout Actor.`);
+  }
+  const targetIsBroker = currentOrder.brokerActorId && targetActor.id
+    ? currentOrder.brokerActorId === targetActor.id
+    : normalizedActorName(currentOrder.broker) === normalizedActorName(targetActor.name);
+  if (targetIsBroker) throw httpError(400, "Choose a payout Actor different from the Broker.");
+
+  const assignedAt = new Date().toISOString();
+  const nextOrder = { ...currentOrder };
+  clearableOrderForwardingFields.forEach((field) => { delete nextOrder[field]; });
+  nextOrder.routingForwardAttemptId = attemptId;
+  nextOrder.agent = targetActor.name;
+  nextOrder.agentActorId = targetActor.id;
+  assignMasterForwardAgentNumber(state, nextOrder, targetActor);
+  if (divider !== null) nextOrder.forwardedPayoutDivider = divider;
+  if (percent !== null) nextOrder.forwardedPayoutPercent = percent;
+  nextOrder.state = "Assigned";
+  nextOrder.assignedAt = assignedAt;
+  nextOrder.updatedAt = assignedAt;
+  nextOrder.returnedBy = "";
+  nextOrder.returnedReason = "";
+  nextOrder.returnedAt = "";
+  state.orders[orderIndex] = nextOrder;
+
+  const receivable = (state.receivables || []).find((item) => item?.orderId === currentOrder.id) || null;
+  if (receivable) {
+    receivable.brokerOrderNumber = currentOrder.brokerOrderNumber || currentOrder.id || "";
+    receivable.agentOrderNumber = nextOrder.agentOrderNumber || "";
+    receivable.updatedAt = assignedAt;
+  }
+  const masterName = actors.find((actor) => actor?.role === "Master")?.name || session.membership.actorName || "Master";
+  const assignment = masterForwardAssignmentMessage(
+    state,
+    nextOrder,
+    targetActor,
+    masterName,
+    attemptId,
+    assignedAt,
+    body.preferredChatId
+  );
+  state.orderState = "Assigned";
+  const revision = markWorkspaceStateChanged(latestDb, session.workspace.id, state);
+  return masterForwardResponse(
+    state,
+    session,
+    revision,
+    nextOrder,
+    receivable,
+    assignment.chat,
+    assignment.message,
+    false,
+    includeState
+  );
+}
+
+function latestWritableMasterSession(latestDb, request, workspaceId) {
+  const sessionId = parseCookies(request).hp_session;
+  const sessionRecord = activeSessionRecord(latestDb, sessionId);
+  const session = publicSessionForRecord(latestDb, sessionRecord);
+  if (!session) throw httpError(401, "Please log in.");
+  if (session.workspace.id !== workspaceId) throw httpError(403, "The signed-in workspace changed before forwarding.");
+  if (session.subscription.accessDenied) throw httpError(402, "This workspace's 30-day viewing period has ended. Renew the subscription to regain access.");
+  if (session.subscription.inactive) throw httpError(403, "This workspace is inactive.");
+  if (session.subscription.readOnly) throw httpError(403, "This workspace is read-only after subscription expiry. Renew the subscription to make changes.");
+  if (session.membership.role !== "Master") throw httpError(403, "Only Master can forward an order.");
+  const deviceId = requestDeviceId(request);
+  if (!sessionRecord.deviceId && deviceId) sessionRecord.deviceId = deviceId;
+  touchSession(sessionRecord);
+  return { session, sessionRecord };
+}
+
 function resetWorkspaceState(db, workspaceId, scope = "data") {
   const currentState = db.appStates[workspaceId] || {};
   const chatHistoryResetAt = new Date().toISOString();
@@ -3921,7 +4423,7 @@ function resetWorkspaceState(db, workspaceId, scope = "data") {
   return nextState;
 }
 
-async function requireSession(request, response, db, { touch = true } = {}) {
+async function requireSession(request, response, db, { touch = true, deferPersistence = false } = {}) {
   const sessionId = parseCookies(request).hp_session;
   const sessionRecord = activeSessionRecord(db, sessionId);
   const session = publicSessionForRecord(db, sessionRecord);
@@ -3942,11 +4444,11 @@ async function requireSession(request, response, db, { touch = true } = {}) {
   const currentDeviceId = requestDeviceId(request);
   const deviceIdAdded = Boolean(sessionRecord && !sessionRecord.deviceId && currentDeviceId);
   if (deviceIdAdded) sessionRecord.deviceId = currentDeviceId;
-  if (touch) {
+  if (touch && !deferPersistence) {
     touchSession(sessionRecord);
     setSessionCookie(response, sessionRecord);
     await saveDb(db);
-  } else if (deviceIdAdded) {
+  } else if (deviceIdAdded && !deferPersistence) {
     await saveDb(db);
   }
   return session;
@@ -4205,7 +4707,11 @@ async function handleApi(request, response, url) {
     ["/api/app-state", "/api/app-state/version", "/api/auth/device-warning", "/api/files/status"].includes(url.pathname) ||
     /^\/api\/files\/[^/]+\/(?:download-url|content)$/.test(url.pathname)
   );
-  const session = await requireSession(request, response, db, { touch: !backgroundRead });
+  const deferredSessionPersistence = method === "POST" && url.pathname === "/api/app-state/forward-order";
+  const session = await requireSession(request, response, db, {
+    touch: !backgroundRead,
+    deferPersistence: deferredSessionPersistence,
+  });
   if (!session) return;
 
   if (session.subscription.readOnly && method !== "GET" && url.pathname !== "/api/auth/activity") {
@@ -4773,7 +5279,21 @@ async function handleApi(request, response, url) {
   }
 
   if (url.pathname === "/api/app-state/version" && method === "GET") {
-    sendJson(response, 200, { revision: workspaceStateRevision(db, session.workspace.id), clientReleaseId: "participant-order-retention-v1" });
+    sendJson(response, 200, { revision: workspaceStateRevision(db, session.workspace.id), clientReleaseId: "atomic-master-forward-v1" });
+    return;
+  }
+
+  if (url.pathname === "/api/app-state/forward-order" && method === "POST") {
+    if (session.membership.role !== "Master") return sendJson(response, 403, { error: "Only Master can forward an order." });
+    const body = await readJson(request);
+    let committedSessionRecord = null;
+    const result = await mutateLatestWorkspaceStateAtLatest(session.workspace.id, async (latestDb, latestState) => {
+      const latestAuth = latestWritableMasterSession(latestDb, request, session.workspace.id);
+      committedSessionRecord = latestAuth.sessionRecord;
+      return applyAtomicMasterForward(latestDb, latestState, latestAuth.session, body);
+    });
+    setSessionCookie(response, committedSessionRecord);
+    sendJson(response, 200, result);
     return;
   }
 

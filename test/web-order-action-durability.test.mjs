@@ -57,9 +57,12 @@ function listenerBlock(source, registrationIndex) {
   assert.fail("The beforeunload callback body was not closed.");
 }
 
-function acknowledgedSave(section, actionLabel) {
-  const resultMatch = section.match(/(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*await\s+saveStateNow\([^\n;]*\)\s*;/);
-  assert.ok(resultMatch, `${actionLabel} must await saveStateNow() and retain its acknowledgement result.`);
+function acknowledgedSave(section, actionLabel, saveFunction = "saveStateNow") {
+  const escapedSaveFunction = escapedRegExp(saveFunction);
+  const resultMatch = section.match(new RegExp(
+    `(?:const|let)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*await\\s+${escapedSaveFunction}\\([\\s\\S]*?\\)\\s*;`
+  ));
+  assert.ok(resultMatch, `${actionLabel} must await ${saveFunction}() and retain its acknowledgement result.`);
   const resultName = resultMatch[1];
   const failureGuard = new RegExp(
     `if\\s*\\(\\s*(?:!\\s*${resultName}|${resultName}\\s*!==?\\s*true|${resultName}\\s*===?\\s*false)\\s*\\)`
@@ -70,7 +73,7 @@ function acknowledgedSave(section, actionLabel) {
   };
 }
 
-function assertScopedPendingSave(section, actionLabel, { orderScoped }) {
+function assertScopedPendingSave(section, actionLabel, { orderScoped, saveFunction = "saveStateNow" }) {
   const addMatch = section.match(/pendingOrderActionSaves\.add\s*\(\s*([^\n;)]+)\s*\)/);
   assert.ok(addMatch, `${actionLabel} must register its own pending order action.`);
   const addIndex = addMatch.index;
@@ -99,7 +102,7 @@ function assertScopedPendingSave(section, actionLabel, { orderScoped }) {
   }
   const saveIndex = matchIndex(
     section,
-    /await\s+saveStateNow\([^\n;]*\)/,
+    new RegExp(`await\\s+${escapedRegExp(saveFunction)}\\(`),
     `${actionLabel} must wait for the authoritative save.`
   );
   const deleteIndex = matchIndex(
@@ -161,9 +164,9 @@ test("web Master Forward checks the save result before reporting success", async
     'const forwardButton = event.target.closest(".forward-order")',
     'const masterReturnButton = event.target.closest(".master-return-order")'
   );
-  assertScopedPendingSave(masterForward, "Master Forward", { orderScoped: true });
+  assertScopedPendingSave(masterForward, "Master Forward", { orderScoped: true, saveFunction: "saveMasterForwardNow" });
 
-  const { saveIndex, failureIndex } = acknowledgedSave(masterForward, "Master Forward");
+  const { saveIndex, failureIndex } = acknowledgedSave(masterForward, "Master Forward", "saveMasterForwardNow");
   const successIndex = matchIndex(masterForward, /notifyEvent\(\s*"Order forwarded"/,
     "Master Forward must report success after a successful save.");
   const failureNoticeIndex = matchIndex(masterForward, /notifyEvent\(\s*"Order not forwarded"/,
@@ -235,13 +238,13 @@ test("Broker Send and Master Forward share one routing mutex and pause backgroun
     "A routing action that begins during the GET must prevent that response from merging into the action state.");
 });
 
-test("routing saves submit immutable snapshots and reconcile ambiguous results with authoritative state", async () => {
+test("routing saves use scoped payloads and reconcile ambiguous results with authoritative state", async () => {
   const index = await readFile(path.join(repositoryRoot, "index.html"), "utf8");
   const queueSave = sectionBetween(index, "function queueRemoteStateSave", "function clientDeviceId");
   const immediateSave = sectionBetween(index, "async function saveStateNow", "function captureOrderActionRecord");
   assert.match(queueSave, /function queueRemoteStateSave\(stateSnapshot\s*=\s*null\)/);
-  assert.match(queueSave, /const submittedState\s*=\s*stateSnapshot\s*\|\|\s*state\s*;/,
-    "The queued request must close over the submitted snapshot, not read live state later.");
+  assert.match(queueSave, /const submittedState\s*=\s*structuredClone\(\s*stateSnapshot\s*\|\|\s*state\s*\)\s*;/,
+    "The queued request must freeze the submitted state before waiting behind an earlier write.");
   assert.match(queueSave, /body:\s*\{\s*state:\s*submittedState,\s*expectedRevision:/,
     "The PUT body must use the captured submitted state.");
   assert.doesNotMatch(queueSave, /body:\s*\{\s*state,\s*expectedRevision:/,
@@ -257,16 +260,41 @@ test("routing saves submit immutable snapshots and reconcile ambiguous results w
   assert.match(authoritative, /api\(\s*"\/api\/app-state"\s*\)/,
     "An ambiguous write result must be resolved by reading authoritative workspace state.");
 
+  const brokerSend = sectionBetween(index, 'confirmAction("Send this order to Master for routing?"', "els.cancelTransferEditButton.addEventListener");
+  const masterForward = sectionBetween(index, 'const forwardButton = event.target.closest(".forward-order")', 'const masterReturnButton = event.target.closest(".master-return-order")');
+  assert.match(brokerSend, /await\s+saveStateNow\(\s*structuredClone\(state\)\s*\)/,
+    "Broker Send must retain its immutable point-in-time workspace snapshot.");
+
+  const masterRequest = sectionBetween(masterForward, "const masterForwardRequest = {", "let saveAcknowledged = await saveMasterForwardNow");
+  for (const field of [
+    "orderId",
+    "targetActorId",
+    "attemptId",
+    "preferredChatId",
+    "expectedRoutingSubmissionId",
+    "expectedOrderUpdatedAt",
+    "expectedOrder",
+    "payoutDivider",
+    "payoutPercent",
+  ]) {
+    assert.match(masterRequest, new RegExp(`\\b${field}\\s*:`), `Master Forward must submit ${field}.`);
+  }
+  assert.doesNotMatch(masterRequest, /\b(?:state|ledger|archives|transfers|settlements)\s*:/,
+    "Master Forward must not upload the whole workspace or financial collections.");
+  assert.match(masterForward, /await\s+saveMasterForwardNow\(\s*masterForwardRequest\s*,/,
+    "Master Forward must use the scoped atomic action before its compatibility fallback.");
+  assert.match(masterForward, /saveMasterForwardNow\(\s*masterForwardRequest\s*,\s*\(\)\s*=>\s*structuredClone\(state\)/,
+    "The full workspace fallback snapshot must be created lazily only when an old server needs it.");
+
   const actionSections = [
-    ["Broker Send", sectionBetween(index, 'confirmAction("Send this order to Master for routing?"', "els.cancelTransferEditButton.addEventListener"),
-      /await\s+saveStateNow\(\s*structuredClone\(state\)\s*\)/],
-    ["Master Forward", sectionBetween(index, 'const forwardButton = event.target.closest(".forward-order")', 'const masterReturnButton = event.target.closest(".master-return-order")'),
-      /await\s+saveStateNow\(\s*structuredClone\(state\)\s*,\s*masterForwardConflictResolver\s*\)/],
+    ["Broker Send", brokerSend, "saveStateNow"],
+    ["Master Forward", masterForward, "saveMasterForwardNow"],
   ];
-  for (const [label, section, savePattern] of actionSections) {
+  for (const [label, section, saveFunction] of actionSections) {
+    const savePattern = new RegExp(`await\\s+${escapedRegExp(saveFunction)}\\(`);
     assert.match(section, savePattern,
-      `${label} must submit an immutable point-in-time workspace snapshot.`);
-    const saveIndex = matchIndex(section, /await\s+saveStateNow\(/, `${label} save was not found.`);
+      `${label} must await its authoritative persistence action.`);
+    const saveIndex = matchIndex(section, savePattern, `${label} save was not found.`);
     const afterSave = section.slice(saveIndex);
     const failureIndex = matchIndex(afterSave, /if\s*\(\s*!saveAcknowledged\s*\)/,
       `${label} ambiguous-save branch was not found.`);
@@ -314,7 +342,218 @@ test("routing acknowledgement proves the exact attempt and stale snapshot confli
     "Reconciliation must poll for the exact expected attempt, not mere ID presence.");
 });
 
-test("Master Forward rebases only its routing delta after a concurrent Broker save", async () => {
+test("Master Forward uses the atomic endpoint and adopts only its authoritative delta", async () => {
+  const [index, preview] = await Promise.all([
+    readFile(path.join(repositoryRoot, "index.html"), "utf8"),
+    readFile(path.join(repositoryRoot, "preview.html"), "utf8"),
+  ]);
+  assert.equal(index, preview, "The served web app and preview must stay byte-identical.");
+
+  const queueForward = sectionBetween(index, "function queueRemoteMasterForward", "function clientDeviceId");
+  assert.match(queueForward, /api\(\s*"\/api\/app-state\/forward-order"/,
+    "Master Forward must call the dedicated server action.");
+  assert.match(queueForward, /method:\s*"POST"/);
+  assert.match(queueForward, /body:\s*\{\s*\.\.\.payload,\s*expectedRevision:\s*remoteStateRevision\s*\}/,
+    "The queued action must use the latest known revision only as a synchronization hint.");
+  assert.doesNotMatch(queueForward, /body:\s*\{\s*state\b/,
+    "The atomic action must not upload the workspace state.");
+  assert.match(queueForward, /remoteSaveChain\.then/,
+    "The action must remain ordered behind earlier writes from the same browser.");
+
+  const immediateForward = sectionBetween(index, "async function saveMasterForwardNow", "function orderActionIsOutstanding");
+  assert.match(immediateForward, /await\s+queueRemoteMasterForward\(payload\)/);
+  assert.match(immediateForward, /\[404,\s*405\][\s\S]*typeof fallbackStateSnapshot\s*===\s*"function"[\s\S]*saveStateNow\(fallbackSnapshot,\s*fallbackConflictResolver\)/,
+    "Only an unavailable endpoint may use the legacy full-state compatibility path.");
+
+  const masterForward = sectionBetween(index, 'const forwardButton = event.target.closest(".forward-order")', 'const masterReturnButton = event.target.closest(".master-return-order")');
+  assert.match(masterForward, /masterForwardErrorIsDefinitive\(error\)[\s\S]*unconfirmedOrderActions\.delete\(actionKey\)[\s\S]*clearRoutingActionOutbox\(routingForwardAttemptId\)/,
+    "A definitive atomic rejection must clear its retry lock and durable outbox entry.");
+  assert.match(masterForward, /Number\(error\?\.status\)\s*===\s*409[\s\S]*api\("\/api\/app-state"\)[\s\S]*adoptAuthoritativeOrderActionState\(remote\)/,
+    "A same-order conflict must load the authoritative winner once before re-enabling actions.");
+  assert.match(masterForward, /else if\s*\(saveAttempted\s*&&\s*!actionConfirmed\)[\s\S]*unconfirmedOrderActions\.add\(actionKey\)/,
+    "Only an ambiguous network or server failure may remain protected as unconfirmed.");
+
+  const adoption = sectionBetween(index, "function adoptAtomicMasterForwardResult", "function resolveMasterForwardConflict");
+  assert.match(adoption, /result\.state\s*&&\s*!mergeSharedState\(result\.state\)/,
+    "A stale caller must merge the concurrent server state returned by the atomic action.");
+  assert.match(adoption, /state\.orders\[orderIndex\]\s*=\s*structuredClone\(result\.order\)/,
+    "The exact server-derived order and payer number must replace the optimistic copy.");
+  assert.match(adoption, /remoteStateRevision\s*=\s*String\(result\.revision\)/,
+    "The browser may advance its revision only after adopting the authoritative response.");
+  assert.match(adoption, /result\.archived\s*===\s*true[\s\S]*state\.orders\s*=\s*state\.orders\.filter[\s\S]*return true/,
+    "An idempotent archived acknowledgement must remove its optimistic open copy without recreating a closed order.");
+});
+
+test("a queued generic save cannot absorb a later optimistic forwarding mutation", async () => {
+  const index = await readFile(path.join(repositoryRoot, "index.html"), "utf8");
+  const queueSave = sectionBetween(index, "function queueRemoteStateSave", "function queueRemoteMasterForward");
+  const buildHarness = new Function(`
+    let state = { orders: [{ id: "ORD-FROZEN", state: "Pending Forward" }] };
+    let storageKey = "workspace-key";
+    let remoteStateRevision = "revision-1";
+    let releaseEarlierWrite;
+    let remoteSaveChain = new Promise((resolve) => { releaseEarlierWrite = resolve; });
+    let remoteSavePending = 0;
+    let submittedBody = null;
+    const localStorage = { setItem() {} };
+    const mergeSharedState = () => true;
+    const api = async (_path, options) => {
+      submittedBody = structuredClone(options.body);
+      return { revision: "revision-2" };
+    };
+    ${queueSave}
+    return {
+      queue: () => queueRemoteStateSave(),
+      mutateLiveState: () => { state.orders[0].state = "Assigned"; },
+      release: () => releaseEarlierWrite(),
+      submitted: () => submittedBody,
+    };
+  `);
+  const harness = buildHarness();
+  const pending = harness.queue();
+  harness.mutateLiveState();
+  harness.release();
+  await pending;
+  assert.equal(harness.submitted().state.orders[0].state, "Pending Forward",
+    "An older queued PUT must not serialize the forwarding change made after it was queued.");
+});
+
+test("atomic forwarding adoption preserves concurrent work and removes only its empty optimistic chat", async () => {
+  const index = await readFile(path.join(repositoryRoot, "index.html"), "utf8");
+  const adoptionSource = sectionBetween(index, "function removeEmptyOptimisticForwardChat", "function resolveMasterForwardConflict");
+  const buildHarness = new Function(`
+    const state = {
+      orders: [
+        { id: "ORD-DECOY", collisionSourceOrderId: "ORD-1", state: "Pending Forward", sourceAmountMinor: 999 },
+        { id: "ORD-1", state: "Assigned", routingForwardAttemptId: "ATTEMPT", agentOrderNumber: "LOCAL-TEMP" }
+      ],
+      receivables: [{ id: "REC-1", orderId: "ORD-1", creditReminder: "local" }],
+      chatConversations: [
+        {
+          id: "CHAT-OPTIMISTIC",
+          type: "direct",
+          members: ["Master", "Payer"],
+          messages: [{ id: "MSG-ATTEMPT", orderId: "ORD-1" }]
+        },
+        {
+          id: "CHAT-UNSAVED",
+          type: "direct",
+          members: ["Master", "Broker"],
+          messages: [{ id: "MSG-UNSAVED", text: "keep me" }]
+        }
+      ],
+      chatCounter: 2,
+      orderState: "Assigned"
+    };
+    let remoteStateRevision = "revision-1";
+    let persisted = 0;
+    const persistOrderActionStateLocally = () => { persisted += 1; };
+    const removeOrderActionChatMessage = (reference) => {
+      const chat = state.chatConversations.find((candidate) => candidate.id === reference?.chatId);
+      if (chat) chat.messages = (chat.messages || []).filter((message) => message.id !== reference?.messageId);
+    };
+    const recoveredOrderMatches = (left, right) => left?.id === right?.id;
+    const mergeById = (left = [], right = []) => {
+      const values = new Map();
+      [...left, ...right].forEach((item) => values.set(item.id, { ...(values.get(item.id) || {}), ...structuredClone(item) }));
+      return Array.from(values.values());
+    };
+    const mergeSharedState = (remote) => {
+      state.orders = mergeById(state.orders, remote.orders || []);
+      state.receivables = mergeById(state.receivables, remote.receivables || []);
+      state.chatConversations = mergeById(state.chatConversations, remote.chatConversations || []).map((chat) => {
+        const local = state.chatConversations.find((candidate) => candidate.id === chat.id);
+        const incoming = (remote.chatConversations || []).find((candidate) => candidate.id === chat.id);
+        return { ...chat, messages: mergeById(local?.messages || [], incoming?.messages || []) };
+      });
+      return true;
+    };
+    ${adoptionSource}
+    return {
+      adopt: adoptAtomicMasterForwardResult,
+      result: () => ({ state: structuredClone(state), remoteStateRevision, persisted }),
+    };
+  `);
+  const harness = buildHarness();
+  const canonicalOrder = {
+    id: "ORD-1",
+    state: "Assigned",
+    routingForwardAttemptId: "ATTEMPT",
+    agentActorId: "ACT-PAYER",
+    agentOrderNumber: "0007_BRK1"
+  };
+  const adopted = harness.adopt({
+    atomicMasterForward: true,
+    revision: "revision-3",
+    state: {
+      orders: [{ id: "ORD-2", state: "Pending Forward" }],
+      receivables: [{ id: "REC-1", orderId: "ORD-1", creditReminder: "concurrent Broker reminder" }],
+      chatConversations: [{
+        id: "CHAT-SERVER",
+        type: "direct",
+        members: ["Master", "Payer"],
+        messages: [{ id: "MSG-OTHER", text: "server message" }]
+      }]
+    },
+    order: canonicalOrder,
+    receivable: { id: "REC-1", orderId: "ORD-1", creditReminder: "concurrent Broker reminder", agentOrderNumber: "0007_BRK1" },
+    chat: { id: "CHAT-SERVER", type: "direct", members: ["Master", "Payer"] },
+    message: { id: "MSG-ATTEMPT", orderId: "ORD-1", orderNumber: "0007_BRK1" },
+    chatCounter: 3,
+    orderState: "Assigned"
+  }, { chatId: "CHAT-OPTIMISTIC", messageId: "MSG-ATTEMPT" }, "REC-1");
+  assert.equal(adopted, true);
+  const result = harness.result();
+  assert.equal(result.remoteStateRevision, "revision-3");
+  assert.equal(result.state.orders.find((order) => order.id === "ORD-1").agentOrderNumber, "0007_BRK1");
+  assert.equal(result.state.orders.find((order) => order.id === "ORD-DECOY").sourceAmountMinor, 999,
+    "An alias collision must not cause the authoritative delta to replace another order.");
+  assert.ok(result.state.orders.some((order) => order.id === "ORD-2"));
+  assert.equal(result.state.receivables.find((item) => item.id === "REC-1").creditReminder, "concurrent Broker reminder");
+  assert.ok(result.state.chatConversations.some((chat) => (chat.messages || []).some((message) => message.id === "MSG-UNSAVED")));
+  assert.equal(result.state.chatConversations.some((chat) => chat.id === "CHAT-OPTIMISTIC"), false);
+  assert.deepEqual(
+    result.state.chatConversations.find((chat) => chat.id === "CHAT-SERVER").messages.map((message) => message.id).sort(),
+    ["MSG-ATTEMPT", "MSG-OTHER"]
+  );
+  assert.equal(result.persisted, 1);
+
+  const archivedHarness = buildHarness();
+  assert.equal(archivedHarness.adopt({
+    atomicMasterForward: true,
+    archived: true,
+    revision: "revision-4",
+    state: { orders: [], receivables: [], chatConversations: [] },
+    order: { ...canonicalOrder, state: "Paid", journal: "JRN-9" },
+    receivable: { id: "REC-CLOSED", orderId: "ORD-1" },
+    chat: { id: "CHAT-SERVER", type: "direct", members: ["Master", "Payer"] },
+    message: { id: "MSG-ATTEMPT", orderId: "ORD-1" }
+  }, { chatId: "CHAT-OPTIMISTIC", messageId: "MSG-ATTEMPT" }, "REC-1"), true);
+  const archivedResult = archivedHarness.result();
+  assert.equal(archivedResult.state.orders.some((order) => order.id === "ORD-1"), false,
+    "An acknowledged closed order must not be resurrected in the open order book.");
+  assert.equal(archivedResult.state.receivables.some((item) => item.id === "REC-CLOSED"), false,
+    "Archived replay adoption must not upsert a response delta into closed financial state.");
+  assert.equal(archivedResult.state.receivables.some((item) => item.id === "REC-1"), false,
+    "A stale optimistic receivable must be removed when the server reports that its order is already closed.");
+
+  const liveWithoutReceivableHarness = buildHarness();
+  assert.equal(liveWithoutReceivableHarness.adopt({
+    atomicMasterForward: true,
+    archived: false,
+    revision: "revision-5",
+    state: { orders: [canonicalOrder], receivables: [], chatConversations: [] },
+    order: canonicalOrder,
+    receivable: null,
+    chat: null,
+    message: null,
+    orderState: "Assigned"
+  }, { chatId: "CHAT-OPTIMISTIC", messageId: "MSG-ATTEMPT" }, "REC-1"), true);
+  assert.equal(liveWithoutReceivableHarness.result().state.receivables.some((item) => item.id === "REC-1"), false,
+    "A current-order replay must not retain a local receivable that exists only in a closed report.");
+});
+
+test("the legacy full-save fallback still rebases only its routing delta", async () => {
   const [index, preview] = await Promise.all([
     readFile(path.join(repositoryRoot, "index.html"), "utf8"),
     readFile(path.join(repositoryRoot, "preview.html"), "utf8"),
@@ -545,7 +784,7 @@ test("an ambiguous retry reuses the complete original routing attempt", async ()
     "Master retry must be found by the unresolved order, even if visible routing fields changed.");
   assert.match(masterForward, /Object\.assign\(order,\s*structuredClone\(retryAttempt\.order\)\)/,
     "Master retry must restore the complete original forwarding attempt.");
-  assert.match(masterForward, /persistRoutingActionOutbox\([\s\S]*?await\s+saveStateNow/,
+  assert.match(masterForward, /persistRoutingActionOutbox\([\s\S]*?await\s+saveMasterForwardNow/,
     "Master refresh recovery must be durable before the network save begins.");
   assert.match(masterForward, /clearRoutingActionOutbox\(routingForwardAttemptId\)/,
     "Master recovery data must be removed only after acknowledgement or an authoritative winner.");
