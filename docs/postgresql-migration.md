@@ -8,6 +8,8 @@ This is the recommended production migration plan from `data/auth-db.json` to Po
 
 The versioned schema in `sql/migrations/` and the `pg:*` commands provide the lossless staging importer. They preserve each original record as JSONB, expose indexed transactional fields, keep closed reports immutable, and verify exact reconstruction. They do not switch the live server to PostgreSQL.
 
+Legacy record IDs remain searchable but are deliberately not unique in staging. Historical counters could reuse values such as `TFR-1`, so each imported row receives a separate internal key based on its source position and content. The importer preserves every collided row exactly and never resolves a collision by deleting or merging financial records.
+
 ## Current safe state
 
 Keep these Render web-service environment variables while the migration is being prepared:

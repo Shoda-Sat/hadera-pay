@@ -78,25 +78,15 @@ function currencyValue(value) {
   return /^[A-Z]{3}$/.test(currency) ? currency : null;
 }
 
-function recordKey(collection, item, ordinal, idField = "id", useLegacyIdInKey = true) {
+function recordKey(collection, item, ordinal, idField = "id") {
   const legacyId = nullableString(item?.[idField]);
   return {
     legacyId,
-    recordKey: legacyId && useLegacyIdInKey
-      ? `id:${legacyId}`
-      : `${collection}:${String(ordinal).padStart(8, "0")}:${sha256Json(item).slice(0, 20)}`,
+    // Historical counters were not globally collision-safe. Preserve every
+    // source row under an independent staging key while retaining its legacy
+    // ID as searchable, non-unique metadata.
+    recordKey: `${collection}:${String(ordinal).padStart(8, "0")}:${sha256Json(item).slice(0, 20)}`,
   };
-}
-
-function assertUniqueLegacyIds(workspaceId, collection, rows) {
-  const seen = new Set();
-  rows.forEach((row) => {
-    if (!row.legacyId) return;
-    if (seen.has(row.legacyId)) {
-      throw new Error(`Workspace ${workspaceId} has duplicate ${collection} legacy ID ${row.legacyId}.`);
-    }
-    seen.add(row.legacyId);
-  });
 }
 
 function baseRows(workspaceId, collection, items, extract = () => ({}), options = {}) {
@@ -109,8 +99,7 @@ function baseRows(workspaceId, collection, items, extract = () => ({}), options 
       collection,
       item,
       ordinal,
-      options.idField || "id",
-      options.uniqueLegacyIds !== false
+      options.idField || "id"
     );
     return {
       workspaceId,
@@ -121,7 +110,6 @@ function baseRows(workspaceId, collection, items, extract = () => ({}), options 
       payloadSha256: sha256Json(item),
     };
   });
-  if (options.uniqueLegacyIds !== false) assertUniqueLegacyIds(workspaceId, collection, rows);
   return rows;
 }
 
@@ -345,7 +333,7 @@ export function prepareDatabaseImport(db) {
         actorName: nullableString(item.actor),
         currency: currencyValue(item.currency),
         netMinor: Number.isSafeInteger(Number(item.netMinor)) ? String(Number(item.netMinor)) : "0",
-      }), { uniqueLegacyIds: false }),
+      })),
       manifest,
       manifestSha256: sha256Json(manifest),
     };

@@ -72,10 +72,20 @@ test("streaming JSON evidence matches canonical JSON without allocating a normal
   assert.equal(sha256Json(source), expected);
 });
 
-test("PostgreSQL import preparation blocks duplicate legacy record IDs", () => {
+test("PostgreSQL import preparation preserves duplicate legacy record IDs losslessly", () => {
   const source = balancedDatabase();
   source.appStates["WS-1"].orders.push({ ...source.appStates["WS-1"].orders[0] });
-  assert.throws(() => prepareDatabaseImport(source), /duplicate orders legacy ID ORD-1/);
+  source.appStates["WS-1"].transfers.push(
+    { id: "TFR-1", journal: "JRN-12", amountMinor: 5000 },
+    { id: "TFR-1", journal: "JRN-13", amountMinor: 7000 },
+  );
+
+  const prepared = prepareDatabaseImport(source);
+  const workspace = prepared.workspaces[0];
+
+  assert.equal(new Set(workspace.orders.map((row) => row.recordKey)).size, 2);
+  assert.equal(new Set(workspace.transfers.map((row) => row.recordKey)).size, 2);
+  assert.deepEqual(reconstructPreparedDatabase(prepared), source);
 });
 
 test("PostgreSQL manifest identifies an unbalanced journal without changing its amount", () => {
@@ -109,11 +119,15 @@ test("PostgreSQL cutover requires both the backend choice and reconciliation con
 
 test("PostgreSQL schema makes closed reports immutable and keeps transactional indexes", async () => {
   const sql = await readFile(new URL("../sql/migrations/001_lossless_import.sql", import.meta.url), "utf8");
+  const collisionMigration = await readFile(new URL("../sql/migrations/002_allow_legacy_id_collisions.sql", import.meta.url), "utf8");
   assert.match(sql, /CREATE TABLE hp_closed_reports/);
   assert.match(sql, /BEFORE UPDATE OR DELETE ON hp_closed_reports/);
   assert.match(sql, /CREATE TABLE hp_ledger_lines/);
   assert.match(sql, /CREATE INDEX hp_orders_workspace_state_idx/);
   assert.match(sql, /CREATE VIEW hp_journal_balances/);
+  assert.match(collisionMigration, /DROP INDEX IF EXISTS hp_transfers_legacy_id_idx/);
+  assert.match(collisionMigration, /CREATE INDEX hp_transfers_legacy_id_idx/);
+  assert.doesNotMatch(collisionMigration, /CREATE UNIQUE INDEX/);
 });
 
 test("the live server refuses an accidental PostgreSQL cutover before repository wiring", async () => {
