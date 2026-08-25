@@ -588,9 +588,10 @@ export async function searchPostgresWorkspaceRecords(workspaceId, {
   const actorIdPlaceholder = actorScoped ? addParameter(cleanText(actorId)) : "";
   const actorNamePlaceholder = actorScoped ? addParameter(cleanText(actorName)) : "";
   const limitPlaceholder = addParameter(resultLimit + 1);
-  const matchesPayload = (alias) => termPlaceholders
-    .map((placeholder) => `lower(${alias}.payload::text) LIKE ${placeholder} ESCAPE '\\'`)
+  const matchesJson = (expression) => termPlaceholders
+    .map((placeholder) => `lower((${expression})::text) LIKE ${placeholder} ESCAPE '\\'`)
     .join(" AND ");
+  const matchesPayload = (alias) => matchesJson(`${alias}.payload`);
   const orderActorScope = actorScoped
     ? `AND (
          o.broker_actor_id = ${actorIdPlaceholder} OR o.agent_actor_id = ${actorIdPlaceholder}
@@ -650,6 +651,27 @@ export async function searchPostgresWorkspaceRecords(workspaceId, {
            FROM hp_orders o
           WHERE o.workspace_id = $1 AND ${matchesPayload("o")} ${orderActorScope}
          UNION ALL
+         SELECT
+                'archived_order'::text,
+                c.record_key || ':order:' || archived_order.ordinality::text,
+                COALESCE(c.closed_at_text, ''),
+                archived_order.payload || jsonb_build_object(
+                  'archivedAt', COALESCE(c.closed_at_text, archived_order.payload ->> 'archivedAt', ''),
+                  'searchArchiveId', COALESCE(NULLIF(c.payload ->> 'id', ''), c.legacy_id, c.record_key),
+                  'searchArchiveActor', COALESCE(c.actor_name, c.payload ->> 'actor', ''),
+                  'searchArchiveClosedAt', COALESCE(c.closed_at_text, ''),
+                  'searchReportKey', c.record_key,
+                  'state', COALESCE(NULLIF(archived_order.payload ->> 'state', ''), 'Archived')
+                )
+           FROM hp_closed_reports c
+           CROSS JOIN LATERAL jsonb_array_elements(
+             CASE WHEN jsonb_typeof(c.payload -> 'orders') = 'array' THEN c.payload -> 'orders' ELSE '[]'::jsonb END
+           ) WITH ORDINALITY AS archived_order(payload, ordinality)
+          WHERE c.workspace_id = $1
+            AND ${matchesPayload("c")}
+            AND ${matchesJson("archived_order.payload")}
+            ${reportActorScope}
+         UNION ALL
          SELECT 'receivable'::text, r.record_key, COALESCE(r.updated_at_text, r.created_at_text, ''), r.payload
            FROM hp_receivables r
           WHERE r.workspace_id = $1 AND ${matchesPayload("r")} ${receivableActorScope}
@@ -677,7 +699,9 @@ export async function searchPostgresWorkspaceRecords(workspaceId, {
                   'ledgerLineCount', CASE WHEN jsonb_typeof(c.payload -> 'ledger') = 'array' THEN jsonb_array_length(c.payload -> 'ledger') ELSE 0 END
                 )
            FROM hp_closed_reports c
-          WHERE c.workspace_id = $1 AND ${matchesPayload("c")} ${reportActorScope}
+          WHERE c.workspace_id = $1
+            AND ${matchesJson("c.payload - ARRAY['orders', 'receivables', 'transfers', 'ledger']::text[]")}
+            ${reportActorScope}
        ) matches
       ORDER BY sort_text DESC, kind, record_key
       LIMIT ${limitPlaceholder}`,

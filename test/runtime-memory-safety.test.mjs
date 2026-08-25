@@ -89,6 +89,9 @@ test("runtime persistence bounds queued snapshots and polling cannot overlap", a
   assert.match(web, /if \(remoteRefreshPending \|\|[\s\S]*remoteRefreshPending = true;[\s\S]*finally \{\s*remoteRefreshPending = false;/);
   assert.match(web, /Date\.now\(\) - lastAccountDeviceWarningRefreshAt >= 15000/);
   assert.match(web, /async function loadGlobalSearchResults\(query, requestSequence\)/);
+  assert.match(web, /item\.kind === "archived_order"/);
+  assert.match(web, /async function prepareArchiveSearchDestination\(result\)/);
+  assert.match(web, /await loadClosedReportDetail\(archive\)/);
   assert.match(web, /api\(`\/api\/search\?\$\{new URLSearchParams\(\{ q: query, limit: "50" \}\)\}`\)/);
   assert.match(web, /globalSearchDebounceTimer = window\.setTimeout\([\s\S]*loadGlobalSearchResults\(query, requestSequence\);[\s\S]*}, 350\);/);
   assert.doesNotMatch(web, /els\.globalSearch\?\.addEventListener\("input", buildGlobalSearchResults\)/);

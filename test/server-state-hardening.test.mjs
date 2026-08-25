@@ -265,6 +265,7 @@ test("server reserves historical Actor IDs, sanitizes new Broker orders, and kee
       ["REC-LIVE-HISTORY", "receivable"],
       ["TRF-LIVE-HISTORY", "transfer"],
       ["JRN-HISTORIC-LINE", "ledger"],
+      ["ORD-ARCHIVE-A", "archived_order"],
       ["ARC-IMMUTABLE-A", "report"],
     ]) {
       const search = await requestOk(baseUrl, `/api/search?q=${encodeURIComponent(query)}&limit=10`, {
@@ -276,6 +277,14 @@ test("server reserves historical Actor IDs, sanitizes new Broker orders, and kee
         const report = search.data.results.find((result) => result.kind === "report")?.record;
         assert.equal(Object.hasOwn(report || {}, "orders"), false, "Search must not return closed-report transaction bodies.");
         assert.equal(report?._reportDetailLoaded, false);
+      }
+      if (expectedKind === "archived_order") {
+        const archivedOrder = search.data.results.find((result) => result.kind === "archived_order")?.record;
+        assert.equal(archivedOrder?.id, "ORD-ARCHIVE-A");
+        assert.equal(archivedOrder?.journal, "JRN-ARCHIVE-COLLISION");
+        assert.equal(archivedOrder?.searchArchiveId, "ARC-IMMUTABLE-A");
+        assert.match(String(archivedOrder?.searchReportKey || ""), /^json:/);
+        assert.equal(Object.hasOwn(archivedOrder || {}, "orders"), false, "Search returns only the matched archived order, not its full report.");
       }
     }
     const boundedSearch = await requestOk(baseUrl, "/api/search?q=Historic&limit=2", { cookie: masterLogin.cookie });

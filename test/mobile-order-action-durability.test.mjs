@@ -167,6 +167,8 @@ test("mobile Broker Send persists and reuses one exact attempt until acknowledge
   assert.match(submit, /mobileBrokerRoutingAttemptId\(/,
     "Broker Send must assign a stable submission token.");
   assert.match(submit, /routingSubmissionId/);
+  assert.match(clientSource, /actingActorId:\s*session\.managedByMaster\s*\?\s*session\.actorId\s*:\s*undefined/,
+    "Mobile must identify the selected Master-managed Broker to the atomic endpoint.");
   assert.match(submit, /persistMobileRoutingAction\(session,[\s\S]*?order/,
     "The durable Broker record must retain the complete submitted order.");
 

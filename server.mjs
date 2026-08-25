@@ -39,6 +39,7 @@ import { applyPostgresMigrations } from "./src/postgres/migrations.mjs";
 import {
   findJsonClosedReport,
   getPostgresClosedReport,
+  jsonClosedReportKey,
   jsonClosedReportSummaries,
   listPostgresClosedReportSummaries,
   loadRuntimePostgresDatabase,
@@ -2534,8 +2535,8 @@ function boundedWorkspaceSearchTerms(value) {
 }
 
 function workspaceSearchRecordTime(kind, record) {
-  const values = kind === "order"
-    ? [record?.voidedAt, record?.paidAt, record?.returnedAt, record?.updatedAt, record?.sentAt, record?.createdAt]
+  const values = kind === "order" || kind === "archived_order"
+    ? [record?.voidedAt, record?.paidAt, record?.returnedAt, record?.updatedAt, record?.sentAt, record?.createdAt, record?.archivedAt, record?.searchArchiveClosedAt]
     : kind === "transfer"
       ? [record?.reversedAt, record?.paidOutAt, record?.acceptedAt, record?.approvedAt, record?.updatedAt, record?.sentAt, record?.createdAt]
       : kind === "receivable"
@@ -2559,12 +2560,27 @@ function searchJsonWorkspaceRecords(db, session, query, limit = 50) {
   const reportActorScope = session.membership.role === "Actor"
     ? { actorId: session.membership.actorId || "", actorName: session.membership.actorName || "" }
     : {};
+  const visibleArchives = Array.isArray(visibleState.archives) ? visibleState.archives : [];
+  const archivedOrders = visibleArchives.flatMap((archive) =>
+    (Array.isArray(archive?.orders) ? archive.orders : []).map((order) => ({
+      ...order,
+      archivedAt: archive.closedAt || order?.archivedAt || "",
+      searchArchiveId: archive.id || "",
+      searchArchiveActor: archive.actor || "",
+      searchArchiveClosedAt: archive.closedAt || "",
+      searchReportKey: jsonClosedReportKey(archive, (persistedState.archives || []).indexOf(archive)),
+      state: order?.state || "Archived",
+    }))
+  );
+  const reportSummaries = jsonClosedReportSummaries(persistedState.archives || [], reportActorScope)
+    .map(({ _orderRefs, ...summary }) => summary);
   const collections = [
     ["order", visibleState.orders || []],
+    ["archived_order", archivedOrders],
     ["receivable", visibleState.receivables || []],
     ["transfer", visibleState.transfers || []],
     ["ledger", visibleState.ledger || []],
-    ["report", jsonClosedReportSummaries(persistedState.archives || [], reportActorScope)],
+    ["report", reportSummaries],
   ];
   const matches = [];
   let matchingCount = 0;
@@ -4423,6 +4439,7 @@ function brokerSubmitResponse(state, session, revision, order, receivable, custo
   includeState = false,
   archived = false,
 } = {}) {
+  const responseSession = session.managedBrokerControllerSession || session;
   return {
     ok: true,
     revision,
@@ -4435,7 +4452,7 @@ function brokerSubmitResponse(state, session, revision, order, receivable, custo
     receivableCounter: Number(state.receivableCounter || 0),
     customerCounter: Number(state.customerCounter || 0),
     orderState: order?.state || state.orderState || "Pending Forward",
-    ...(includeState ? { state: stateForSessionResponse(state, session) } : {}),
+    ...(includeState ? { state: stateForSessionResponse(state, responseSession) } : {}),
   };
 }
 
@@ -5047,7 +5064,7 @@ function latestWritableMasterSession(latestDb, request, workspaceId) {
   return { session, sessionRecord };
 }
 
-function latestWritableBrokerSession(latestDb, request, workspaceId) {
+function latestWritableBrokerSession(latestDb, latestState, request, workspaceId, actingActorId = "") {
   const sessionId = parseCookies(request).hp_session;
   const sessionRecord = activeSessionRecord(latestDb, sessionId);
   const session = publicSessionForRecord(latestDb, sessionRecord);
@@ -5056,13 +5073,44 @@ function latestWritableBrokerSession(latestDb, request, workspaceId) {
   if (session.subscription.accessDenied) throw httpError(402, "This workspace's 30-day viewing period has ended. Renew the subscription to regain access.");
   if (session.subscription.inactive) throw httpError(403, "This workspace is inactive.");
   if (session.subscription.readOnly) throw httpError(403, "This workspace is read-only after subscription expiry. Renew the subscription to make changes.");
-  if (session.membership.role !== "Actor" || !["Broker", "Special Broker"].includes(session.membership.actorRole)) {
+  const requestedActorId = String(actingActorId || "").trim();
+  let brokerSession = session;
+  if (session.membership.role === "Master") {
+    const deletedActorIds = new Set((Array.isArray(latestState?.deletedActorIds) ? latestState.deletedActorIds : [])
+      .map((value) => String(value || "").trim())
+      .filter(Boolean));
+    const actor = (Array.isArray(latestState?.actors) ? latestState.actors : []).find((candidate) =>
+      String(candidate?.id || "") === requestedActorId
+    );
+    const actorWorkspaceId = String(actor?.workspaceId || "").trim();
+    if (!requestedActorId || !actor || deletedActorIds.has(requestedActorId) || actor.active === false ||
+      actor.managedByMaster !== true || (actorWorkspaceId && actorWorkspaceId !== workspaceId) ||
+      !["Broker", "Special Broker"].includes(String(actor.role || ""))) {
+      throw httpError(403, "Master can send an order only for an active, Master-managed Broker.");
+    }
+    brokerSession = {
+      ...session,
+      membership: {
+        ...session.membership,
+        role: "Actor",
+        actorId: String(actor.id),
+        actorName: String(actor.name || ""),
+        actorRole: String(actor.role),
+        brokerCode: String(actor.brokerCode || ""),
+        currency: String(actor.currency || session.membership.currency || "USD"),
+        workingCurrencies: Array.isArray(actor.workingCurrencies) ? [...actor.workingCurrencies] : [],
+      },
+      managedBrokerControllerSession: session,
+    };
+  } else if (session.membership.role !== "Actor" || !["Broker", "Special Broker"].includes(session.membership.actorRole)) {
     throw httpError(403, "Only Brokers and Special Brokers can send new orders.");
+  } else if (requestedActorId && requestedActorId !== String(session.membership.actorId || "")) {
+    throw httpError(403, "A Broker can send orders only under their own profile.");
   }
   const deviceId = requestDeviceId(request);
   if (!sessionRecord.deviceId && deviceId) sessionRecord.deviceId = deviceId;
   touchSession(sessionRecord);
-  return { session, sessionRecord };
+  return { session: brokerSession, sessionRecord };
 }
 
 function resetWorkspaceState(db, workspaceId, scope = "data") {
@@ -6104,13 +6152,15 @@ async function handleApi(request, response, url) {
   }
 
   if (url.pathname === "/api/app-state/submit-order" && method === "POST") {
-    if (session.membership.role !== "Actor" || !["Broker", "Special Broker"].includes(session.membership.actorRole)) {
+    const body = await readJson(request);
+    const actingActorId = String(body?.actingActorId || body?.order?.brokerActorId || "").trim();
+    const directBroker = session.membership.role === "Actor" && ["Broker", "Special Broker"].includes(session.membership.actorRole);
+    if (!directBroker && session.membership.role !== "Master") {
       return sendJson(response, 403, { error: "Only Brokers and Special Brokers can send new orders." });
     }
-    const body = await readJson(request);
     let committedSessionRecord = null;
     const result = await mutateLatestWorkspaceStateAtLatest(session.workspace.id, async (latestDb, latestState) => {
-      const latestAuth = latestWritableBrokerSession(latestDb, request, session.workspace.id);
+      const latestAuth = latestWritableBrokerSession(latestDb, latestState, request, session.workspace.id, actingActorId);
       committedSessionRecord = latestAuth.sessionRecord;
       return applyAtomicBrokerSubmit(latestDb, latestState, latestAuth.session, body);
     }, { collections: ["orders", "receivables", "savedCustomers"] });

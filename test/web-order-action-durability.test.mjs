@@ -923,6 +923,8 @@ test("an ambiguous retry reuses the complete original routing attempt", async ()
     "Broker retry must use the original complete order, not edited form values.");
   assert.match(brokerSend, /persistRoutingActionOutbox\([\s\S]*?await\s+saveBrokerSendNow/,
     "Broker refresh recovery must be durable before the network save begins.");
+  assert.match(brokerSend, /actingActorId:\s*actor\.id/,
+    "Master-managed Broker sends must identify the selected controlled profile.");
   assert.match(brokerSend, /clearRoutingActionOutbox\(order\.routingSubmissionId\)/,
     "Broker recovery data must be removed only after acknowledgement or an authoritative winner.");
   assert.match(index, /brokerInputMatchesRoutingRetry\(input,\s*retryAttempt\)/,

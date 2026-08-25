@@ -229,7 +229,27 @@ test("atomic Broker Send accepts simultaneous colliding local IDs without losing
       currency: "ETB",
     });
 
-    const baseline = await requestOk(baseUrl, "/api/app-state", { cookie: master.cookie });
+    const initialState = await requestOk(baseUrl, "/api/app-state", { cookie: master.cookie });
+    const managedBroker = {
+      id: "ACT-MANAGED-BROKER",
+      workspaceId: master.data.session.workspace.id,
+      name: "Master Managed Broker",
+      role: "Broker",
+      currency: "USD",
+      brokerCode: "MMB",
+      active: true,
+      managedByMaster: true,
+      transferEnabled: true,
+      transferMode: "master",
+      workingCurrencies: [],
+    };
+    const stateWithManagedBroker = structuredClone(initialState.data.state);
+    stateWithManagedBroker.actors.push(managedBroker);
+    const baseline = await requestOk(baseUrl, "/api/app-state", {
+      cookie: master.cookie,
+      method: "PUT",
+      body: { state: stateWithManagedBroker, expectedRevision: initialState.data.revision },
+    });
     const untouchedLedger = structuredClone(baseline.data.state.ledger || []);
     const untouchedArchives = structuredClone(baseline.data.state.archives || []);
     const firstOrder = pendingOrder({
@@ -318,6 +338,42 @@ test("atomic Broker Send accepts simultaneous colliding local IDs without losing
       body: firstIntent,
     });
     assert.equal(forbidden.response.status, 403);
+
+    const beforeManagedSend = await requestOk(baseUrl, "/api/app-state", { cookie: master.cookie });
+    const managedOrder = {
+      ...pendingOrder({ brokerActorId: managedBroker.id, broker: managedBroker.name, suffix: 3 }),
+      id: "ORD-MANAGED-1",
+      routingSubmissionId: "ROUTE-SEND-MANAGED-BROKER-1",
+      brokerOrderNumber: "MMB001",
+    };
+    const managedIntent = {
+      ...submitIntent(managedOrder, "stale-master-revision", 3),
+      actingActorId: managedBroker.id,
+    };
+    const managedResult = await requestOk(baseUrl, "/api/app-state/submit-order", {
+      cookie: master.cookie,
+      method: "POST",
+      body: managedIntent,
+    });
+    assert.equal(managedResult.data.order.brokerActorId, managedBroker.id);
+    assert.equal(managedResult.data.order.broker, managedBroker.name);
+    assert.ok(managedResult.data.state?.actors.some((actor) => actor.id === firstBroker.data.session.membership.actorId),
+      "A stale-revision response to Master must retain the full Master workspace view.");
+
+    const unmanagedAttempt = await request(baseUrl, "/api/app-state/submit-order", {
+      cookie: master.cookie,
+      method: "POST",
+      body: { ...managedIntent, actingActorId: firstBroker.data.session.membership.actorId },
+    });
+    assert.equal(unmanagedAttempt.response.status, 403,
+      "Master must not submit through a Broker profile that has its own login.");
+
+    const afterManagedSend = await requestOk(baseUrl, "/api/app-state", { cookie: master.cookie });
+    assert.deepEqual(afterManagedSend.data.state.ledger || [], untouchedLedger);
+    assert.deepEqual(afterManagedSend.data.state.archives || [], untouchedArchives);
+    assert.ok(afterManagedSend.data.state.orders.some((order) =>
+      order.routingSubmissionId === managedOrder.routingSubmissionId && order.brokerActorId === managedBroker.id
+    ));
   } finally {
     serverProcess.kill();
     await new Promise((resolve) => serverProcess.once("exit", resolve));

@@ -166,6 +166,9 @@ test("the live server wires PostgreSQL through the guarded runtime repository", 
   assert.match(runtimeStore, /export async function searchPostgresWorkspaceRecords/);
   assert.match(runtimeStore, /ORDER BY sort_text DESC, kind, record_key/);
   assert.match(runtimeStore, /LIMIT \$\{limitPlaceholder\}/);
+  assert.match(runtimeStore, /'archived_order'::text/);
+  assert.match(runtimeStore, /jsonb_array_elements/);
+  assert.match(runtimeStore, /'searchReportKey', c\.record_key/);
   assert.match(runtimeStore, /reconcilePreparedPayloadRows/);
   assert.match(runtimeStore, /workspaceCollections\[workspaceId\]/);
   assert.doesNotMatch(runtimeStore, /DELETE FROM \$\{table\} WHERE workspace_id = \$1/);

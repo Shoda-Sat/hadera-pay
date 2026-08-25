@@ -848,6 +848,7 @@ async function saveBrokerSubmissionAtomic(
         const result = await api<AtomicBrokerSubmitResult>("/api/app-state/submit-order", {
           method: "POST",
           body: {
+            actingActorId: session.managedByMaster ? session.actorId : undefined,
             attemptId: input.order.routingSubmissionId,
             order: input.order,
             previousOrder: input.previousOrder,
