@@ -71,10 +71,27 @@ test("runtime persistence bounds queued snapshots and polling cannot overlap", a
   assert.match(server, /const fastActivity = method === "POST" && url\.pathname === "\/api\/auth\/activity";/);
   assert.match(server, /runtimeSessionActivityNeedsPersistence\(sessionId\)\) await persistRuntimeSessionActivity\(sessionId\)/);
   assert.match(server, /if \(await handleFastPollingApi\(request, response, url\)\) return;/);
+  assert.match(server, /function workspaceStateForRead\(db, workspaceId, persistedState = \{\}\)/);
+  const appStateReadRoute = server.match(
+    /if \(url\.pathname === "\/api\/app-state" && method === "GET"\) \{([\s\S]*?)\n  \}\n\n  const closedReportMatch/,
+  );
+  assert.ok(appStateReadRoute, "The app-state read route must remain identifiable for the performance guard.");
+  assert.match(appStateReadRoute[1], /workspaceStateForReadWithHistoricalRepair/);
+  assert.doesNotMatch(
+    appStateReadRoute[1],
+    /mergeWorkspaceState/,
+    "Ordinary reads must not run the full write-time reconciliation pipeline.",
+  );
+  assert.match(server, /const metadataOnlyRequest = \(/);
+  assert.match(server, /url\.pathname === "\/api\/search" && method === "GET"/);
   assert.match(server, /await pipeline\(createReadStream\(filePath\), response\)/);
   assert.match(server, /typeof storedObject\.Body\.pipe === "function"[\s\S]*await pipeline\(storedObject\.Body, response\)/);
   assert.match(web, /if \(remoteRefreshPending \|\|[\s\S]*remoteRefreshPending = true;[\s\S]*finally \{\s*remoteRefreshPending = false;/);
   assert.match(web, /Date\.now\(\) - lastAccountDeviceWarningRefreshAt >= 15000/);
+  assert.match(web, /async function loadGlobalSearchResults\(query, requestSequence\)/);
+  assert.match(web, /api\(`\/api\/search\?\$\{new URLSearchParams\(\{ q: query, limit: "50" \}\)\}`\)/);
+  assert.match(web, /globalSearchDebounceTimer = window\.setTimeout\([\s\S]*loadGlobalSearchResults\(query, requestSequence\);[\s\S]*}, 350\);/);
+  assert.doesNotMatch(web, /els\.globalSearch\?\.addEventListener\("input", buildGlobalSearchResults\)/);
   assert.match(mobile, /let requestPending = false;[\s\S]*if \(requestPending \|\| AppState\.currentState !== "active"[\s\S]*\.finally\(\(\) => \{ requestPending = false; \}\);/);
   assert.match(mobile, /getAccountDeviceWarning\(\)[\s\S]*\.finally\(\(\) => \{ requestPending = false; \}\);[\s\S]*}, 15000\);/);
 });

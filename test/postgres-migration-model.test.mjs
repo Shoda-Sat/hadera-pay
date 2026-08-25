@@ -7,6 +7,7 @@ import {
   buildMigrationManifest,
   canonicalJson,
   prepareDatabaseImport,
+  prepareRuntimeWorkspace,
   reconstructPreparedDatabase,
   sha256Json,
   unbalancedJournals,
@@ -17,8 +18,11 @@ import {
 } from "../src/postgres/databaseStore.mjs";
 import {
   closedReportSummary,
+  findJsonClosedReport,
   identifyNewImmutableReports,
   jsonClosedReportKey,
+  jsonClosedReportSummaries,
+  reconcilePreparedPayloadRows,
 } from "../src/postgres/runtimeStore.mjs";
 
 function balancedDatabase() {
@@ -126,6 +130,8 @@ test("PostgreSQL schema makes closed reports immutable and keeps transactional i
   const sql = await readFile(new URL("../sql/migrations/001_lossless_import.sql", import.meta.url), "utf8");
   const collisionMigration = await readFile(new URL("../sql/migrations/002_allow_legacy_id_collisions.sql", import.meta.url), "utf8");
   const runtimeMigration = await readFile(new URL("../sql/migrations/003_postgres_runtime.sql", import.meta.url), "utf8");
+  const searchMigration = await readFile(new URL("../sql/migrations/004_workspace_search_indexes.sql", import.meta.url), "utf8");
+  const rowPersistenceMigration = await readFile(new URL("../sql/migrations/005_stable_runtime_ordinals.sql", import.meta.url), "utf8");
   assert.match(sql, /CREATE TABLE hp_closed_reports/);
   assert.match(sql, /BEFORE UPDATE OR DELETE ON hp_closed_reports/);
   assert.match(sql, /CREATE TABLE hp_ledger_lines/);
@@ -135,14 +141,36 @@ test("PostgreSQL schema makes closed reports immutable and keeps transactional i
   assert.match(collisionMigration, /CREATE INDEX hp_transfers_legacy_id_idx/);
   assert.doesNotMatch(collisionMigration, /CREATE UNIQUE INDEX/);
   assert.match(runtimeMigration, /DROP CONSTRAINT IF EXISTS hp_closed_reports_ordinal_check/);
+  assert.match(searchMigration, /CREATE EXTENSION IF NOT EXISTS pg_trgm/);
+  for (const table of ["orders", "receivables", "transfers", "ledger_lines", "closed_reports"]) {
+    assert.match(searchMigration, new RegExp(`hp_${table}_payload_search_idx`));
+  }
+  assert.match(rowPersistenceMigration, /CREATE TABLE hp_chat_conversations/);
+  assert.match(rowPersistenceMigration, /CREATE TABLE hp_chat_messages/);
+  assert.match(rowPersistenceMigration, /settings = settings - 'chatConversations'/);
+  assert.match(rowPersistenceMigration, /DROP CONSTRAINT IF EXISTS hp_orders_ordinal_check/);
 });
 
 test("the live server wires PostgreSQL through the guarded runtime repository", async () => {
-  const server = await readFile(new URL("../server.mjs", import.meta.url), "utf8");
+  const [server, runtimeStore] = await Promise.all([
+    readFile(new URL("../server.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../src/postgres/runtimeStore.mjs", import.meta.url), "utf8"),
+  ]);
   assert.match(server, /assertPostgresCutoverAuthorized\(\)/);
+  assert.match(server, /await applyPostgresMigrations\(\)/);
   assert.match(server, /loadRuntimePostgresDatabase/);
   assert.match(server, /saveRuntimePostgresDatabase/);
   assert.match(server, /url\.searchParams\.get\("reports"\) === "summary"/);
+  assert.match(server, /listPostgresClosedReportSummaries\(session\.workspace\.id, reportActorScope\)/);
+  assert.match(server, /url\.pathname === "\/api\/search"/);
+  assert.match(runtimeStore, /export async function searchPostgresWorkspaceRecords/);
+  assert.match(runtimeStore, /ORDER BY sort_text DESC, kind, record_key/);
+  assert.match(runtimeStore, /LIMIT \$\{limitPlaceholder\}/);
+  assert.match(runtimeStore, /reconcilePreparedPayloadRows/);
+  assert.match(runtimeStore, /workspaceCollections\[workspaceId\]/);
+  assert.doesNotMatch(runtimeStore, /DELETE FROM \$\{table\} WHERE workspace_id = \$1/);
+  assert.match(server, /collections: \["orders", "receivables", "savedCustomers"\]/);
+  assert.match(server, /collections: \["orders", "receivables", "chatConversations"\]/);
 });
 
 test("closed report summaries omit transaction payloads and immutable rows can only be appended", () => {
@@ -163,8 +191,79 @@ test("closed report summaries omit transaction payloads and immutable rows can o
   assert.equal(summary.transferCount, 1);
   assert.equal(summary.ledgerLineCount, 1);
   assert.equal(Object.hasOwn(summary, "orders"), false);
+  const otherReport = { ...report, id: "ARC-2", actorId: "ACT-2", actor: "Other Actor" };
+  report.actorId = "ACT-1";
+  const actorSummaries = jsonClosedReportSummaries([report, otherReport], {
+    actorId: "ACT-1",
+    actorName: "Nahom",
+  });
+  assert.deepEqual(actorSummaries.map((item) => item.id), ["ARC-1"]);
+  assert.equal(actorSummaries[0]._reportKey, jsonClosedReportKey(report, 0), "Filtering must retain the immutable report key ordinal.");
+  assert.deepEqual(findJsonClosedReport([report, otherReport], actorSummaries[0]._reportKey)?.orders, report.orders);
   const existing = [{ payloadSha256: sha256Json(report) }];
   const incoming = [{ payloadSha256: sha256Json(report) }, { payloadSha256: sha256Json({ id: "ARC-2" }) }];
   assert.deepEqual(identifyNewImmutableReports(existing, incoming), [incoming[1]]);
   assert.throws(() => identifyNewImmutableReports(existing, []), /immutable/);
+});
+
+test("runtime row reconciliation preserves old keys and writes only the changed order", () => {
+  const existing = [
+    { key: "imported-order-a", legacy_id: "ORD-1", ordinal: 0, payload_sha256: "hash-a" },
+    { key: "imported-order-b", legacy_id: "ORD-2", ordinal: 1, payload_sha256: "hash-b" },
+  ];
+  const incoming = [
+    { recordKey: "generated-new", legacyId: "ORD-3", ordinal: 0, payloadSha256: "hash-c", payload: { id: "ORD-3" } },
+    { recordKey: "generated-a", legacyId: "ORD-1", ordinal: 1, payloadSha256: "hash-a", payload: { id: "ORD-1" } },
+    { recordKey: "generated-b", legacyId: "ORD-2", ordinal: 2, payloadSha256: "hash-b-updated", payload: { id: "ORD-2" } },
+  ];
+  const plan = reconcilePreparedPayloadRows("hp_orders", existing, incoming);
+  assert.equal(plan.rebalanced, false);
+  assert.deepEqual(plan.deletedKeys, []);
+  assert.equal(plan.rows[0].ordinal, -1, "A prepend must not renumber existing rows.");
+  assert.equal(plan.rows[1].recordKey, "imported-order-a");
+  assert.equal(plan.rows[2].recordKey, "imported-order-b");
+  assert.deepEqual(plan.changedRows.map((row) => row.legacyId), ["ORD-3", "ORD-2"]);
+});
+
+test("runtime preparation normalizes only collections named by an atomic action", () => {
+  const state = balancedDatabase().appStates["WS-1"];
+  const prepared = prepareRuntimeWorkspace("WS-1", state, {
+    collections: ["orders", "receivables"],
+    cloneSettings: false,
+  });
+  assert.equal(prepared.orders.length, 1);
+  assert.equal(prepared.receivables.length, 1);
+  assert.equal(prepared.actors.length, 0);
+  assert.equal(prepared.ledgerLines.length, 0);
+  assert.equal(prepared.closedReports.length, 0);
+  assert.equal(prepared.chatMessages.length, 0);
+  assert.equal(Object.hasOwn(prepared.settings, "chatConversations"), false);
+});
+
+test("appending a chat message preserves every older message ordinal", () => {
+  const existing = [
+    { key: "message-a", legacy_id: "MSG-1", ordinal: 0, payload_sha256: "hash-a" },
+    { key: "message-b", legacy_id: "MSG-2", ordinal: 1, payload_sha256: "hash-b" },
+  ];
+  const incoming = [
+    { recordKey: "generated-a", legacyId: "MSG-1", ordinal: 0, payloadSha256: "hash-a", payload: { id: "MSG-1" } },
+    { recordKey: "generated-new", legacyId: "MSG-3", ordinal: 1, payloadSha256: "hash-c", payload: { id: "MSG-3" } },
+    { recordKey: "generated-b", legacyId: "MSG-2", ordinal: 2, payloadSha256: "hash-b", payload: { id: "MSG-2" } },
+  ];
+  const plan = reconcilePreparedPayloadRows("hp_chat_messages", existing, incoming);
+  assert.equal(plan.rebalanced, false);
+  assert.equal(plan.rows.find((row) => row.legacyId === "MSG-1").ordinal, 0);
+  assert.equal(plan.rows.find((row) => row.legacyId === "MSG-2").ordinal, 1);
+  assert.equal(plan.rows.find((row) => row.legacyId === "MSG-3").ordinal, 2);
+  assert.deepEqual(plan.changedRows.map((row) => row.legacyId), ["MSG-3"]);
+});
+
+test("chat messages are normalized but reconstruct without changing the workspace", () => {
+  const source = balancedDatabase();
+  const prepared = prepareDatabaseImport(source);
+  const workspace = prepared.workspaces[0];
+  assert.equal(workspace.chatConversations.length, 1);
+  assert.equal(workspace.chatMessages.length, 1);
+  assert.equal(Object.hasOwn(workspace.settings, "chatConversations"), false);
+  assert.deepEqual(reconstructPreparedDatabase(prepared), source);
 });

@@ -35,6 +35,7 @@ import {
   removeRecoveredOrderAliases,
 } from "./src/orderIntegrity.mjs";
 import { assertPostgresCutoverAuthorized } from "./src/postgres/databaseStore.mjs";
+import { applyPostgresMigrations } from "./src/postgres/migrations.mjs";
 import {
   findJsonClosedReport,
   getPostgresClosedReport,
@@ -42,6 +43,7 @@ import {
   listPostgresClosedReportSummaries,
   loadRuntimePostgresDatabase,
   saveRuntimePostgresDatabase,
+  searchPostgresWorkspaceRecords,
 } from "./src/postgres/runtimeStore.mjs";
 import {
   DeleteObjectCommand,
@@ -61,6 +63,10 @@ if (!["json", "postgres"].includes(persistenceBackend)) {
 }
 if (persistenceBackend === "postgres") {
   assertPostgresCutoverAuthorized();
+  const migrationResult = await applyPostgresMigrations();
+  if (migrationResult.installed.length) {
+    console.log(`Applied PostgreSQL migrations: ${migrationResult.installed.join(", ")}`);
+  }
 }
 const dataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(root, "data");
 const dbPath = path.join(dataDir, "auth-db.json");
@@ -396,7 +402,7 @@ function saveDb(db, options = {}) {
   });
 }
 
-async function mutateLatestWorkspaceStateAtLatest(workspaceId, mutate) {
+async function mutateLatestWorkspaceStateAtLatest(workspaceId, mutate, persistenceOptions = {}) {
   return enqueueDbWrite(async () => {
     const latestDb = await readPersistedDb(
       persistenceBackend === "postgres" ? { workspaceIds: [workspaceId] } : {}
@@ -408,19 +414,22 @@ async function mutateLatestWorkspaceStateAtLatest(workspaceId, mutate) {
     await writePersistedDbAtomic(latestDb, {
       workspaceIds: [workspaceId],
       expectedAppStateRevisions: { [workspaceId]: expectedRevision },
+      workspaceCollections: persistenceOptions.collections
+        ? { [workspaceId]: persistenceOptions.collections }
+        : {},
     });
     return result;
   });
 }
 
-async function mutateLatestWorkspaceState(workspaceId, expectedRevision, mutate) {
+async function mutateLatestWorkspaceState(workspaceId, expectedRevision, mutate, persistenceOptions = {}) {
   return mutateLatestWorkspaceStateAtLatest(workspaceId, async (latestDb, currentState) => {
     const actualRevision = workspaceStateRevision(latestDb, workspaceId);
     if (String(expectedRevision || "") !== actualRevision) {
       throw httpError(409, "The workspace changed before this action finished. Refresh and try again.");
     }
     return mutate(latestDb, currentState);
-  });
+  }, persistenceOptions);
 }
 
 function id(prefix) {
@@ -2338,6 +2347,71 @@ function mergeWorkspaceState(db, workspaceId, incomingState = {}) {
   return nextState;
 }
 
+function workspaceStateForRead(db, workspaceId, persistedState = {}) {
+  const state = persistedState && typeof persistedState === "object" && !Array.isArray(persistedState)
+    ? persistedState
+    : {};
+  const membershipActors = workspaceActors(db, workspaceId);
+  const activeActorIds = new Set(membershipActors.map((actor) => String(actor?.id || "")));
+  const deletedActorIds = new Set((Array.isArray(state.deletedActorIds) ? state.deletedActorIds : [])
+    .map((actorId) => String(actorId || ""))
+    .filter(Boolean));
+  activeActorIds.forEach((actorId) => deletedActorIds.delete(actorId));
+  const membershipActorsById = new Map(membershipActors.map((actor) => [String(actor?.id || ""), actor]));
+  const persistedActors = (Array.isArray(state.actors) ? state.actors : []).filter((actor) => {
+    const actorWorkspaceId = String(actor?.workspaceId || "").trim();
+    return !actorWorkspaceId || actorWorkspaceId === workspaceId;
+  });
+  const actors = mergeById(membershipActors, persistedActors)
+    .map((actor) => {
+      const membershipActor = membershipActorsById.get(String(actor?.id || ""));
+      const canonicalActor = membershipActor
+        ? {
+            ...actor,
+            name: membershipActor.name,
+            role: membershipActor.role,
+            currency: membershipActor.currency,
+            workingCurrencies: membershipActor.workingCurrencies,
+            brokerCode: actor?.brokerCode || membershipActor.brokerCode || "",
+            active: true,
+          }
+        : actor;
+      return {
+        ...canonicalActor,
+        managedByMaster: canonicalActor?.role !== "Master" && !activeActorIds.has(String(canonicalActor?.id || "")),
+        workspaceId,
+      };
+    })
+    .filter((actor) => activeActorIds.has(String(actor?.id || "")) || !deletedActorIds.has(String(actor?.id || "")));
+  return {
+    ...state,
+    actors,
+    _workspaceId: workspaceId,
+  };
+}
+
+function workspaceMayNeedSiemGalaxyReadRepair(db, workspaceId) {
+  const workspace = (Array.isArray(db?.workspaces) ? db.workspaces : [])
+    .find((item) => String(item?.id || "") === String(workspaceId || ""));
+  const ownerName = (Array.isArray(db?.users) ? db.users : [])
+    .find((user) => user?.id === workspace?.ownerUserId)?.name;
+  const compact = (value) => String(value || "").trim().toLocaleLowerCase().replace(/[^a-z0-9]+/g, "");
+  const workspaceName = compact(workspace?.name);
+  return compact(ownerName) === "galaxy" || workspaceName === "galaxy" || workspaceName === "galaxyworkspace";
+}
+
+function workspaceStateForReadWithHistoricalRepair(db, workspaceId, persistedState = {}) {
+  const state = workspaceStateForRead(db, workspaceId, persistedState);
+  if (!workspaceMayNeedSiemGalaxyReadRepair(db, workspaceId)) {
+    return { state, isolationRepairApplied: false };
+  }
+  const repairCandidate = structuredClone(state);
+  const isolationRepair = repairSiemActorsLeakedIntoGalaxy(db, workspaceId, repairCandidate);
+  return isolationRepair.repaired
+    ? { state: repairCandidate, isolationRepairApplied: true }
+    : { state, isolationRepairApplied: false };
+}
+
 function sessionCanAccessCreditReminder(session, receivable) {
   if (session?.membership?.role === "Master") return true;
   if (session?.membership?.role !== "Actor") return false;
@@ -2349,6 +2423,7 @@ function sessionCanAccessCreditReminder(session, receivable) {
 
 function stripRestrictedCreditReminders(state, session) {
   if (!state || typeof state !== "object") return state;
+  if (session?.membership?.role === "Master") return state;
   const visibleReceivable = (receivable) => {
     if (sessionCanAccessCreditReminder(session, receivable)) return receivable;
     const { creditReminder, ...visible } = receivable;
@@ -2361,6 +2436,156 @@ function stripRestrictedCreditReminders(state, session) {
       ...archive,
       receivables: (archive.receivables || []).map(visibleReceivable),
     })),
+  };
+}
+
+function responseOrderMatchesActor(order, actorId, actorName) {
+  const matchesParticipant = (role) => {
+    const participantActorId = String(role === "broker" ? order?.brokerActorId || "" : order?.agentActorId || "");
+    const participantName = String(role === "broker" ? order?.broker || "" : order?.agent || "");
+    if (participantActorId) return Boolean(actorId && participantActorId === actorId);
+    return Boolean(actorName && participantName === actorName);
+  };
+  return matchesParticipant("broker") || matchesParticipant("agent");
+}
+
+function responseArchiveMatchesActor(archive, actorId, actorName) {
+  const archiveActorId = String(archive?.actorId || "");
+  if (archiveActorId) return Boolean(actorId && archiveActorId === actorId);
+  return Boolean(actorName && String(archive?.actor || "") === actorName);
+}
+
+function responseReceivableMatchesActor(receivable, actorId, actorName) {
+  const borrowerActorId = String(receivable?.borrowerActorId || "");
+  if (borrowerActorId) return Boolean(actorId && borrowerActorId === actorId);
+  return Boolean(actorName && String(receivable?.borrower || "") === actorName);
+}
+
+function responseTransferMatchesActor(transfer, actorId, actorName) {
+  const fromActorId = String(transfer?.fromActorId || "");
+  const toActorId = String(transfer?.toActorId || "");
+  return Boolean(
+    (actorId && (fromActorId === actorId || toActorId === actorId))
+    || (actorName && (
+      (!fromActorId && String(transfer?.from || "") === actorName)
+      || (!toActorId && String(transfer?.to || "") === actorName)
+      || String(transfer?.initiatedBy || "") === actorName
+    ))
+  );
+}
+
+function responseLedgerLineMatchesActor(line, actorId, actorName) {
+  const lineActorId = String(line?.actorId || "");
+  if (lineActorId) return Boolean(actorId && lineActorId === actorId);
+  const account = String(line?.account || "");
+  return Boolean(actorName && (account === actorName || account === `${actorName} ACTOR_CLEARING`));
+}
+
+function stateForSessionResponse(state, session) {
+  if (!state || typeof state !== "object" || session?.membership?.role !== "Actor") {
+    return stripRestrictedCreditReminders(state, session);
+  }
+  const actorId = String(session.membership.actorId || "");
+  const actorName = String(session.membership.actorName || "");
+  const orders = (Array.isArray(state.orders) ? state.orders : [])
+    .filter((order) => responseOrderMatchesActor(order, actorId, actorName));
+  const archives = (Array.isArray(state.archives) ? state.archives : [])
+    .filter((archive) => responseArchiveMatchesActor(archive, actorId, actorName));
+  const visibleOrderIds = new Set([
+    ...orders,
+    ...archives.flatMap((archive) => Array.isArray(archive?.orders) ? archive.orders : []),
+  ].flatMap((order) => [order?.id, order?.internalOrderId, order?.collisionSourceOrderId])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean));
+  const scopedState = {
+    ...state,
+    orders,
+    savedCustomers: (Array.isArray(state.savedCustomers) ? state.savedCustomers : [])
+      .filter((customer) => actorId && String(customer?.actorId || "") === actorId),
+    receivables: (Array.isArray(state.receivables) ? state.receivables : [])
+      .filter((receivable) => responseReceivableMatchesActor(receivable, actorId, actorName)
+        || visibleOrderIds.has(String(receivable?.orderId || "").trim())),
+    transfers: (Array.isArray(state.transfers) ? state.transfers : [])
+      .filter((transfer) => responseTransferMatchesActor(transfer, actorId, actorName)),
+    ledger: (Array.isArray(state.ledger) ? state.ledger : [])
+      .filter((line) => responseLedgerLineMatchesActor(line, actorId, actorName)
+        || visibleOrderIds.has(String(line?.orderId || "").trim())),
+    masterBankEntries: [],
+    archives,
+    orderParticipantIdentityLinks: (Array.isArray(state.orderParticipantIdentityLinks) ? state.orderParticipantIdentityLinks : [])
+      .filter((link) => (Array.isArray(link?.orderIds) ? link.orderIds : [])
+        .some((orderId) => visibleOrderIds.has(String(orderId || "").trim()))),
+    chatConversations: (Array.isArray(state.chatConversations) ? state.chatConversations : [])
+      .filter((chat) => actorName && (Array.isArray(chat?.members) ? chat.members : []).includes(actorName)),
+  };
+  return stripRestrictedCreditReminders(scopedState, session);
+}
+
+function boundedWorkspaceSearchTerms(value) {
+  return String(value || "")
+    .trim()
+    .normalize("NFKC")
+    .toLocaleLowerCase()
+    .split(/\s+/u)
+    .map((term) => term.trim())
+    .filter(Boolean)
+    .slice(0, 8)
+    .map((term) => term.slice(0, 80));
+}
+
+function workspaceSearchRecordTime(kind, record) {
+  const values = kind === "order"
+    ? [record?.voidedAt, record?.paidAt, record?.returnedAt, record?.updatedAt, record?.sentAt, record?.createdAt]
+    : kind === "transfer"
+      ? [record?.reversedAt, record?.paidOutAt, record?.acceptedAt, record?.approvedAt, record?.updatedAt, record?.sentAt, record?.createdAt]
+      : kind === "receivable"
+        ? [record?.updatedAt, record?.createdAt]
+        : kind === "ledger"
+          ? [record?.postedAt]
+          : [record?.closedAt];
+  for (const value of values) {
+    const time = new Date(value || 0).getTime();
+    if (Number.isFinite(time) && time > 0) return time;
+  }
+  return 0;
+}
+
+function searchJsonWorkspaceRecords(db, session, query, limit = 50) {
+  const terms = boundedWorkspaceSearchTerms(query);
+  if (!terms.length) return { results: [], hasMore: false };
+  const resultLimit = Math.max(1, Math.min(100, Number(limit) || 50));
+  const persistedState = db.appStates?.[session.workspace.id] || {};
+  const visibleState = stateForSessionResponse(persistedState, session);
+  const reportActorScope = session.membership.role === "Actor"
+    ? { actorId: session.membership.actorId || "", actorName: session.membership.actorName || "" }
+    : {};
+  const collections = [
+    ["order", visibleState.orders || []],
+    ["receivable", visibleState.receivables || []],
+    ["transfer", visibleState.transfers || []],
+    ["ledger", visibleState.ledger || []],
+    ["report", jsonClosedReportSummaries(persistedState.archives || [], reportActorScope)],
+  ];
+  const matches = [];
+  let matchingCount = 0;
+  collections.forEach(([kind, records]) => {
+    (Array.isArray(records) ? records : []).forEach((record) => {
+      const haystack = JSON.stringify(record || {}).normalize("NFKC").toLocaleLowerCase();
+      if (!terms.every((term) => haystack.includes(term))) return;
+      matchingCount += 1;
+      matches.push({ kind, record, time: workspaceSearchRecordTime(kind, record) });
+      if (matches.length <= resultLimit) return;
+      let oldestIndex = 0;
+      for (let index = 1; index < matches.length; index += 1) {
+        if (matches[index].time < matches[oldestIndex].time) oldestIndex = index;
+      }
+      matches.splice(oldestIndex, 1);
+    });
+  });
+  matches.sort((left, right) => right.time - left.time);
+  return {
+    results: matches.map(({ kind, record }) => ({ kind, record })),
+    hasMore: matchingCount > resultLimit,
   };
 }
 
@@ -2847,7 +3072,7 @@ async function applyActorBalanceClose(session, input = {}) {
     const revision = markWorkspaceStateChanged(latestDb, workspaceId, result.state);
     return {
       ok: true,
-      state: stripRestrictedCreditReminders(result.state, session),
+      state: stateForSessionResponse(result.state, session),
       revision,
       actor: result.actorName,
       archiveId: result.archiveId,
@@ -2855,6 +3080,8 @@ async function applyActorBalanceClose(session, input = {}) {
       includedCancelledOrderCount: result.includedCancelledOrderCount,
       omittedCancelledOrderCount: result.omittedCancelledOrderCount,
     };
+  }, {
+    collections: ["actors", "orders", "receivables", "transfers", "ledger", "archives", "settlements"],
   });
 }
 
@@ -4208,7 +4435,7 @@ function brokerSubmitResponse(state, session, revision, order, receivable, custo
     receivableCounter: Number(state.receivableCounter || 0),
     customerCounter: Number(state.customerCounter || 0),
     orderState: order?.state || state.orderState || "Pending Forward",
-    ...(includeState ? { state: stripRestrictedCreditReminders(state, session) } : {}),
+    ...(includeState ? { state: stateForSessionResponse(state, session) } : {}),
   };
 }
 
@@ -4672,7 +4899,7 @@ function masterForwardResponse(state, session, revision, order, receivable, chat
     message: message ? structuredClone(message) : null,
     chatCounter: Number(state.chatCounter || 0),
     orderState: order.state || state.orderState || "Assigned",
-    ...(includeState ? { state: stripRestrictedCreditReminders(state, session) } : {}),
+    ...(includeState ? { state: stateForSessionResponse(state, session) } : {}),
   };
 }
 
@@ -5015,12 +5242,24 @@ async function handleApi(request, response, url) {
     const requestSession = metadataDb.sessions.find((item) => item.id === sessionId);
     const ownerRequest = requestSession?.userId === "__owner";
     const signupNeedsHistoricalIdentityChecks = url.pathname === "/api/auth/signup" && method === "POST";
+    const metadataOnlyRequest = (
+      (url.pathname === "/api/session" && method === "GET")
+      || (url.pathname === "/api/search" && method === "GET")
+      || (url.pathname === "/api/auth/logout" && method === "POST")
+      || (url.pathname === "/api/auth/timeout" && method === "PUT")
+      || (url.pathname === "/api/auth/password" && method === "POST")
+      || (ownerRequest && url.pathname.startsWith("/api/owner/")
+        && !(url.pathname === "/api/owner/repair-order-archives/plan-all" && method === "POST")
+        && !(url.pathname === "/api/owner/order-integrity/plan" && method === "GET"))
+    );
     const workspaceLoadsInsideMutation = method === "POST" && [
       "/api/app-state/submit-order",
       "/api/app-state/forward-order",
       "/api/app-state/close-balance",
     ].includes(url.pathname) || (method === "PUT" && url.pathname === "/api/app-state");
-    if (ownerRequest || signupNeedsHistoricalIdentityChecks) {
+    if (metadataOnlyRequest) {
+      db = metadataDb;
+    } else if (ownerRequest || signupNeedsHistoricalIdentityChecks) {
       db = await loadDb(lazyReportRead ? { includeClosedReports: false } : {});
     } else if (workspaceLoadsInsideMutation) {
       db = metadataDb;
@@ -5257,7 +5496,7 @@ async function handleApi(request, response, url) {
   }
 
   const backgroundRead = method === "GET" && (
-    ["/api/app-state", "/api/app-state/version", "/api/auth/device-warning", "/api/files/status"].includes(url.pathname) ||
+    ["/api/app-state", "/api/app-state/version", "/api/auth/device-warning", "/api/files/status", "/api/search"].includes(url.pathname) ||
     /^\/api\/closed-reports\/[^/]+$/.test(url.pathname) ||
     /^\/api\/files\/[^/]+\/(?:download-url|content)$/.test(url.pathname)
   );
@@ -5275,6 +5514,27 @@ async function handleApi(request, response, url) {
       readOnly: true,
       graceEndsAt: session.subscription.graceEndsAt,
     });
+    return;
+  }
+
+  if (url.pathname === "/api/search" && method === "GET") {
+    if (!["Master", "Actor"].includes(session.membership.role)) {
+      return sendJson(response, 403, { error: "Workspace search is available only to workspace members." });
+    }
+    const query = String(url.searchParams.get("q") || "").trim();
+    if (query.length > 240) return sendJson(response, 400, { error: "Search text is too long." });
+    const limit = Math.max(1, Math.min(50, Number(url.searchParams.get("limit")) || 50));
+    const actorScoped = session.membership.role === "Actor";
+    const result = persistenceBackend === "postgres"
+      ? await searchPostgresWorkspaceRecords(session.workspace.id, {
+          query,
+          limit,
+          actorScoped,
+          actorId: session.membership.actorId || "",
+          actorName: session.membership.actorName || "",
+        })
+      : searchJsonWorkspaceRecords(db, session, query, limit);
+    sendJson(response, 200, { query, limit, ...result });
     return;
   }
 
@@ -5440,7 +5700,7 @@ async function handleApi(request, response, url) {
       migrated: result.migrated,
       failed: result.failed,
       remaining: result.remaining,
-      state: stripRestrictedCreditReminders(result.state, session),
+      state: stateForSessionResponse(result.state, session),
       revision: result.revision,
     });
     return;
@@ -5853,7 +6113,7 @@ async function handleApi(request, response, url) {
       const latestAuth = latestWritableBrokerSession(latestDb, request, session.workspace.id);
       committedSessionRecord = latestAuth.sessionRecord;
       return applyAtomicBrokerSubmit(latestDb, latestState, latestAuth.session, body);
-    });
+    }, { collections: ["orders", "receivables", "savedCustomers"] });
     setSessionCookie(response, committedSessionRecord);
     sendJson(response, 200, result);
     return;
@@ -5867,7 +6127,7 @@ async function handleApi(request, response, url) {
       const latestAuth = latestWritableMasterSession(latestDb, request, session.workspace.id);
       committedSessionRecord = latestAuth.sessionRecord;
       return applyAtomicMasterForward(latestDb, latestState, latestAuth.session, body);
-    });
+    }, { collections: ["orders", "receivables", "chatConversations"] });
     setSessionCookie(response, committedSessionRecord);
     sendJson(response, 200, result);
     return;
@@ -5913,10 +6173,16 @@ async function handleApi(request, response, url) {
 
   if (url.pathname === "/api/app-state" && method === "GET") {
     const persistedState = db.appStates[session.workspace.id] || {};
+    const reportActorScope = session.membership.role === "Actor"
+      ? {
+          actorId: String(session.membership.actorId || ""),
+          actorName: String(session.membership.actorName || ""),
+        }
+      : {};
     const reportSummaries = url.searchParams.get("reports") === "summary"
       ? persistenceBackend === "postgres"
-        ? await listPostgresClosedReportSummaries(session.workspace.id)
-        : jsonClosedReportSummaries(persistedState.archives || [])
+        ? await listPostgresClosedReportSummaries(session.workspace.id, reportActorScope)
+        : jsonClosedReportSummaries(persistedState.archives || [], reportActorScope)
       : null;
     const currentState = reportSummaries
       ? {
@@ -5928,15 +6194,16 @@ async function handleApi(request, response, url) {
         }
       : persistedState;
     db.appStates[session.workspace.id] = currentState;
-    const state = mergeWorkspaceState(db, session.workspace.id, currentState);
+    const readResult = workspaceStateForReadWithHistoricalRepair(db, session.workspace.id, currentState);
+    const state = readResult.state;
     let revision = workspaceStateRevision(db, session.workspace.id);
-    if (!reportSummaries && state.__workspaceIsolationRepairApplied === true) {
+    if (!reportSummaries && readResult.isolationRepairApplied) {
       const expectedRevision = revision;
       revision = markWorkspaceStateChanged(db, session.workspace.id, state);
       await saveDb(db, { replace: true, ...workspaceStateSaveOptions(db, session.workspace.id, expectedRevision) });
     }
     sendJson(response, 200, {
-      state: stripRestrictedCreditReminders(
+      state: stateForSessionResponse(
         reportSummaries ? { ...state, archives: reportSummaries } : state,
         session
       ),
@@ -6004,7 +6271,7 @@ async function handleApi(request, response, url) {
     if (nextState.expandedSpecialDividerActorId === actorId) nextState.expandedSpecialDividerActorId = "";
     const revision = markWorkspaceStateChanged(db, session.workspace.id, nextState);
     await saveDb(db, { replace: true, ...workspaceStateSaveOptions(db, session.workspace.id, expectedRevision) });
-    sendJson(response, 200, { ok: true, state: stripRestrictedCreditReminders(nextState, session), revision });
+    sendJson(response, 200, { ok: true, state: stateForSessionResponse(nextState, session), revision });
     return;
   }
 
@@ -6026,7 +6293,7 @@ async function handleApi(request, response, url) {
       ok: true,
       actor: { id: actor.id, name: actor.name },
       counts,
-      state: stripRestrictedCreditReminders(nextState, session),
+      state: stateForSessionResponse(nextState, session),
       revision,
     });
     return;
@@ -6069,7 +6336,7 @@ async function handleApi(request, response, url) {
     }
     const revision = markWorkspaceStateChanged(db, session.workspace.id, nextState);
     await saveDb(db, { replace: true, ...workspaceStateSaveOptions(db, session.workspace.id, expectedRevision) });
-    sendJson(response, 200, { ok: true, state: stripRestrictedCreditReminders(nextState, session), revision });
+    sendJson(response, 200, { ok: true, state: stateForSessionResponse(nextState, session), revision });
     return;
   }
 
@@ -6084,7 +6351,7 @@ async function handleApi(request, response, url) {
         const revision = markWorkspaceStateChanged(latestDb, session.workspace.id, nextState);
         return {
           ok: true,
-          state: stripRestrictedCreditReminders(nextState, session),
+          state: stateForSessionResponse(nextState, session),
           revision,
         };
       }

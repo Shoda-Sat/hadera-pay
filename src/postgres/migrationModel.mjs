@@ -10,6 +10,7 @@ export const normalizedWorkspaceCollections = Object.freeze([
   "savedCustomers",
   "masterBankEntries",
   "settlements",
+  "chatConversations",
 ]);
 
 export function canonicalJson(value) {
@@ -176,6 +177,47 @@ function prepareLedger(workspaceId, items) {
   return { journalEntries: Array.from(journalByKey.values()), ledgerLines: rows };
 }
 
+function prepareChats(workspaceId, items) {
+  const source = Array.isArray(items) ? items : [];
+  const conversations = [];
+  const messages = [];
+  let globalMessageOrdinal = 0;
+  source.forEach((chat, ordinal) => {
+    if (!chat || typeof chat !== "object" || Array.isArray(chat)) {
+      throw new Error(`Workspace ${workspaceId} chatConversations[${ordinal}] is not an object.`);
+    }
+    const { messages: rawMessages, ...conversationPayload } = chat;
+    const identity = recordKey("chatConversations", chat, ordinal);
+    conversations.push({
+      workspaceId,
+      ...identity,
+      ordinal,
+      chatType: nullableString(chat.type),
+      updatedAtText: nullableString(chat.updatedAt || chat.createdAt),
+      payload: conversationPayload,
+      payloadSha256: sha256Json(conversationPayload),
+    });
+    (Array.isArray(rawMessages) ? rawMessages : []).forEach((message, messageOrdinal) => {
+      if (!message || typeof message !== "object" || Array.isArray(message)) {
+        throw new Error(`Workspace ${workspaceId} chatConversations[${ordinal}].messages[${messageOrdinal}] is not an object.`);
+      }
+      const messageIdentity = recordKey("chatMessages", message, globalMessageOrdinal);
+      messages.push({
+        workspaceId,
+        conversationRecordKey: identity.recordKey,
+        ...messageIdentity,
+        ordinal: globalMessageOrdinal,
+        orderId: nullableString(message.orderId),
+        createdAtText: nullableString(message.createdAt),
+        payload: message,
+        payloadSha256: sha256Json(message),
+      });
+      globalMessageOrdinal += 1;
+    });
+  });
+  return { conversations, messages };
+}
+
 function sortedBalanceRows(map, fieldNames) {
   return Array.from(map.entries())
     .map(([encoded, differenceMinor]) => {
@@ -256,84 +298,102 @@ export function buildMigrationManifest(db) {
   };
 }
 
-export function prepareDatabaseImport(db) {
-  if (!db || typeof db !== "object" || Array.isArray(db)) throw new Error("The JSON backup must contain one database object.");
-  const metadata = Object.fromEntries(Object.entries(db)
-    .filter(([key]) => key !== "appStates")
-    .map(([key, value]) => [key, structuredClone(value)]));
-  const workspaces = Object.entries(db.appStates || {}).map(([workspaceId, rawState]) => {
-    if (!workspaceId || !rawState || typeof rawState !== "object" || Array.isArray(rawState)) {
-      throw new Error(`Workspace ${workspaceId || "<blank>"} has an invalid state object.`);
+export function prepareRuntimeWorkspace(workspaceId, rawState, options = {}) {
+  if (!workspaceId || !rawState || typeof rawState !== "object" || Array.isArray(rawState)) {
+    throw new Error(`Workspace ${workspaceId || "<blank>"} has an invalid state object.`);
+  }
+  const state = rawState;
+  const selected = Array.isArray(options.collections) && options.collections.length
+    ? new Set(options.collections)
+    : null;
+  const includes = (collection) => !selected || selected.has(collection);
+  const settings = {};
+  const collectionPresence = Object.fromEntries(normalizedWorkspaceCollections.map((collection) => {
+    const present = Object.prototype.hasOwnProperty.call(state, collection);
+    if (present && !Array.isArray(state[collection])) {
+      throw new Error(`Workspace ${workspaceId} collection ${collection} is not an array.`);
     }
-    const state = rawState;
-    const settings = {};
-    const collectionPresence = Object.fromEntries(normalizedWorkspaceCollections.map((collection) => {
-      const present = Object.prototype.hasOwnProperty.call(state, collection);
-      if (present && !Array.isArray(state[collection])) {
-        throw new Error(`Workspace ${workspaceId} collection ${collection} is not an array.`);
-      }
-      return [collection, present];
-    }));
-    Object.entries(state).forEach(([key, value]) => {
-      if (!normalizedWorkspaceCollections.includes(key)) settings[key] = structuredClone(value);
-    });
-    const ledger = prepareLedger(workspaceId, state.ledger);
-    const manifest = workspaceManifest(workspaceId, state);
-    return {
+    return [collection, present];
+  }));
+  Object.entries(state).forEach(([key, value]) => {
+    if (!normalizedWorkspaceCollections.includes(key)) {
+      settings[key] = options.cloneSettings === false ? value : structuredClone(value);
+    }
+  });
+  const ledger = includes("ledger") ? prepareLedger(workspaceId, state.ledger) : { journalEntries: [], ledgerLines: [] };
+  const chats = includes("chatConversations") ? prepareChats(workspaceId, state.chatConversations) : { conversations: [], messages: [] };
+  const revision = stringValue(state._syncRevision) || "0";
+  return {
       workspaceId,
-      revision: stringValue(state._syncRevision) || "0",
+      revision,
       settings,
       collectionPresence,
-      sourceSha256: sha256Json(state),
-      actors: baseRows(workspaceId, "actors", state.actors, (item) => ({
+      sourceSha256: sha256Json([workspaceId, revision, settings]),
+      actors: includes("actors") ? baseRows(workspaceId, "actors", state.actors, (item) => ({
         actorName: nullableString(item.name),
         actorRole: nullableString(item.role),
         baseCurrency: currencyValue(item.currency),
-      })),
-      orders: baseRows(workspaceId, "orders", state.orders, (item) => ({
+      })) : [],
+      orders: includes("orders") ? baseRows(workspaceId, "orders", state.orders, (item) => ({
         journal: nullableString(item.journal),
         orderState: nullableString(item.state),
         brokerActorId: nullableString(item.brokerActorId),
         agentActorId: nullableString(item.agentActorId),
         createdAtText: nullableString(item.createdAt),
         updatedAtText: nullableString(item.updatedAt),
-      })),
-      receivables: baseRows(workspaceId, "receivables", state.receivables, (item) => ({
+      })) : [],
+      receivables: includes("receivables") ? baseRows(workspaceId, "receivables", state.receivables, (item) => ({
         orderId: nullableString(item.orderId),
         journal: nullableString(item.journal),
         borrowerActorId: nullableString(item.borrowerActorId),
         createdAtText: nullableString(item.createdAt),
         updatedAtText: nullableString(item.updatedAt),
-      })),
-      transfers: baseRows(workspaceId, "transfers", state.transfers, (item) => ({
+      })) : [],
+      transfers: includes("transfers") ? baseRows(workspaceId, "transfers", state.transfers, (item) => ({
         journal: nullableString(item.journal),
         transferState: nullableString(item.state),
         fromActorId: nullableString(item.fromActorId),
         toActorId: nullableString(item.toActorId),
         createdAtText: nullableString(item.createdAt),
         updatedAtText: nullableString(item.updatedAt),
-      })),
+      })) : [],
       journalEntries: ledger.journalEntries,
       ledgerLines: ledger.ledgerLines,
-      closedReports: baseRows(workspaceId, "archives", state.archives, (item) => ({
+      closedReports: includes("archives") ? baseRows(workspaceId, "archives", state.archives, (item) => ({
         actorId: nullableString(item.actorId),
         actorName: nullableString(item.actor),
         closedAtText: nullableString(item.closedAt),
-      })),
-      savedCustomers: baseRows(workspaceId, "savedCustomers", state.savedCustomers, (item) => ({
+      })) : [],
+      savedCustomers: includes("savedCustomers") ? baseRows(workspaceId, "savedCustomers", state.savedCustomers, (item) => ({
         actorId: nullableString(item.actorId),
         updatedAtText: nullableString(item.updatedAt),
-      })),
-      masterBankEntries: baseRows(workspaceId, "masterBankEntries", state.masterBankEntries, (item) => ({
+      })) : [],
+      masterBankEntries: includes("masterBankEntries") ? baseRows(workspaceId, "masterBankEntries", state.masterBankEntries, (item) => ({
         reference: nullableString(item.reference),
         currency: currencyValue(item.currency),
         postedAtText: nullableString(item.postedAt),
-      })),
-      settlements: baseRows(workspaceId, "settlements", state.settlements, (item) => ({
+      })) : [],
+      settlements: includes("settlements") ? baseRows(workspaceId, "settlements", state.settlements, (item) => ({
         actorName: nullableString(item.actor),
         currency: currencyValue(item.currency),
         netMinor: Number.isSafeInteger(Number(item.netMinor)) ? String(Number(item.netMinor)) : "0",
-      })),
+      })) : [],
+      chatConversations: chats.conversations,
+      chatMessages: chats.messages,
+  };
+}
+
+export function prepareDatabaseImport(db) {
+  if (!db || typeof db !== "object" || Array.isArray(db)) throw new Error("The JSON backup must contain one database object.");
+  const metadata = Object.fromEntries(Object.entries(db)
+    .filter(([key]) => key !== "appStates")
+    .map(([key, value]) => [key, structuredClone(value)]));
+  const workspaces = Object.entries(db.appStates || {}).map(([workspaceId, state]) => {
+    const workspace = prepareRuntimeWorkspace(workspaceId, state);
+    const manifest = workspaceManifest(workspaceId, state);
+    return {
+      ...workspace,
+      sourceSha256: sha256Json(state),
       manifest,
       manifestSha256: sha256Json(manifest),
     };
@@ -366,6 +426,17 @@ export function reconstructPreparedDatabase(prepared, options = {}) {
     if (presence.savedCustomers) state.savedCustomers = workspace.savedCustomers.map((row) => copy(row.payload));
     if (presence.masterBankEntries) state.masterBankEntries = workspace.masterBankEntries.map((row) => copy(row.payload));
     if (presence.settlements) state.settlements = workspace.settlements.map((row) => copy(row.payload));
+    if (presence.chatConversations) {
+      const messagesByConversation = new Map();
+      (workspace.chatMessages || []).forEach((row) => {
+        if (!messagesByConversation.has(row.conversationRecordKey)) messagesByConversation.set(row.conversationRecordKey, []);
+        messagesByConversation.get(row.conversationRecordKey).push(copy(row.payload));
+      });
+      state.chatConversations = workspace.chatConversations.map((row) => ({
+        ...copy(row.payload),
+        messages: messagesByConversation.get(row.recordKey) || [],
+      }));
+    }
     db.appStates[workspace.workspaceId] = state;
   }
   return db;

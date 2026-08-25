@@ -3965,6 +3965,13 @@
     const forwardTransferDrafts = new Map();
     const orderReturnReasonDrafts = new Map();
     let renderedGlobalSearchResults = [];
+    let globalSearchDebounceTimer = null;
+    let globalSearchRequestSequence = 0;
+    let globalSearchLastQuery = "";
+    let globalSearchPendingQuery = "";
+    let globalSearchLastRevision = "";
+    let globalSearchLoading = false;
+    let globalSearchHasMore = false;
     let activeSearchDestination = null;
     let searchDestinationFocusTimer = null;
     let searchDestinationHighlightTimer = null;
@@ -13024,6 +13031,60 @@
       });
     }
 
+    function closedReportSearchResult(report) {
+      const balances = report?.balances && typeof report.balances === "object" ? report.balances : {};
+      const balanceEntries = supportedCurrencies
+        .filter((currency) => Number(balances[currency] || 0) !== 0)
+        .map((currency) => [currency, Number(balances[currency] || 0)]);
+      const firstCurrency = balanceEntries[0]?.[0] || "";
+      const amount = balanceEntries.length
+        ? balanceEntries.map(([currency, amountMinor]) => money(currency, amountMinor)).join(" / ")
+        : "Closed balance";
+      const counts = [
+        Number(report?.orderCount || 0) ? `${Number(report.orderCount)} order${Number(report.orderCount) === 1 ? "" : "s"}` : "",
+        Number(report?.receivableCount || 0) ? `${Number(report.receivableCount)} receivable${Number(report.receivableCount) === 1 ? "" : "s"}` : "",
+        Number(report?.transferCount || 0) ? `${Number(report.transferCount)} transfer${Number(report.transferCount) === 1 ? "" : "s"}` : "",
+        Number(report?.ledgerLineCount || 0) ? `${Number(report.ledgerLineCount)} ledger line${Number(report.ledgerLineCount) === 1 ? "" : "s"}` : ""
+      ].filter(Boolean);
+      return {
+        searchGroupKey: `single:report:${text(report?._reportKey || report?.id)}`,
+        searchKind: "archive",
+        searchParticipants: uniqueSearchParticipants([report?.actor]),
+        searchParticipant: report?.actor || "",
+        destinationView: "archive",
+        destinationTarget: firstCurrency ? archiveBalanceSearchTargetKey(report, firstCurrency) : "",
+        destinationActor: report?.actor || "",
+        destinationArchiveId: report?.id || "",
+        destinationClosedAt: report?.closedAt || "",
+        destinationAvailable: true,
+        type: "Closed Report",
+        date: report?.closedAt || "",
+        time: new Date(report?.closedAt || 0).getTime() || 0,
+        reference: report?.id || "Report",
+        actors: report?.actor || "",
+        amount,
+        status: "Locked",
+        details: counts.length ? counts.join(" - ") : "Details load only when this report is opened.",
+        searchValues: []
+      };
+    }
+
+    function buildDatabaseSearchResults(actor, records) {
+      if (!actor || !Array.isArray(records)) return [];
+      const results = records.map((item) => {
+        if (!item?.record || typeof item.record !== "object") return null;
+        if (item.kind === "order") return orderSearchResult(item.record, actor);
+        if (item.kind === "transfer") return transferSearchResult(item.record);
+        if (item.kind === "receivable") return receivableSearchResult(item.record, actor);
+        if (item.kind === "ledger") return ledgerSearchResult(item.record, actor);
+        if (item.kind === "report") return closedReportSearchResult(item.record);
+        return null;
+      }).filter(Boolean);
+      return consolidateGlobalSearchResults(results, actor)
+        .sort((left, right) => Number(right.time || 0) - Number(left.time || 0))
+        .slice(0, 50);
+    }
+
     function buildGlobalSearchResults(actor, terms) {
       if (!actor || !terms.length) return [];
       const viewerIsMaster = actor.role === "Master";
@@ -13194,18 +13255,10 @@
       focusSearchDestination(result);
     }
 
-    function renderGlobalSearch() {
+    function paintGlobalSearchResults() {
       if (!els.globalSearchRows) return;
-      const terms = searchTerms();
-      if (!terms.length) {
-        renderedGlobalSearchResults = [];
-        els.globalSearchCount.textContent = "Ready";
-        els.globalSearchRows.innerHTML = '<tr><td colspan="7">Enter text or number to search.</td></tr>';
-        return;
-      }
-      const results = buildGlobalSearchResults(selectedActor(), terms);
-      renderedGlobalSearchResults = results;
-      els.globalSearchCount.textContent = `${results.length} result${results.length === 1 ? "" : "s"}`;
+      const results = renderedGlobalSearchResults;
+      els.globalSearchCount.textContent = `${results.length}${globalSearchHasMore ? "+" : ""} result${results.length === 1 && !globalSearchHasMore ? "" : "s"}`;
       if (results.length === 0) {
         els.globalSearchRows.innerHTML = '<tr><td colspan="7">No matching records.</td></tr>';
         return;
@@ -13221,6 +13274,63 @@
           <td><div class="search-result-detail">${searchDetailsHtml(result.details)}</div></td>
         </tr>
       `).join("");
+    }
+
+    async function loadGlobalSearchResults(query, requestSequence) {
+      try {
+        const result = await api(`/api/search?${new URLSearchParams({ q: query, limit: "50" })}`);
+        if (requestSequence !== globalSearchRequestSequence || text(els.globalSearch?.value || "") !== query) return;
+        renderedGlobalSearchResults = buildDatabaseSearchResults(selectedActor(), result.results || []);
+        globalSearchHasMore = result.hasMore === true;
+        globalSearchLastQuery = query;
+        globalSearchLastRevision = String(remoteStateRevision || "0");
+        globalSearchLoading = false;
+        globalSearchPendingQuery = "";
+        paintGlobalSearchResults();
+      } catch (error) {
+        if (requestSequence !== globalSearchRequestSequence) return;
+        renderedGlobalSearchResults = [];
+        globalSearchHasMore = false;
+        globalSearchLastQuery = query;
+        globalSearchLastRevision = String(remoteStateRevision || "0");
+        globalSearchLoading = false;
+        globalSearchPendingQuery = "";
+        els.globalSearchCount.textContent = "Unavailable";
+        els.globalSearchRows.innerHTML = `<tr><td colspan="7">${escapeHtml(error?.message || "Search is temporarily unavailable.")}</td></tr>`;
+      }
+    }
+
+    function renderGlobalSearch() {
+      if (!els.globalSearchRows) return;
+      const query = text(els.globalSearch?.value || "");
+      if (!query) {
+        clearTimeout(globalSearchDebounceTimer);
+        globalSearchRequestSequence += 1;
+        globalSearchLoading = false;
+        globalSearchPendingQuery = "";
+        globalSearchLastQuery = "";
+        globalSearchLastRevision = "";
+        globalSearchHasMore = false;
+        renderedGlobalSearchResults = [];
+        els.globalSearchCount.textContent = "Ready";
+        els.globalSearchRows.innerHTML = '<tr><td colspan="7">Enter text or number to search.</td></tr>';
+        return;
+      }
+      const revision = String(remoteStateRevision || "0");
+      if (!globalSearchLoading && query === globalSearchLastQuery && revision === globalSearchLastRevision) {
+        paintGlobalSearchResults();
+        return;
+      }
+      if (globalSearchLoading && query === globalSearchPendingQuery) return;
+      clearTimeout(globalSearchDebounceTimer);
+      globalSearchLoading = true;
+      globalSearchPendingQuery = query;
+      const requestSequence = ++globalSearchRequestSequence;
+      els.globalSearchCount.textContent = "Searching…";
+      els.globalSearchRows.innerHTML = '<tr><td colspan="7">Searching permitted records…</td></tr>';
+      globalSearchDebounceTimer = window.setTimeout(() => {
+        loadGlobalSearchResults(query, requestSequence);
+      }, 350);
     }
 
     function newestOrderFirst(a, b) {

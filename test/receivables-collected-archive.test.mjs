@@ -201,8 +201,8 @@ test("server hides archived reminders and non-Master saves cannot replace archiv
     "function sessionCanAccessCreditReminder",
     "function sanitizeIncomingWorkspaceState",
   );
-  const { stripRestrictedCreditReminders } = new Function(
-    `${privacySource}\nreturn { stripRestrictedCreditReminders };`,
+  const { stripRestrictedCreditReminders, stateForSessionResponse } = new Function(
+    `${privacySource}\nreturn { stripRestrictedCreditReminders, stateForSessionResponse };`,
   )();
   const receivable = (id, borrowerActorId, creditReminder) => ({
     id,
@@ -246,6 +246,59 @@ test("server hides archived reminders and non-Master saves cannot replace archiv
   const masterView = stripRestrictedCreditReminders(workspaceState, { membership: { role: "Master" } });
   assert.equal(masterView.receivables[1].creditReminder, "Private active reminder");
   assert.equal(masterView.archives[0].receivables[1].creditReminder, "Private archived reminder");
+
+  const actorScopedState = {
+    actors: [{ id: "ACT-1", name: "Broker One" }, { id: "ACT-2", name: "Broker Two" }],
+    orders: [
+      { id: "ORDER-OWN", brokerActorId: "ACT-1", broker: "Broker One" },
+      { id: "ORDER-OTHER", brokerActorId: "ACT-2", broker: "Broker Two" },
+    ],
+    savedCustomers: [{ id: "CUSTOMER-OWN", actorId: "ACT-1" }, { id: "CUSTOMER-OTHER", actorId: "ACT-2" }],
+    receivables: workspaceState.receivables,
+    transfers: [
+      { id: "TRANSFER-OWN", fromActorId: "ACT-1", toActorId: "ACT-2" },
+      { id: "TRANSFER-OTHER", fromActorId: "ACT-2", toActorId: "ACT-3" },
+    ],
+    ledger: [
+      { id: "LINE-OWN", actorId: "ACT-1", account: "Broker One ACTOR_CLEARING" },
+      { id: "LINE-OTHER", actorId: "ACT-2", account: "Broker Two ACTOR_CLEARING" },
+    ],
+    masterBankEntries: [{ id: "BANK-PRIVATE" }],
+    settlements: [{ actor: "Broker One" }, { actor: "Broker Two" }],
+    archives: [
+      { id: "ARC-OWN", actorId: "ACT-1", actor: "Broker One", orders: [{ id: "ORDER-CLOSED-OWN" }], receivables: [] },
+      { id: "ARC-OTHER", actorId: "ACT-2", actor: "Broker Two", orders: [{ id: "ORDER-CLOSED-OTHER" }], receivables: [] },
+    ],
+    orderParticipantIdentityLinks: [
+      { id: "LINK-OWN", orderIds: ["ORDER-CLOSED-OWN"] },
+      { id: "LINK-OTHER", orderIds: ["ORDER-CLOSED-OTHER"] },
+    ],
+    chatConversations: [
+      { id: "CHAT-OWN", members: ["Master", "Broker One"], messages: [] },
+      { id: "CHAT-OTHER", members: ["Master", "Broker Two"], messages: [] },
+    ],
+  };
+  const actorPayload = stateForSessionResponse(actorScopedState, brokerSession);
+  for (const [field, expectedIds] of Object.entries({
+    orders: ["ORDER-OWN"],
+    savedCustomers: ["CUSTOMER-OWN"],
+    receivables: ["ACTIVE-OWN"],
+    transfers: ["TRANSFER-OWN"],
+    ledger: ["LINE-OWN"],
+    archives: ["ARC-OWN"],
+    orderParticipantIdentityLinks: ["LINK-OWN"],
+    chatConversations: ["CHAT-OWN"],
+  })) {
+    assert.deepEqual(actorPayload[field].map((item) => item.id), expectedIds, `${field} must be scoped to the signed-in Actor.`);
+  }
+  assert.deepEqual(actorPayload.masterBankEntries, []);
+  assert.deepEqual(actorPayload.settlements, actorScopedState.settlements, "Settlement input remains unchanged for compatibility.");
+  assert.equal(actorScopedState.orders.length, 2, "Building a response must not mutate persisted orders.");
+  assert.strictEqual(
+    stateForSessionResponse(actorScopedState, { membership: { role: "Master" } }),
+    actorScopedState,
+    "Master must continue receiving the complete workspace state.",
+  );
 
   const archiveMergeSource = sourceBetween(server, "function mergeByKey", "function mergeChatConversations");
   const mergeArchiveSnapshots = new Function(

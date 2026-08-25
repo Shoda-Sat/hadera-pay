@@ -260,6 +260,32 @@ test("server reserves historical Actor IDs, sanitizes new Broker orders, and kee
     database.appStates[workspaceId] = state;
     await writeFile(databasePath, JSON.stringify(database, null, 2));
 
+    for (const [query, expectedKind] of [
+      ["ORD-LIVE-HISTORY", "order"],
+      ["REC-LIVE-HISTORY", "receivable"],
+      ["TRF-LIVE-HISTORY", "transfer"],
+      ["JRN-HISTORIC-LINE", "ledger"],
+      ["ARC-IMMUTABLE-A", "report"],
+    ]) {
+      const search = await requestOk(baseUrl, `/api/search?q=${encodeURIComponent(query)}&limit=10`, {
+        cookie: masterLogin.cookie,
+      });
+      assert.equal(search.data.results.some((result) => result.kind === expectedKind), true, `${query} must be found as ${expectedKind}.`);
+      assert.ok(search.data.results.length <= 10);
+      if (expectedKind === "report") {
+        const report = search.data.results.find((result) => result.kind === "report")?.record;
+        assert.equal(Object.hasOwn(report || {}, "orders"), false, "Search must not return closed-report transaction bodies.");
+        assert.equal(report?._reportDetailLoaded, false);
+      }
+    }
+    const boundedSearch = await requestOk(baseUrl, "/api/search?q=Historic&limit=2", { cookie: masterLogin.cookie });
+    assert.equal(boundedSearch.data.results.length, 2);
+    assert.equal(boundedSearch.data.hasMore, true);
+    const actorPrivateSearch = await requestOk(baseUrl, "/api/search?q=ORD-LIVE-HISTORY&limit=10", {
+      cookie: brokerSignup.cookie,
+    });
+    assert.deepEqual(actorPrivateSearch.data.results, [], "An Actor must not search another participant's records.");
+
     const baseline = await requestOk(baseUrl, "/api/app-state", { cookie: masterLogin.cookie });
     const currentActorId = invite.data.invite.actorId;
     const reservedIds = [
@@ -325,6 +351,11 @@ test("server reserves historical Actor IDs, sanitizes new Broker orders, and kee
     assert.match(rejectedStaleInvite.data.error, /Actor ID belongs to earlier workspace history/i);
 
     const actorView = await requestOk(baseUrl, "/api/app-state", { cookie: brokerSignup.cookie });
+    assert.deepEqual(actorView.data.state.orders, [], "An Actor must not download unrelated workspace orders.");
+    assert.deepEqual(actorView.data.state.receivables, [], "An Actor must not download unrelated receivables.");
+    assert.deepEqual(actorView.data.state.transfers, [], "An Actor must not download unrelated transfers.");
+    assert.deepEqual(actorView.data.state.ledger, [], "An Actor must not download unrelated ledger lines.");
+    assert.deepEqual(actorView.data.state.archives, [], "An Actor must not download another Actor's closed reports.");
     const spoofedPending = {
       id: "ORD-ACTOR-PENDING-SAFE",
       internalOrderId: "ORD-ACTOR-PENDING-SAFE",
@@ -372,9 +403,10 @@ test("server reserves historical Actor IDs, sanitizes new Broker orders, and kee
       lastReminderBy: "Fake Master",
     };
     const actorState = structuredClone(actorView.data.state);
-    const actorSubmittedArchive = actorState.archives.find((archive) => archive.id === archiveA.id);
+    const actorSubmittedArchive = structuredClone(archiveA);
     actorSubmittedArchive.balances.USD = -1;
     actorSubmittedArchive.orders[0].journal = "JRN-ACTOR-TAMPERED";
+    actorState.archives.push(actorSubmittedArchive);
     actorState.orders.push(spoofedPending);
     const actorSave = await requestOk(baseUrl, "/api/app-state", {
       cookie: brokerSignup.cookie,
@@ -388,8 +420,7 @@ test("server reserves historical Actor IDs, sanitizes new Broker orders, and kee
     assert.equal(savedPending.broker, "Safe Broker");
     assert.equal(savedPending.agent, "Unassigned");
     assert.equal(savedPending.agentActorId, "");
-    assert.deepEqual(actorSave.data.state.archives.find((archive) => archive.id === archiveA.id), archiveA);
-    assert.deepEqual(actorSave.data.state.archives.find((archive) => archive.id === archiveB.id), archiveB);
+    assert.deepEqual(actorSave.data.state.archives, [], "An Actor save response must remain scoped to that Actor.");
     for (const field of [
       "assignedAgentUserId", "agentOrderNumber", "agentOrderNumbers", "agentOrderNumberCycles", "payingAgent",
       "payoutAgent", "payoutAgentName", "assignedAt", "journal", "paidJournalEntryId", "paidAt", "postedAt",
@@ -401,6 +432,8 @@ test("server reserves historical Actor IDs, sanitizes new Broker orders, and kee
     }
 
     const beforeArchiveSave = await requestOk(baseUrl, "/api/app-state", { cookie: masterLogin.cookie });
+    assert.deepEqual(beforeArchiveSave.data.state.archives.find((archive) => archive.id === archiveA.id), archiveA);
+    assert.deepEqual(beforeArchiveSave.data.state.archives.find((archive) => archive.id === archiveB.id), archiveB);
     const submitted = structuredClone(beforeArchiveSave.data.state);
     const submittedArchiveA = submitted.archives.find((archive) => archive.id === archiveA.id);
     submittedArchiveA.balances.USD = 999_999_999;

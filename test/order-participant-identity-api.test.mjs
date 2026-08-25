@@ -545,11 +545,18 @@ test("server freezes future order participants and stamps payment lines with can
     assert.notEqual(sanitizedForwardOrder.voidRequested, true);
     assert.notEqual(sanitizedForwardOrder.excludedFromCalculations, true);
 
-    const securityBaseline = forgedForwardSaved;
+    const securityBaseline = await requestOk(baseUrl, "/api/app-state", { cookie: master.cookie });
     const assignedAccounting = accountingStateProjection(securityBaseline.data.state);
     const unauthorizedPaidView = await requestOk(baseUrl, "/api/app-state", { cookie: otherAgentSignup.cookie });
     const unauthorizedPaidState = structuredClone(unauthorizedPaidView.data.state);
-    const unauthorizedPaidOrder = unauthorizedPaidState.orders.find((order) => order.id === "ORD-IDENTITY-1");
+    assert.equal(
+      unauthorizedPaidState.orders.some((order) => order.id === "ORD-IDENTITY-1"),
+      false,
+      "An unrelated Actor must not download the assigned order.",
+    );
+    const unauthorizedPaidOrder = structuredClone(
+      securityBaseline.data.state.orders.find((order) => order.id === "ORD-IDENTITY-1"),
+    );
     const unauthorizedPaidAt = new Date(Date.now() + 1_000).toISOString();
     Object.assign(unauthorizedPaidOrder, {
       state: "Paid",
@@ -557,6 +564,7 @@ test("server freezes future order participants and stamps payment lines with can
       paidAt: unauthorizedPaidAt,
       updatedAt: unauthorizedPaidAt,
     });
+    unauthorizedPaidState.orders.unshift(unauthorizedPaidOrder);
     unauthorizedPaidState.ledger = [
       ...orderPaymentLines(unauthorizedPaidOrder, broker, agent),
       ...(unauthorizedPaidState.ledger || []),
@@ -576,7 +584,9 @@ test("server freezes future order participants and stamps payment lines with can
 
     const unauthorizedVoidView = await requestOk(baseUrl, "/api/app-state", { cookie: otherAgentSignup.cookie });
     const unauthorizedVoidState = structuredClone(unauthorizedVoidView.data.state);
-    const unauthorizedVoidOrder = unauthorizedVoidState.orders.find((order) => order.id === "ORD-IDENTITY-1");
+    const unauthorizedVoidOrder = structuredClone(
+      securityBaseline.data.state.orders.find((order) => order.id === "ORD-IDENTITY-1"),
+    );
     Object.assign(unauthorizedVoidOrder, {
       state: "Voided",
       paidAt: new Date(Date.now() + 2_000).toISOString(),
@@ -584,6 +594,7 @@ test("server freezes future order participants and stamps payment lines with can
       voidedAt: new Date(Date.now() + 3_000).toISOString(),
       excludedFromCalculations: true,
     });
+    unauthorizedVoidState.orders.unshift(unauthorizedVoidOrder);
     unauthorizedVoidState.ledger = [];
     const unauthorizedVoid = await request(baseUrl, "/api/app-state", {
       cookie: otherAgentSignup.cookie,
@@ -1416,7 +1427,13 @@ test("server freezes future order participants and stamps payment lines with can
       "Void Requested",
       JSON.stringify(differentIdRequested.data.state.orders.map((order) => ({ id: order.id, state: order.state, journal: order.journal }))),
     );
-    assert.deepEqual(differentIdRequested.data.state.archives || [], archivesBeforeScopeChecks);
+    assert.deepEqual(
+      differentIdRequested.data.state.archives || [],
+      [],
+      "The paying Actor response must not include another Actor's reports.",
+    );
+    const afterDifferentIdRequest = await requestOk(baseUrl, "/api/app-state", { cookie: master.cookie });
+    assert.deepEqual(afterDifferentIdRequest.data.state.archives || [], archivesBeforeScopeChecks);
 
     const equalPairSeedView = await requestOk(baseUrl, "/api/app-state", { cookie: master.cookie });
     const equalPairSeedState = structuredClone(equalPairSeedView.data.state);
@@ -1620,9 +1637,10 @@ test("server freezes future order participants and stamps payment lines with can
     assert.equal(externalCollisionPaid.data.state.ledger
       .filter((line) => line.orderId === transferCollisionOrder.id && line.source === "ORDER_PAYMENT")
       .every((line) => line.journal === storedTransferCollisionOrder.journal), true);
-    assert.equal(externalCollisionPaid.data.state.ledger
+    const externalCollisionMasterView = await requestOk(baseUrl, "/api/app-state", { cookie: master.cookie });
+    assert.equal(externalCollisionMasterView.data.state.ledger
       .filter((line) => line.source === "JOURNAL" && line.journal === "JRN-MANUAL-COLLISION").length, 2);
-    assert.equal(externalCollisionPaid.data.state.transfers
+    assert.equal(externalCollisionMasterView.data.state.transfers
       .some((transfer) => transfer.id === "TR-EXTERNAL-JOURNAL-COLLISION" && transfer.journal === "JRN-TRANSFER-COLLISION"), true);
 
     const atomicCollisionOrder = {
@@ -1631,12 +1649,12 @@ test("server freezes future order participants and stamps payment lines with can
       payoutAmountMinor: 126_000,
       grossMinor: 6_300,
     };
-    const atomicSeedState = structuredClone(externalCollisionPaid.data.state);
+    const atomicSeedState = structuredClone(externalCollisionMasterView.data.state);
     atomicSeedState.orders.unshift(atomicCollisionOrder);
     const atomicSeeded = await requestOk(baseUrl, "/api/app-state", {
       cookie: master.cookie,
       method: "PUT",
-      body: { state: atomicSeedState, expectedRevision: externalCollisionPaid.data.revision },
+      body: { state: atomicSeedState, expectedRevision: externalCollisionMasterView.data.revision },
     });
     const atomicPaymentState = structuredClone(atomicSeeded.data.state);
     const atomicStoredOrder = atomicPaymentState.orders.find((order) => order.id === atomicCollisionOrder.id);
