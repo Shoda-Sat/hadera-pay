@@ -237,6 +237,7 @@ export async function reconstructDatabaseFromPostgres(client, options = {}) {
   const workspaceIds = (options.workspaceIds || []).map(String).filter(Boolean);
   const metadataOnly = options.metadataOnly === true;
   const includeClosedReports = options.includeClosedReports !== false;
+  const includeChatMessages = options.includeChatMessages !== false;
   const metadataResult = await client.query("SELECT document FROM hp_database_metadata WHERE singleton = true");
   if (metadataResult.rowCount !== 1) throw new Error("PostgreSQL does not contain exactly one HaderaPay metadata record.");
   const workspaceResult = workspaceIds.length
@@ -267,7 +268,7 @@ export async function reconstructDatabaseFromPostgres(client, options = {}) {
     payloadRows(client, "hp_master_bank_entries", workspaceIds),
     payloadRows(client, "hp_settlements", workspaceIds),
     chatConversationRows(client, workspaceIds),
-    chatMessageRows(client, workspaceIds),
+    includeChatMessages ? chatMessageRows(client, workspaceIds) : Promise.resolve(new Map()),
   ]);
   const prepared = {
     metadata: metadataResult.rows[0].document,

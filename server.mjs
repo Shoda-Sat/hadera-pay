@@ -38,9 +38,11 @@ import { assertPostgresCutoverAuthorized } from "./src/postgres/databaseStore.mj
 import { applyPostgresMigrations } from "./src/postgres/migrations.mjs";
 import {
   findJsonClosedReport,
+  getPostgresChatMessagePage,
   getPostgresClosedReport,
   jsonClosedReportKey,
   jsonClosedReportSummaries,
+  listPostgresChatSummaries,
   listPostgresClosedReportSummaries,
   loadRuntimePostgresDatabase,
   saveRuntimePostgresDatabase,
@@ -2482,9 +2484,80 @@ function responseLedgerLineMatchesActor(line, actorId, actorName) {
   return Boolean(actorName && (account === actorName || account === `${actorName} ACTOR_CLEARING`));
 }
 
-function stateForSessionResponse(state, session) {
+function lightweightChatMessageForResponse(message) {
+  if (!message || typeof message !== "object") return null;
+  const { media, ...summary } = message;
+  return summary;
+}
+
+function chatMessagePageItemForResponse(message) {
+  return message?.attachmentId ? lightweightChatMessageForResponse(message) : message;
+}
+
+function chatUnreadCounts(chat, messages) {
+  const existing = chat?.unreadCounts && typeof chat.unreadCounts === "object" ? chat.unreadCounts : {};
+  if (!messages.length) return { ...existing };
+  const readThroughBy = chat?.readThroughBy && typeof chat.readThroughBy === "object" ? chat.readThroughBy : {};
+  return Object.fromEntries((Array.isArray(chat?.members) ? chat.members : []).map((member) => {
+    const readThrough = String(readThroughBy[member] || "");
+    const unread = messages.filter((message) =>
+      String(message?.from || "") !== member &&
+      !(Array.isArray(message?.readBy) ? message.readBy : []).includes(member) &&
+      (!readThrough || String(message?.createdAt || "") > readThrough)
+    ).length;
+    return [member, unread];
+  }));
+}
+
+function chatConversationSummaryForResponse(chat) {
+  const source = chat && typeof chat === "object" ? chat : {};
+  const messages = Array.isArray(source.messages) ? source.messages : [];
+  const messageCount = messages.length || Number(source.messageCount || 0);
+  const lastMessage = messages.length ? messages[messages.length - 1] : source.lastMessage;
+  return {
+    ...source,
+    messages: [],
+    lastMessage: lightweightChatMessageForResponse(lastMessage),
+    unreadCounts: chatUnreadCounts(source, messages),
+    messageCount,
+    _messagesLoaded: false,
+    _messagesLoading: false,
+    _hasOlderMessages: messageCount > 0,
+    _nextBefore: "",
+  };
+}
+
+function jsonChatSummaries(chats = []) {
+  return (Array.isArray(chats) ? chats : []).map(chatConversationSummaryForResponse);
+}
+
+function jsonChatMessagePage(chat, { before = "", limit = 50 } = {}) {
+  const messages = Array.isArray(chat?.messages) ? chat.messages : [];
+  const boundedLimit = Math.max(1, Math.min(50, Number(limit) || 50));
+  const requestedEnd = /^\d+$/.test(String(before || "")) ? Number(before) : messages.length;
+  const end = Math.max(0, Math.min(messages.length, requestedEnd));
+  const start = Math.max(0, end - boundedLimit);
+  return {
+    conversation: { ...chat, messages: [] },
+    messages: structuredClone(messages.slice(start, end).map(chatMessagePageItemForResponse)),
+    hasOlder: start > 0,
+    nextBefore: start > 0 ? String(start) : "",
+  };
+}
+
+function sessionCanReadChatConversation(chat, session) {
+  if (!chat || !session) return false;
+  if (session.membership?.role === "Master") return true;
+  const actorName = String(session.membership?.actorName || "");
+  return Boolean(actorName && (Array.isArray(chat.members) ? chat.members : []).includes(actorName));
+}
+
+function stateForSessionResponse(state, session, { chatSummaries = false } = {}) {
+  const prepare = (responseState) => chatSummaries && responseState && typeof responseState === "object"
+    ? { ...responseState, chatConversations: jsonChatSummaries(responseState.chatConversations || []) }
+    : responseState;
   if (!state || typeof state !== "object" || session?.membership?.role !== "Actor") {
-    return stripRestrictedCreditReminders(state, session);
+    return prepare(stripRestrictedCreditReminders(state, session));
   }
   const actorId = String(session.membership.actorId || "");
   const actorName = String(session.membership.actorName || "");
@@ -2519,7 +2592,7 @@ function stateForSessionResponse(state, session) {
     chatConversations: (Array.isArray(state.chatConversations) ? state.chatConversations : [])
       .filter((chat) => actorName && (Array.isArray(chat?.members) ? chat.members : []).includes(actorName)),
   };
-  return stripRestrictedCreditReminders(scopedState, session);
+  return prepare(stripRestrictedCreditReminders(scopedState, session));
 }
 
 function boundedWorkspaceSearchTerms(value) {
@@ -4237,35 +4310,47 @@ function sanitizeIncomingWorkspaceState(state, session, db) {
     });
   }
   if (Array.isArray(state.chatConversations)) {
-    sanitized.chatConversations = state.chatConversations.map((chat) => ({
-      ...chat,
-      messages: (chat?.messages || []).map((message) => {
-        if (!message?.attachmentId) return message;
-        const file = storedFiles.get(message.attachmentId);
-        const chatFileMatches = file && ["chat-photo", "chat-voice", "chat-file"].includes(file.purpose) && (file.contextIds || [file.contextId]).includes(chat.id);
-        const proofFileMatches = ["payment-proof", "order-photo"].includes(file?.purpose) && file.contextId === message.orderId;
-        if (chatFileMatches) return message;
-        if (proofFileMatches) {
-          const linkedOrder = (persistedState.orders || []).find((order) => order?.id === message.orderId)
-            || (state.orders || []).find((order) => order?.id === message.orderId);
-          const persistedChat = (persistedState.chatConversations || []).find((item) => item?.id === chat.id);
-          const masterActorName = (persistedState.actors || state.actors || []).find((actor) => actor?.role === "Master")?.name || "Master";
-          const brokerChatMatches = Boolean(linkedOrder && persistedChat?.type === "direct" &&
-            (persistedChat.members || []).includes(masterActorName) && (persistedChat.members || []).includes(linkedOrder.broker));
-          const senderChatMatches = sessionCanUseChat(persistedState, session, chat.id);
-          if (brokerChatMatches || senderChatMatches || session?.membership?.role === "Master") {
+    sanitized.chatConversations = state.chatConversations.map((chat) => {
+      const {
+        lastMessage,
+        unreadCounts,
+        messageCount,
+        _messagesLoaded,
+        _messagesLoading,
+        _hasOlderMessages,
+        _nextBefore,
+        ...storedChat
+      } = chat || {};
+      return {
+        ...storedChat,
+        messages: (chat?.messages || []).map((message) => {
+          if (!message?.attachmentId) return message;
+          const file = storedFiles.get(message.attachmentId);
+          const chatFileMatches = file && ["chat-photo", "chat-voice", "chat-file"].includes(file.purpose) && (file.contextIds || [file.contextId]).includes(chat.id);
+          const proofFileMatches = ["payment-proof", "order-photo"].includes(file?.purpose) && file.contextId === message.orderId;
+          if (chatFileMatches) return message;
+          if (proofFileMatches) {
+            const linkedOrder = (persistedState.orders || []).find((order) => order?.id === message.orderId)
+              || (state.orders || []).find((order) => order?.id === message.orderId);
+            const persistedChat = (persistedState.chatConversations || []).find((item) => item?.id === chat.id);
+            const masterActorName = (persistedState.actors || state.actors || []).find((actor) => actor?.role === "Master")?.name || "Master";
+            const brokerChatMatches = Boolean(linkedOrder && persistedChat?.type === "direct" &&
+              (persistedChat.members || []).includes(masterActorName) && (persistedChat.members || []).includes(linkedOrder.broker));
+            const senderChatMatches = sessionCanUseChat(persistedState, session, chat.id);
+            if (brokerChatMatches || senderChatMatches || session?.membership?.role === "Master") {
+              file.contextIds = Array.from(new Set([...(file.contextIds || [file.contextId]), chat.id]));
+              return message;
+            }
+          }
+          if (file && session?.membership?.role === "Master" && sessionCanUseChat(state, session, chat.id)) {
             file.contextIds = Array.from(new Set([...(file.contextIds || [file.contextId]), chat.id]));
             return message;
           }
-        }
-        if (file && session?.membership?.role === "Master" && sessionCanUseChat(state, session, chat.id)) {
-          file.contextIds = Array.from(new Set([...(file.contextIds || [file.contextId]), chat.id]));
-          return message;
-        }
-        const { attachmentId, fileSize, ...allowedMessage } = message;
-        return allowedMessage;
-      }),
-    }));
+          const { attachmentId, fileSize, ...allowedMessage } = message;
+          return allowedMessage;
+        }),
+      };
+    });
   }
   if (brokerNumberChanges.length && Array.isArray(sanitized.chatConversations)) {
     const changesByOrderId = new Map(brokerNumberChanges.map((change) => [String(change.orderId || ""), change]));
@@ -5278,6 +5363,10 @@ async function handleFastPollingApi(request, response, url) {
 async function handleApi(request, response, url) {
   pruneRuntimeSessionActivity();
   const method = request.method || "GET";
+  const lazyChatRead = method === "GET" && (
+    (url.pathname === "/api/app-state" && url.searchParams.get("chats") === "summary")
+    || /^\/api\/chats\/[^/]+\/messages$/.test(url.pathname)
+  );
   const lazyReportRead = method === "GET" && (
     (url.pathname === "/api/app-state" && url.searchParams.get("reports") === "summary")
     || /^\/api\/closed-reports\/[^/]+$/.test(url.pathname)
@@ -5308,19 +5397,26 @@ async function handleApi(request, response, url) {
     if (metadataOnlyRequest) {
       db = metadataDb;
     } else if (ownerRequest || signupNeedsHistoricalIdentityChecks) {
-      db = await loadDb(lazyReportRead ? { includeClosedReports: false } : {});
+      db = await loadDb({
+        ...(lazyReportRead ? { includeClosedReports: false } : {}),
+        ...(lazyChatRead ? { includeChatMessages: false } : {}),
+      });
     } else if (workspaceLoadsInsideMutation) {
       db = metadataDb;
     } else if (requestSession?.workspaceId && requestSession.workspaceId !== "__owner") {
       db = await loadDb({
         workspaceIds: [requestSession.workspaceId],
         ...(lazyReportRead ? { includeClosedReports: false } : {}),
+        ...(lazyChatRead ? { includeChatMessages: false } : {}),
       });
     } else {
       db = metadataDb;
     }
   } else {
-    db = await loadDb(lazyReportRead ? { includeClosedReports: false } : {});
+    db = await loadDb({
+      ...(lazyReportRead ? { includeClosedReports: false } : {}),
+      ...(lazyChatRead ? { includeChatMessages: false } : {}),
+    });
   }
   const removedExpiredInvites = purgeExpiredInvites(db);
   const removedExpiredSessions = purgeExpiredSessions(db);
@@ -5545,6 +5641,7 @@ async function handleApi(request, response, url) {
 
   const backgroundRead = method === "GET" && (
     ["/api/app-state", "/api/app-state/version", "/api/auth/device-warning", "/api/files/status", "/api/search"].includes(url.pathname) ||
+    /^\/api\/chats\/[^/]+\/messages$/.test(url.pathname) ||
     /^\/api\/closed-reports\/[^/]+$/.test(url.pathname) ||
     /^\/api\/files\/[^/]+\/(?:download-url|content)$/.test(url.pathname)
   );
@@ -6234,20 +6331,26 @@ async function handleApi(request, response, url) {
         ? await listPostgresClosedReportSummaries(session.workspace.id, reportActorScope)
         : jsonClosedReportSummaries(persistedState.archives || [], reportActorScope)
       : null;
-    const currentState = reportSummaries
-      ? {
-          ...persistedState,
-          archives: reportSummaries.map((archive) => ({
-            ...archive,
-            orders: Array.isArray(archive._orderRefs) ? archive._orderRefs : [],
-          })),
-        }
-      : persistedState;
+    const chatSummaries = url.searchParams.get("chats") === "summary"
+      ? persistenceBackend === "postgres"
+        ? await listPostgresChatSummaries(session.workspace.id)
+        : jsonChatSummaries(persistedState.chatConversations || [])
+      : null;
+    const currentState = {
+      ...persistedState,
+      ...(reportSummaries ? {
+        archives: reportSummaries.map((archive) => ({
+          ...archive,
+          orders: Array.isArray(archive._orderRefs) ? archive._orderRefs : [],
+        })),
+      } : {}),
+      ...(chatSummaries ? { chatConversations: chatSummaries } : {}),
+    };
     db.appStates[session.workspace.id] = currentState;
     const readResult = workspaceStateForReadWithHistoricalRepair(db, session.workspace.id, currentState);
     const state = readResult.state;
     let revision = workspaceStateRevision(db, session.workspace.id);
-    if (!reportSummaries && readResult.isolationRepairApplied) {
+    if (!reportSummaries && !chatSummaries && readResult.isolationRepairApplied) {
       const expectedRevision = revision;
       revision = markWorkspaceStateChanged(db, session.workspace.id, state);
       await saveDb(db, { replace: true, ...workspaceStateSaveOptions(db, session.workspace.id, expectedRevision) });
@@ -6258,6 +6361,30 @@ async function handleApi(request, response, url) {
         session
       ),
       revision,
+    });
+    return;
+  }
+
+  const chatMessagesMatch = url.pathname.match(/^\/api\/chats\/([^/]+)\/messages$/);
+  if (chatMessagesMatch && method === "GET") {
+    const chatId = decodeURIComponent(chatMessagesMatch[1]);
+    const limit = Math.max(1, Math.min(50, Number(url.searchParams.get("limit")) || 50));
+    const before = String(url.searchParams.get("before") || "");
+    const page = persistenceBackend === "postgres"
+      ? await getPostgresChatMessagePage(session.workspace.id, chatId, { before, limit })
+      : (() => {
+          const chat = (db.appStates?.[session.workspace.id]?.chatConversations || [])
+            .find((candidate) => String(candidate?.id || "") === chatId);
+          return chat ? jsonChatMessagePage(chat, { before, limit }) : null;
+        })();
+    if (!page) return sendJson(response, 404, { error: "Chat not found." });
+    if (!sessionCanReadChatConversation(page.conversation, session)) {
+      return sendJson(response, 403, { error: "You do not have access to this chat." });
+    }
+    sendJson(response, 200, {
+      messages: page.messages,
+      hasOlder: page.hasOlder,
+      nextBefore: page.nextBefore,
     });
     return;
   }
@@ -6401,7 +6528,7 @@ async function handleApi(request, response, url) {
         const revision = markWorkspaceStateChanged(latestDb, session.workspace.id, nextState);
         return {
           ok: true,
-          state: stateForSessionResponse(nextState, session),
+          state: stateForSessionResponse(nextState, session, { chatSummaries: body.chatResponse === "summary" }),
           revision,
         };
       }

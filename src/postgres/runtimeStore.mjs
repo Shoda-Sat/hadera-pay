@@ -554,6 +554,120 @@ export async function getPostgresClosedReport(workspaceId, reportKey) {
   return closedReportDetail(result.rows[0].payload, result.rows[0].record_key);
 }
 
+function lightweightChatMessage(message) {
+  if (!message || typeof message !== "object") return null;
+  const { media, ...summary } = message;
+  return summary;
+}
+
+function chatMessagePageItem(message) {
+  return message?.attachmentId ? lightweightChatMessage(message) : message;
+}
+
+export async function listPostgresChatSummaries(workspaceId) {
+  const result = await postgresPool().query(
+    `SELECT
+       conversation.payload,
+       latest.payload AS last_message,
+       COALESCE(message_stats.message_count, 0)::bigint AS message_count,
+       COALESCE(unread_stats.unread_counts, '{}'::jsonb) AS unread_counts
+       FROM hp_chat_conversations AS conversation
+       LEFT JOIN LATERAL (
+         SELECT message.payload
+           FROM hp_chat_messages AS message
+          WHERE message.workspace_id = conversation.workspace_id
+            AND message.conversation_record_key = conversation.record_key
+          ORDER BY message.ordinal DESC
+          LIMIT 1
+       ) AS latest ON true
+       LEFT JOIN LATERAL (
+         SELECT count(*)::bigint AS message_count
+           FROM hp_chat_messages AS message
+          WHERE message.workspace_id = conversation.workspace_id
+            AND message.conversation_record_key = conversation.record_key
+       ) AS message_stats ON true
+       LEFT JOIN LATERAL (
+         SELECT jsonb_object_agg(member_counts.actor_name, member_counts.unread_count) AS unread_counts
+           FROM (
+             SELECT member.actor_name,
+                    count(message.record_key) FILTER (
+                      WHERE COALESCE(message.payload ->> 'from', '') <> member.actor_name
+                        AND NOT (COALESCE(message.payload -> 'readBy', '[]'::jsonb) ? member.actor_name)
+                        AND (
+                          COALESCE(conversation.payload -> 'readThroughBy' ->> member.actor_name, '') = ''
+                          OR COALESCE(message.created_at_text, message.payload ->> 'createdAt', '')
+                            > COALESCE(conversation.payload -> 'readThroughBy' ->> member.actor_name, '')
+                        )
+                    )::bigint AS unread_count
+               FROM jsonb_array_elements_text(
+                 CASE WHEN jsonb_typeof(conversation.payload -> 'members') = 'array'
+                   THEN conversation.payload -> 'members'
+                   ELSE '[]'::jsonb
+                 END
+               ) AS member(actor_name)
+               LEFT JOIN hp_chat_messages AS message
+                 ON message.workspace_id = conversation.workspace_id
+                AND message.conversation_record_key = conversation.record_key
+              GROUP BY member.actor_name
+           ) AS member_counts
+       ) AS unread_stats ON true
+      WHERE conversation.workspace_id = $1
+      ORDER BY conversation.ordinal`,
+    [workspaceId]
+  );
+  return result.rows.map((row) => ({
+    ...(row.payload || {}),
+    messages: [],
+    lastMessage: lightweightChatMessage(row.last_message),
+    unreadCounts: row.unread_counts || {},
+    messageCount: Number(row.message_count || 0),
+    _messagesLoaded: false,
+    _messagesLoading: false,
+    _hasOlderMessages: Number(row.message_count || 0) > 0,
+    _nextBefore: "",
+  }));
+}
+
+export async function getPostgresChatMessagePage(workspaceId, chatId, { before = "", limit = 50 } = {}) {
+  const conversationResult = await postgresPool().query(
+    `SELECT record_key, payload
+       FROM hp_chat_conversations
+      WHERE workspace_id = $1
+        AND (legacy_id = $2 OR payload ->> 'id' = $2)
+      ORDER BY ordinal
+      LIMIT 1`,
+    [workspaceId, chatId]
+  );
+  if (conversationResult.rowCount !== 1) return null;
+  const conversation = conversationResult.rows[0];
+  const boundedLimit = Math.max(1, Math.min(50, Number(limit) || 50));
+  const cleanBefore = /^-?\d+$/.test(String(before || "")) ? String(before) : "";
+  const parameters = [workspaceId, String(conversation.record_key)];
+  const beforeClause = cleanBefore ? `AND ordinal < $${parameters.push(cleanBefore)}` : "";
+  parameters.push(boundedLimit + 1);
+  const pageResult = await postgresPool().query(
+    `SELECT ordinal, payload
+       FROM hp_chat_messages
+      WHERE workspace_id = $1
+        AND conversation_record_key = $2
+        ${beforeClause}
+      ORDER BY ordinal DESC
+      LIMIT $${parameters.length}`,
+    parameters
+  );
+  const hasOlder = pageResult.rows.length > boundedLimit;
+  const newestFirst = pageResult.rows.slice(0, boundedLimit);
+  const nextBefore = hasOlder && newestFirst.length
+    ? String(newestFirst[newestFirst.length - 1].ordinal)
+    : "";
+  return {
+    conversation: conversation.payload || {},
+    messages: newestFirst.map((row) => chatMessagePageItem(row.payload || {})).reverse(),
+    hasOlder,
+    nextBefore,
+  };
+}
+
 function boundedSearchTerms(value) {
   return cleanText(value)
     .normalize("NFKC")

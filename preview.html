@@ -1981,6 +1981,11 @@
       scrollbar-gutter: stable;
     }
 
+    .chat-load-older {
+      align-self: center;
+      margin: 8px auto 0;
+    }
+
     .chat-bottom-button {
       position: fixed;
       right: 24px;
@@ -3229,6 +3234,7 @@
                   <span id="chatRoomMeta">Master conversations only</span>
                 </div>
               </div>
+              <button class="btn secondary chat-load-older hidden" id="chatLoadOlder" type="button">Load older messages</button>
               <div class="chat-messages" id="chatMessages"></div>
               <div class="chat-reply hidden" id="chatReplyPreview"></div>
               <form class="chat-compose" id="chatComposer">
@@ -4672,6 +4678,25 @@
     }
 
     const state = loadState();
+    const chatPageRequests = new Map();
+
+    function lightweightChatConversation(chat) {
+      const messages = Array.isArray(chat?.messages) ? chat.messages : [];
+      const lastMessage = messages[messages.length - 1] || chat?.lastMessage || null;
+      const unreadCounts = Object.fromEntries((chat?.members || []).map((member) => [member, unreadCount(chat, member)]));
+      const { messages: ignoredMessages, lastMessage: ignoredLastMessage, ...summary } = chat || {};
+      const { media, ...lightweightLastMessage } = lastMessage || {};
+      return {
+        ...summary,
+        messages: [],
+        lastMessage: lastMessage ? lightweightLastMessage : null,
+        unreadCounts,
+        messageCount: Math.max(Number(chat?.messageCount || 0), messages.length),
+        _messagesLoaded: false,
+        _hasOlderMessages: Math.max(Number(chat?.messageCount || 0), messages.length) > 0,
+        _nextBefore: ""
+      };
+    }
 
     function lightweightReportState(sourceState) {
       const copy = structuredClone(sourceState || {});
@@ -4687,6 +4712,8 @@
           ledgerLineCount: Number(archive.ledgerLineCount ?? ledger?.length ?? 0)
         };
       });
+      copy.chatConversations = (Array.isArray(copy.chatConversations) ? copy.chatConversations : [])
+        .map(lightweightChatConversation);
       return copy;
     }
 
@@ -4771,27 +4798,13 @@
             try {
               const result = await api("/api/app-state", {
                 method: "PUT",
-                body: { state: submittedState, expectedRevision: remoteStateRevision }
+                body: { state: submittedState, expectedRevision: remoteStateRevision, chatResponse: "summary" }
               });
               assertSubmittedSession();
               remoteStateRevision = String(result.revision || result.state?._syncRevision || remoteStateRevision || "0");
               if (result.state) mergeSharedState(result.state);
               try {
-                localStorage.setItem(submittedStorageKey, JSON.stringify({
-                  ...state,
-                  archives: (Array.isArray(state.archives) ? state.archives : []).map((archive) => {
-                    if (!archive?._reportKey) return archive;
-                    const { orders, receivables, transfers, ledger, ...summary } = archive;
-                    return {
-                      ...summary,
-                      _reportDetailLoaded: false,
-                      orderCount: Number(archive.orderCount ?? orders?.length ?? 0),
-                      receivableCount: Number(archive.receivableCount ?? receivables?.length ?? 0),
-                      transferCount: Number(archive.transferCount ?? transfers?.length ?? 0),
-                      ledgerLineCount: Number(archive.ledgerLineCount ?? ledger?.length ?? 0)
-                    };
-                  })
-                }));
+                localStorage.setItem(submittedStorageKey, JSON.stringify(lightweightReportState(state)));
               } catch {
                 // Keep the authoritative remote save even if local storage is full.
               }
@@ -4885,7 +4898,7 @@
     async function api(path, options = {}) {
       const method = String(options.method || "GET").toUpperCase();
       const requestPath = method === "GET" && path === "/api/app-state"
-        ? "/api/app-state?reports=summary"
+        ? "/api/app-state?reports=summary&chats=summary"
         : path;
       const readOnlyWriteAllowed = path === "/api/auth/activity" || path === "/api/auth/logout";
       if (subscriptionIsReadOnly() && method !== "GET" && !readOnlyWriteAllowed) {
@@ -5224,10 +5237,23 @@
       return merged.map((chat) => {
         const current = existingItems.find((item) => item.id === chat.id);
         const incoming = incomingItems.find((item) => item.id === chat.id);
+        const messages = mergeById(current?.messages || [], incoming?.messages || [])
+          .sort((a, b) => new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime());
+        const incomingLastId = String(incoming?.lastMessage?.id || "");
+        const needsLatestPage = incoming?._messagesLoaded === false && incomingLastId &&
+          !messages.some((message) => String(message?.id || "") === incomingLastId);
         return {
           ...chat,
-          messages: mergeById(current?.messages || [], incoming?.messages || [])
-            .sort((a, b) => new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime())
+          messages,
+          _messagesLoaded: needsLatestPage
+            ? false
+            : current?._messagesLoaded === true || incoming?._messagesLoaded === true || messages.length > 0,
+          _hasOlderMessages: !needsLatestPage && current?._messagesLoaded === true
+            ? current._hasOlderMessages === true
+            : chat._hasOlderMessages === true,
+          _nextBefore: !needsLatestPage && current?._messagesLoaded === true
+            ? String(current._nextBefore || "")
+            : String(chat._nextBefore || "")
         };
       });
     }
@@ -6817,6 +6843,7 @@
       ledgerWithdrawalError: document.getElementById("ledgerWithdrawalError"),
       chatConversationList: document.getElementById("chatConversationList"),
       chatMessages: document.getElementById("chatMessages"),
+      chatLoadOlder: document.getElementById("chatLoadOlder"),
       chatBottomButton: document.getElementById("chatBottomButton"),
       chatComposer: document.getElementById("chatComposer"),
       chatText: document.getElementById("chatText"),
@@ -8891,23 +8918,22 @@
         </button>
       ` : "";
       if (message.attachmentId) {
-        const attachmentId = escapeHtml(message.attachmentId);
         const attachmentContentUrl = escapeHtml(`/api/files/${encodeURIComponent(message.attachmentId)}/content`);
         const fileName = escapeHtml(message.fileName || (message.kind === "voice" ? "voice-message.webm" : "attachment"));
         if (message.kind === "voice") {
           return `
             ${text}
             <div class="voice-message">
-              <audio controls preload="metadata" playsinline data-r2-attachment="${attachmentId}">Your device cannot play this voice message.</audio>
-              <a class="attachment-link" href="#" data-r2-attachment="${attachmentId}" download="${fileName}">Download voice message</a>
+              <audio controls preload="none" playsinline src="${attachmentContentUrl}">Your device cannot play this voice message.</audio>
+              <a class="attachment-link" href="${attachmentContentUrl}" download="${fileName}">Download voice message</a>
             </div>
           `;
         }
         return `
           ${text}
-          ${message.kind === "photo" ? `<img src="${attachmentContentUrl}" alt="Payment proof image">` : ""}
+          ${message.kind === "photo" ? `<img src="${attachmentContentUrl}" alt="Payment proof image" loading="lazy">` : ""}
           <div class="attachment-actions">
-            <a class="attachment-link" href="#" data-r2-attachment="${attachmentId}" download="${fileName}">Open attachment</a>
+            <a class="attachment-link" href="${attachmentContentUrl}" download="${fileName}">Open attachment</a>
             ${whatsappButton}
           </div>
         `;
@@ -8981,17 +9007,71 @@
     }
 
     function unreadCount(chat, actorName) {
+      const summarized = Number(chat?.unreadCounts?.[actorName]);
+      if (Number.isFinite(summarized)) return Math.max(0, summarized);
+      const readThrough = String(chat?.readThroughBy?.[actorName] || "");
       return (chat.messages || []).filter((message) =>
-        message.from !== actorName && !(message.readBy || []).includes(actorName)
+        message.from !== actorName && !(message.readBy || []).includes(actorName) &&
+        (!readThrough || String(message.createdAt || "") > readThrough)
       ).length;
     }
 
     function markChatRead(chat, actorName) {
-      if (!chat || !actorName) return;
+      if (!chat || !actorName || unreadCount(chat, actorName) <= 0) return false;
       (chat.messages || []).forEach((message) => {
         message.readBy ||= [message.from];
         if (!message.readBy.includes(actorName)) message.readBy.push(actorName);
       });
+      chat.readThroughBy = { ...(chat.readThroughBy || {}), [actorName]: new Date().toISOString() };
+      chat.unreadCounts = { ...(chat.unreadCounts || {}), [actorName]: 0 };
+      return true;
+    }
+
+    async function loadChatMessagesPage(chat, { older = false } = {}) {
+      if (!chat || !currentAuth || !remoteStateReady) return false;
+      const before = older ? String(chat._nextBefore || "") : "";
+      if (older && (!chat._hasOlderMessages || !before)) return false;
+      const requestKey = `${chat.id}:${before || "latest"}`;
+      if (chatPageRequests.has(requestKey)) return chatPageRequests.get(requestKey);
+      chat._messagesLoading = true;
+      if (state.activeView === "chat") renderChat();
+      const request = api(`/api/chats/${encodeURIComponent(chat.id)}/messages?limit=50${before ? `&before=${encodeURIComponent(before)}` : ""}`)
+        .then((result) => {
+          const current = state.chatConversations.find((item) => item.id === chat.id);
+          if (!current) return false;
+          current.messages = mergeById(current.messages || [], Array.isArray(result.messages) ? result.messages : [])
+            .sort((a, b) => new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime());
+          current._messagesLoaded = true;
+          current._messagesLoading = false;
+          current._hasOlderMessages = result.hasOlder === true;
+          current._nextBefore = String(result.nextBefore || "");
+          current.messageCount = Math.max(Number(current.messageCount || 0), current.messages.length);
+          if (current.messages.length) current.lastMessage = current.messages[current.messages.length - 1];
+          const readChanged = !older && markChatRead(current, selectedActor()?.name);
+          if (state.activeView === "chat" && selectedChat()?.id === current.id) {
+            renderChat({ forceBottom: !older });
+          } else {
+            renderChatNavigationSummary();
+          }
+          if (readChanged) saveState();
+          return true;
+        })
+        .catch((error) => {
+          const current = state.chatConversations.find((item) => item.id === chat.id);
+          if (current) current._messagesLoading = false;
+          if (state.activeView === "chat") renderChat();
+          throw error;
+        })
+        .finally(() => chatPageRequests.delete(requestKey));
+      chatPageRequests.set(requestKey, request);
+      return request;
+    }
+
+    function ensureSelectedChatMessages() {
+      if (state.activeView !== "chat") return Promise.resolve(false);
+      const chat = selectedChat();
+      if (!chat || chat._messagesLoaded === true || chat._messagesLoading === true) return Promise.resolve(false);
+      return loadChatMessagesPage(chat);
     }
 
     function openForwardPicker(message, sourceChatId) {
@@ -9024,23 +9104,30 @@
       els.chatGroupForm.classList.toggle("hidden", selectedActor()?.role !== "Master");
     }
 
+    function renderChatNavigationSummary() {
+      const actor = selectedActor();
+      const chats = visibleChats();
+      const totalUnread = chats.reduce((sum, item) => sum + unreadCount(item, actor?.name), 0);
+      const chatNav = document.querySelector('[data-view="chat"]');
+      if (chatNav) chatNav.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg>Chat${totalUnread ? ` <span class="unread-badge">${totalUnread}</span>` : ""}`;
+    }
+
     function renderChat({ forceBottom = false } = {}) {
+      renderChatNavigationSummary();
+      const chatViewActive = document.getElementById("chat")?.classList.contains("active");
+      if (!chatViewActive) return;
       renderChatGroups();
       const actor = selectedActor();
       const chats = visibleChats();
       const chat = selectedChat();
       const nextChatId = chat?.id || "";
       const sameChat = els.chatMessages.dataset.chatId === nextChatId;
-      const chatViewActive = document.getElementById("chat")?.classList.contains("active");
       const distanceFromBottom = els.chatMessages.scrollHeight - els.chatMessages.clientHeight - els.chatMessages.scrollTop;
       const preserveScrollPosition = !forceBottom && chatViewActive && sameChat && distanceFromBottom > 12;
       const previousScrollTop = els.chatMessages.scrollTop;
-      const totalUnread = chats.reduce((sum, item) => sum + unreadCount(item, actor?.name), 0);
-      const chatNav = document.querySelector('[data-view="chat"]');
-      if (chatNav) chatNav.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg>Chat${totalUnread ? ` <span class="unread-badge">${totalUnread}</span>` : ""}`;
       els.chatConversationList.innerHTML = chats.length
         ? chats.map((item) => {
-          const last = item.messages[item.messages.length - 1];
+          const last = item.messages[item.messages.length - 1] || item.lastMessage;
           const unread = unreadCount(item, actor?.name);
           const canDeleteGroup = actor?.role === "Master" && item.type === "group";
           return `
@@ -9056,11 +9143,15 @@
         : '<div class="empty">No chats available.</div>';
       els.chatRoomTitle.textContent = chat ? chatTitle(chat) : "Chat";
       els.chatRoomMeta.textContent = chat ? `${chat.type === "group" ? "Group" : "Direct"} · ${chat.members.join(", ")}` : "No conversation selected";
-      markChatRead(chat, actor?.name);
       const reply = chat?.messages.find((message) => message.id === state.chatReplyTo);
       els.chatReplyPreview.classList.toggle("hidden", !reply);
       els.chatReplyPreview.innerHTML = reply ? `Replying to ${escapeHtml(reply.from)}: ${escapeHtml(messageSummary(reply))} <button class="btn secondary clear-chat-reply" type="button">Cancel</button>` : "";
-      els.chatMessages.innerHTML = chat?.messages.length
+      els.chatLoadOlder.classList.toggle("hidden", !chat?._hasOlderMessages || !chat?._nextBefore);
+      els.chatLoadOlder.disabled = chat?._messagesLoading === true;
+      els.chatLoadOlder.textContent = chat?._messagesLoading ? "Loading..." : "Load 50 older messages";
+      els.chatMessages.innerHTML = chat?._messagesLoading && !chat?.messages.length
+        ? '<div class="empty">Loading messages...</div>'
+        : chat?.messages.length
         ? chat.messages.map((message) => {
           const replyTo = chat.messages.find((item) => item.id === message.replyTo);
           const reactions = Object.entries(message.reactions || {}).map(([name, reaction]) => `<span>${escapeHtml(reaction)} ${escapeHtml(name)}</span>`).join("");
@@ -9080,14 +9171,15 @@
             </div>
           `;
         }).join("")
-        : '<div class="empty">No messages yet.</div>';
+        : chat?._messagesLoaded === false
+          ? '<div class="empty">Messages load when this chat is opened.</div>'
+          : '<div class="empty">No messages yet.</div>';
       els.chatMessages.dataset.chatId = nextChatId;
       if (chatViewActive) {
         els.chatMessages.scrollTop = preserveScrollPosition
           ? Math.min(previousScrollTop, Math.max(0, els.chatMessages.scrollHeight - els.chatMessages.clientHeight))
           : els.chatMessages.scrollHeight;
       }
-      hydrateChatAttachments().catch(() => {});
     }
 
     function scrollChatToBottom() {
@@ -10028,21 +10120,6 @@
           <td><span class="muted">Controls Income Statement Base USD column</span></td>
         </tr>
       `;
-    }
-
-    async function hydrateChatAttachments() {
-      const elements = Array.from(els.chatMessages?.querySelectorAll("[data-r2-attachment]") || []);
-      const attachmentIds = Array.from(new Set(elements.map((element) => element.dataset.r2Attachment).filter(Boolean)));
-      await Promise.allSettled(attachmentIds.map(async (attachmentId) => {
-        const attachment = await r2AttachmentDownload(attachmentId);
-        elements.filter((element) => element.dataset.r2Attachment === attachmentId).forEach((element) => {
-          if (element.tagName === "A") element.href = attachment.url;
-          else {
-            element.src = attachment.url;
-            element.hidden = false;
-          }
-        });
-      }));
     }
 
     function renderSettingsCollapses() {
@@ -15703,6 +15780,10 @@
       els.pageTitle.textContent = title;
       els.pageSubtitle.textContent = subtitle;
       if (viewId === "archive") renderArchive();
+      if (viewId === "chat") {
+        renderChat();
+        ensureSelectedChatMessages().catch((error) => notifyEvent("Chat unavailable", error?.message || "Messages could not be loaded."));
+      }
       if (viewId === "settings" && signedInAsMaster()) refreshR2StorageStatus();
     }
 
@@ -16545,7 +16626,15 @@
       state.selectedChatId = button.dataset.chatId;
       state.chatReplyTo = "";
       renderChat();
+      ensureSelectedChatMessages().catch((error) => notifyEvent("Chat unavailable", error?.message || "Messages could not be loaded."));
       saveState();
+    });
+
+    els.chatLoadOlder.addEventListener("click", () => {
+      const chat = selectedChat();
+      if (!chat) return;
+      loadChatMessagesPage(chat, { older: true })
+        .catch((error) => notifyEvent("Chat unavailable", error?.message || "Older messages could not be loaded."));
     });
 
     els.chatBottomButton.addEventListener("click", scrollChatToBottom);

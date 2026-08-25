@@ -371,6 +371,14 @@ export interface ChatConversationRecord {
   name: string;
   members: string[];
   messages: ChatMessageRecord[];
+  lastMessage?: ChatMessageRecord | null;
+  unreadCounts?: Record<string, number>;
+  readThroughBy?: Record<string, string>;
+  messageCount?: number;
+  _messagesLoaded?: boolean;
+  _messagesLoading?: boolean;
+  _hasOlderMessages?: boolean;
+  _nextBefore?: string;
   createdAt: string;
 }
 

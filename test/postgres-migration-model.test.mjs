@@ -152,9 +152,10 @@ test("PostgreSQL schema makes closed reports immutable and keeps transactional i
 });
 
 test("the live server wires PostgreSQL through the guarded runtime repository", async () => {
-  const [server, runtimeStore] = await Promise.all([
+  const [server, runtimeStore, importer] = await Promise.all([
     readFile(new URL("../server.mjs", import.meta.url), "utf8"),
     readFile(new URL("../src/postgres/runtimeStore.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../src/postgres/importer.mjs", import.meta.url), "utf8"),
   ]);
   assert.match(server, /assertPostgresCutoverAuthorized\(\)/);
   assert.match(server, /await applyPostgresMigrations\(\)/);
@@ -174,6 +175,14 @@ test("the live server wires PostgreSQL through the guarded runtime repository", 
   assert.doesNotMatch(runtimeStore, /DELETE FROM \$\{table\} WHERE workspace_id = \$1/);
   assert.match(server, /collections: \["orders", "receivables", "savedCustomers"\]/);
   assert.match(server, /collections: \["orders", "receivables", "chatConversations"\]/);
+  assert.match(server, /url\.searchParams\.get\("chats"\) === "summary"/);
+  assert.equal(server.includes("/api\\/chats\\/"), true);
+  assert.match(server, /getPostgresChatMessagePage\(session\.workspace\.id, chatId/);
+  assert.match(runtimeStore, /export async function listPostgresChatSummaries/);
+  assert.match(runtimeStore, /export async function getPostgresChatMessagePage/);
+  assert.match(runtimeStore, /ORDER BY message\.ordinal DESC/);
+  assert.match(importer, /const includeChatMessages = options\.includeChatMessages !== false/);
+  assert.match(importer, /includeChatMessages \? chatMessageRows/);
 });
 
 test("closed report summaries omit transaction payloads and immutable rows can only be appended", () => {

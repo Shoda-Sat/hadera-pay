@@ -5,6 +5,8 @@ import type {
   ActorRecord,
   ApiSession,
   ArchiveRecord,
+  ChatConversationRecord,
+  ChatMessageRecord,
   Currency,
   FundingType,
   InviteRecord,
@@ -255,6 +257,7 @@ async function rememberWorkspaceSnapshot(
   assertWorkspaceRequestSession(submittedSession, generation);
   const cachedState = cacheableWorkspaceState(state);
   const serialized = JSON.stringify(cachedState);
+  const activeSerialized = JSON.stringify(state);
   try {
     await AsyncStorage.setItem(workspaceCacheKey(submittedSession!.workspaceId), serialized);
   } catch {
@@ -266,7 +269,7 @@ async function rememberWorkspaceSnapshot(
     : typeof state._syncRevision === "string"
       ? state._syncRevision
       : null;
-  activeWorkspaceSnapshotJson = serialized;
+  activeWorkspaceSnapshotJson = activeSerialized;
   activeWorkspaceSnapshotSessionKey = workspaceSnapshotSessionKey(submittedSession);
 }
 
@@ -306,10 +309,27 @@ function cacheableWorkspaceState(state: WorkspaceState): WorkspaceState {
         ledgerLineCount: Number(archive.ledgerLineCount ?? ledger?.length ?? 0)
       };
     }),
+    chatConversations: state.chatConversations.map(lightweightChatConversationForCache),
     orders: state.orders.map((order) => order.paymentProof ? {
       ...order,
       paymentProof: { ...order.paymentProof, dataUri: "" }
     } : order)
+  };
+}
+
+function lightweightChatConversationForCache(chat: ChatConversationRecord): ChatConversationRecord {
+  const messages = Array.isArray(chat.messages) ? chat.messages : [];
+  const lastMessage = messages[messages.length - 1] || chat.lastMessage || null;
+  const { media, ...lightweightLastMessage } = (lastMessage || {}) as ChatMessageRecord;
+  return {
+    ...chat,
+    messages: [],
+    lastMessage: lastMessage ? lightweightLastMessage as ChatMessageRecord : null,
+    messageCount: Math.max(Number(chat.messageCount || 0), messages.length),
+    _messagesLoaded: false,
+    _messagesLoading: false,
+    _hasOlderMessages: Math.max(Number(chat.messageCount || 0), messages.length) > 0,
+    _nextBefore: ""
   };
 }
 
@@ -476,6 +496,29 @@ function normalizeState(state: Partial<WorkspaceState> | null | undefined): Work
   return normalized;
 }
 
+function preserveLoadedChatPages(remote: WorkspaceState, local: WorkspaceState): WorkspaceState {
+  remote.chatConversations = remote.chatConversations.map((chat) => {
+    if (chat._messagesLoaded !== false || chat.messages.length > 0) return chat;
+    const current = local.chatConversations.find((item) => item.id === chat.id);
+    if (!current) return chat;
+    const remoteLastId = String(chat.lastMessage?.id || "");
+    const hasRemoteLast = !remoteLastId || current.messages.some((message) => message.id === remoteLastId);
+    return {
+      ...chat,
+      messages: current.messages,
+      _messagesLoaded: current._messagesLoaded === true && hasRemoteLast,
+      _messagesLoading: false,
+      _hasOlderMessages: current._messagesLoaded === true && hasRemoteLast
+        ? current._hasOlderMessages === true
+        : chat._hasOlderMessages === true,
+      _nextBefore: current._messagesLoaded === true && hasRemoteLast
+        ? String(current._nextBefore || "")
+        : ""
+    };
+  });
+  return remote;
+}
+
 export function canCreateOrders(session: UserSession | null | undefined): boolean {
   return Boolean(
     session &&
@@ -619,9 +662,23 @@ export async function loadWorkspaceState(): Promise<WorkspaceState> {
   const generation = activeWorkspaceMutationGeneration;
   if (!submittedSession?.workspaceId) throw new Error("Sign in before loading this workspace.");
   try {
-    const result = await api<{ state: WorkspaceState; revision?: string }>("/api/app-state?reports=summary");
+    const result = await api<{ state: WorkspaceState; revision?: string }>("/api/app-state?reports=summary&chats=summary");
     assertWorkspaceRequestSession(submittedSession, generation);
-    const state = { ...normalizeState(result.state), offlineSnapshot: false, lastSyncedAt: new Date().toISOString() };
+    const normalized = normalizeState(result.state);
+    const currentScope = workspaceSnapshotSessionKey(submittedSession);
+    let currentState: WorkspaceState | null = null;
+    if (activeWorkspaceSnapshotSessionKey === currentScope && activeWorkspaceSnapshotJson) {
+      try {
+        currentState = normalizeState(JSON.parse(activeWorkspaceSnapshotJson) as WorkspaceState);
+      } catch {
+        currentState = null;
+      }
+    }
+    const state = {
+      ...(currentState ? preserveLoadedChatPages(normalized, currentState) : normalized),
+      offlineSnapshot: false,
+      lastSyncedAt: new Date().toISOString()
+    };
     await rememberWorkspaceSnapshot(state, result.revision, submittedSession, generation);
     return state;
   } catch (error) {
@@ -644,6 +701,49 @@ export async function loadClosedReportDetail(reportKey: string): Promise<Archive
   const result = await api<{ report: ArchiveRecord }>(`/api/closed-reports/${encodeURIComponent(cleanReportKey)}`);
   if (!result.report) throw new Error("The closed report could not be loaded.");
   return result.report;
+}
+
+export async function loadChatMessagesPage(
+  state: WorkspaceState,
+  chatId: string,
+  before = ""
+): Promise<WorkspaceState> {
+  const submittedSession = currentWorkspaceSession();
+  const generation = activeWorkspaceMutationGeneration;
+  if (!submittedSession?.workspaceId) throw new Error("Sign in before loading chat messages.");
+  const query = `/api/chats/${encodeURIComponent(chatId)}/messages?limit=50${before ? `&before=${encodeURIComponent(before)}` : ""}`;
+  const result = await api<{ messages: ChatMessageRecord[]; hasOlder: boolean; nextBefore: string }>(query);
+  assertWorkspaceRequestSession(submittedSession, generation);
+  let baseState = state;
+  if (activeWorkspaceSnapshotSessionKey === workspaceSnapshotSessionKey(submittedSession) && activeWorkspaceSnapshotJson) {
+    try {
+      baseState = normalizeState(JSON.parse(activeWorkspaceSnapshotJson) as WorkspaceState);
+    } catch {
+      baseState = state;
+    }
+  }
+  const next = normalizeState(JSON.parse(JSON.stringify(baseState)) as WorkspaceState);
+  const chat = next.chatConversations.find((item) => item.id === chatId);
+  if (!chat) throw new Error("This chat is no longer available.");
+  const merged = new Map<string, ChatMessageRecord>();
+  [...(chat.messages || []), ...(result.messages || [])].forEach((message) => {
+    if (message?.id) merged.set(message.id, { ...(merged.get(message.id) || {}), ...message });
+  });
+  chat.messages = Array.from(merged.values())
+    .sort((left, right) => new Date(left.createdAt || 0).getTime() - new Date(right.createdAt || 0).getTime());
+  chat._messagesLoaded = true;
+  chat._messagesLoading = false;
+  chat._hasOlderMessages = result.hasOlder === true;
+  chat._nextBefore = String(result.nextBefore || "");
+  chat.messageCount = Math.max(Number(chat.messageCount || 0), chat.messages.length);
+  if (chat.messages.length) chat.lastMessage = chat.messages[chat.messages.length - 1];
+  if (!before && submittedSession.actorName) {
+    chat.unreadCounts = { ...(chat.unreadCounts || {}), [submittedSession.actorName]: 0 };
+    chat.readThroughBy = { ...(chat.readThroughBy || {}), [submittedSession.actorName]: new Date().toISOString() };
+  }
+  activeWorkspaceSnapshotJson = JSON.stringify(next);
+  activeWorkspaceSnapshotSessionKey = workspaceSnapshotSessionKey(submittedSession);
+  return next;
 }
 
 export async function loadWorkspaceStateIfChanged(): Promise<WorkspaceState | null> {
@@ -737,13 +837,14 @@ export async function saveWorkspaceState(state: WorkspaceState, routingSession?:
       method: "PUT",
       body: {
         state: { ...state, offlineSnapshot: undefined, lastSyncedAt: undefined },
-        expectedRevision
+        expectedRevision,
+        chatResponse: "summary"
       }
     });
     assertWorkspaceRequestSession(submittedSession, generation);
     if (routingSession) assertUserSessionIsCurrent(routingSession);
     const savedState = {
-      ...normalizeState(result.state || state),
+      ...preserveLoadedChatPages(normalizeState(result.state || state), state),
       offlineSnapshot: false,
       lastSyncedAt: new Date().toISOString()
     };

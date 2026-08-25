@@ -52,6 +52,7 @@ import {
   loadInvites,
   getR2AttachmentDownload,
   getR2StorageStatus,
+  loadChatMessagesPage,
   migrateR2Attachments,
   removeWorkspaceActor,
   resetWorkspaceActorData,
@@ -1852,19 +1853,35 @@ async function cacheChatAttachment(message: ChatMessageRecord): Promise<{ uri: s
 
 function ChatPhoto({ message }: { message: ChatMessageRecord }) {
   const [uri, setUri] = useState(message.media || "");
+  const [requested, setRequested] = useState(Boolean(message.media));
+  const [loading, setLoading] = useState(false);
   useEffect(() => {
     let active = true;
+    if (!requested) {
+      setUri("");
+      return () => { active = false; };
+    }
     if (message.media || !message.attachmentId) {
       setUri(message.media || "");
       return () => { active = false; };
     }
     setUri("");
+    setLoading(true);
     getR2AttachmentDownload(message.attachmentId)
       .then((attachment) => { if (active) setUri(attachment.downloadUrl); })
-      .catch(() => { if (active) setUri(""); });
+      .catch(() => { if (active) setUri(""); })
+      .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [message.attachmentId, message.media]);
-  return uri ? <Image source={{ uri }} resizeMode="contain" style={styles.messageImage} /> : <Text style={styles.muted}>Loading photo...</Text>;
+  }, [message.attachmentId, message.media, requested]);
+  if (!requested) {
+    return (
+      <Pressable accessibilityRole="button" accessibilityLabel="View photo" onPress={() => setRequested(true)} style={styles.attachmentButton}>
+        <ImageIcon size={15} color={colors.accent} />
+        <Text style={styles.attachmentText}>View photo</Text>
+      </Pressable>
+    );
+  }
+  return uri ? <Image source={{ uri }} resizeMode="contain" style={styles.messageImage} /> : <Text style={styles.muted}>{loading ? "Loading photo..." : "Photo unavailable"}</Text>;
 }
 
 function formatVoiceTime(seconds: number): string {
@@ -1877,27 +1894,30 @@ function VoiceMessagePlayer({ message }: { message: ChatMessageRecord }) {
   const status = useAudioPlayerStatus(player);
   const [ready, setReady] = useState(false);
   const [failed, setFailed] = useState(false);
+  const [preparing, setPreparing] = useState(false);
 
   useEffect(() => {
-    let active = true;
     setReady(false);
     setFailed(false);
-    cacheChatAttachment(message)
-      .then(({ uri }) => {
-        if (!active) return;
-        player.replace({ uri });
-        setReady(true);
-      })
-      .catch(() => {
-        if (active) setFailed(true);
-      });
-    return () => {
-      active = false;
-    };
-  }, [message.id, message.media, message.attachmentId, player]);
+    setPreparing(false);
+  }, [message.id, message.media, message.attachmentId]);
 
   const togglePlayback = async () => {
-    if (!ready || failed) return;
+    if (failed || preparing) return;
+    if (!ready) {
+      setPreparing(true);
+      try {
+        const attachment = await cacheChatAttachment(message);
+        player.replace({ uri: attachment.uri });
+        setReady(true);
+        player.play();
+      } catch {
+        setFailed(true);
+      } finally {
+        setPreparing(false);
+      }
+      return;
+    }
     if (status.playing) {
       player.pause();
       return;
@@ -1913,14 +1933,14 @@ function VoiceMessagePlayer({ message }: { message: ChatMessageRecord }) {
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={status.playing ? "Pause voice message" : "Play voice message"}
-        disabled={!ready || failed}
+        disabled={failed || preparing}
         onPress={() => togglePlayback().catch(() => setFailed(true))}
-        style={[styles.voicePlayButton, (!ready || failed) && styles.voicePlayButtonDisabled]}
+        style={[styles.voicePlayButton, (failed || preparing) && styles.voicePlayButtonDisabled]}
       >
         {status.playing ? <Pause size={18} color="#fff" /> : <Play size={18} color="#fff" />}
       </Pressable>
       <View style={styles.voicePlayerText}>
-        <Text style={styles.voicePlayerLabel}>{failed ? "Unable to play" : ready ? status.playing ? "Playing" : "Play voice message" : "Preparing audio..."}</Text>
+        <Text style={styles.voicePlayerLabel}>{failed ? "Unable to play" : preparing ? "Preparing audio..." : ready ? status.playing ? "Playing" : "Play voice message" : "Tap to load audio"}</Text>
         <Text style={styles.voicePlayerTime}>{formatVoiceTime(status.currentTime)} / {formatVoiceTime(status.duration)}</Text>
       </View>
     </View>
@@ -1936,9 +1956,10 @@ export function ChatScreen({ session, state, offline, onState, onRefresh, onScro
   const [groupName, setGroupName] = useState("");
   const [members, setMembers] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
+  const [loadingMessages, setLoadingMessages] = useState(false);
   const [attachmentStatus, setAttachmentStatus] = useState("");
-  const [messageLimit, setMessageLimit] = useState(50);
   const busyRef = useRef(false);
+  const messagePageRequestsRef = useRef(new Set<string>());
   const recordingChatIdRef = useRef("");
   const composerRef = useRef<TextInput>(null);
   const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
@@ -1964,8 +1985,19 @@ export function ChatScreen({ session, state, offline, onState, onRefresh, onScro
   }, []);
 
   useEffect(() => {
-    setMessageLimit(50);
-  }, [selected?.id]);
+    if (!selected || offline || selected._messagesLoaded === true) return;
+    const requestKey = `${selected.id}:latest`;
+    if (messagePageRequestsRef.current.has(requestKey)) return;
+    messagePageRequestsRef.current.add(requestKey);
+    setLoadingMessages(true);
+    void loadChatMessagesPage(state, selected.id)
+      .then(onState)
+      .catch((error) => Alert.alert("Chat", errorMessage(error)))
+      .finally(() => {
+        messagePageRequestsRef.current.delete(requestKey);
+        setLoadingMessages(false);
+      });
+  }, [offline, selected?.id, selected?._messagesLoaded]);
 
   useEffect(() => () => {
     if (audioRecorder.isRecording) void audioRecorder.stop().catch(() => undefined);
@@ -2129,6 +2161,22 @@ export function ChatScreen({ session, state, offline, onState, onRefresh, onScro
     });
   };
 
+  const loadOlderMessages = async () => {
+    if (!selected || offline || loadingMessages || !selected._hasOlderMessages || !selected._nextBefore) return;
+    const requestKey = `${selected.id}:${selected._nextBefore}`;
+    if (messagePageRequestsRef.current.has(requestKey)) return;
+    messagePageRequestsRef.current.add(requestKey);
+    setLoadingMessages(true);
+    try {
+      onState(await loadChatMessagesPage(state, selected.id, selected._nextBefore));
+    } catch (error) {
+      Alert.alert("Chat", errorMessage(error));
+    } finally {
+      messagePageRequestsRef.current.delete(requestKey);
+      setLoadingMessages(false);
+    }
+  };
+
   return (
     <View style={styles.screen}>
       <ScreenTitle title="Chat" subtitle="Workspace messages" />
@@ -2137,21 +2185,33 @@ export function ChatScreen({ session, state, offline, onState, onRefresh, onScro
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chatTabs}>
         {chats.map((chat) => (
           <Pressable key={chat.id} onPress={() => selectChat(chat.id)} style={[styles.choice, selected?.id === chat.id && styles.choiceActive]}>
-            <Text style={[styles.choiceText, selected?.id === chat.id && styles.choiceTextActive]}>{chatTitle(chat)}</Text>
+            <Text style={[styles.choiceText, selected?.id === chat.id && styles.choiceTextActive]}>
+              {chatTitle(chat)}{Number(chat.unreadCounts?.[session.actorName] || 0) > 0 ? ` (${chat.unreadCounts?.[session.actorName]})` : ""}
+            </Text>
+            {chatMessageSummary(chat.messages[chat.messages.length - 1] || chat.lastMessage || undefined) ? (
+              <Text numberOfLines={1} style={styles.chatTabPreview}>
+                {chatMessageSummary(chat.messages[chat.messages.length - 1] || chat.lastMessage || undefined)}
+              </Text>
+            ) : null}
           </Pressable>
         ))}
       </ScrollView>
       {selected ? (
         <Panel title={chatTitle(selected)} badge={selected.type}>
           <View style={styles.messages}>
-            {selected.messages.length > messageLimit ? (
+            {selected._hasOlderMessages && selected._nextBefore ? (
               <Button
-                label={`Load 50 older messages (${selected.messages.length - messageLimit} remaining)`}
+                label="Load 50 older messages"
                 variant="secondary"
-                onPress={() => setMessageLimit((current) => current + 50)}
+                loading={loadingMessages}
+                disabled={offline || loadingMessages}
+                onPress={loadOlderMessages}
               />
             ) : null}
-            {selected.messages.slice(-messageLimit).map((item) => {
+            {loadingMessages && selected.messages.length === 0 ? <Text style={styles.muted}>Loading recent messages...</Text> : null}
+            {!loadingMessages && selected._messagesLoaded && selected.messages.length === 0 ? <Text style={styles.muted}>No messages yet.</Text> : null}
+            {offline && !selected._messagesLoaded && selected.messages.length === 0 ? <Text style={styles.muted}>Reconnect to load this conversation.</Text> : null}
+            {selected.messages.map((item) => {
               const repliedMessage = selected.messages.find((candidate) => candidate.id === item.replyTo);
               const myReaction = item.reactions?.[session.actorName];
               return (
@@ -3338,6 +3398,7 @@ const styles = StyleSheet.create({
   profileSelectText: { color: colors.muted, fontSize: 12, fontWeight: "900" },
   profileTextActive: { color: colors.accent },
   chatTabs: { gap: spacing.sm, paddingBottom: 2 },
+  chatTabPreview: { color: colors.muted, fontSize: 11, marginTop: 2, maxWidth: 160 },
   messages: { gap: spacing.sm },
   message: { alignSelf: "flex-start", maxWidth: "88%", borderRadius: radius.md, backgroundColor: colors.panel2, padding: spacing.md, gap: 2 },
   myMessage: { alignSelf: "flex-end", backgroundColor: colors.accentSoft },
