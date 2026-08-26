@@ -109,6 +109,16 @@ test("mobile routing attempts are typed and stored per workspace user", async ()
     "A late result for another attempt must not clear the active recovery record.");
   await durability.clearMobileRoutingAction(firstSession, record.attemptId);
   assert.equal(await durability.readMobileRoutingAction(firstSession), null);
+  await durability.persistMobileRoutingAction(firstSession, record);
+  await assert.rejects(
+    durability.discardMobileRoutingAction(firstSession, "different-attempt"),
+    /different order attempt/i,
+    "User cancellation must never remove a newer protected attempt."
+  );
+  assert.deepEqual(await durability.readMobileRoutingAction(firstSession), record);
+  await durability.discardMobileRoutingAction(firstSession, record.attemptId);
+  assert.equal(await durability.readMobileRoutingAction(firstSession), null,
+    "Explicit cancellation must remove the protected retry from device storage.");
   values.set(firstKey, "{not-json");
   await assert.rejects(
     durability.readMobileRoutingAction(firstSession),
@@ -266,4 +276,19 @@ test("mobile Master UI locks Return and Cancel while the order is forwarding", a
     "Return must be disabled while the same order is forwarding.");
   assert.match(jsxTagWithLabel(ordersScreen, "Cancel"), /disabled=\{[^}]*routingForward/i,
     "Cancel must be disabled while the same order is forwarding.");
+});
+
+test("mobile Broker can explicitly cancel an unresolved send without voiding server data", async () => {
+  const appSource = await readFile(path.join(repositoryRoot, "mobile/App.tsx"), "utf8");
+  const confirmationScreen = sectionBetween(appSource, "function ConfirmationScreen", "function QuotePanel");
+  const cancelButton = jsxTagWithLabel(confirmationScreen, "Cancel order");
+
+  assert.match(confirmationScreen, /discardMobileRoutingAction\(session,\s*pendingBrokerSend\.attemptId\)/,
+    "Cancelling must target only the exact protected Broker attempt.");
+  assert.match(confirmationScreen, /onRoutingActionChange\(null\)[\s\S]*?onHome\(\)/,
+    "A successful cancellation must release navigation and reset the order flow.");
+  assert.match(confirmationScreen, /does not void or delete an order already received by Master/i,
+    "The confirmation must distinguish local retry cancellation from a server-side void.");
+  assert.match(cancelButton, /pendingBrokerSend|confirmDiscardPendingSend/,
+    "The cancellation control must be tied to an unresolved protected send.");
 });

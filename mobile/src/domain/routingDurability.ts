@@ -114,6 +114,27 @@ export async function clearMobileRoutingAction(session: MobileRoutingSession, ex
   if (expectedAttemptId) clearedRoutingAttempts.add(`${key}:${expectedAttemptId}`);
 }
 
+export async function discardMobileRoutingAction(
+  session: MobileRoutingSession,
+  expectedAttemptId: string
+): Promise<void> {
+  const key = mobileRoutingActionOutboxKey(session);
+  if (!key || !expectedAttemptId) {
+    throw new Error("The pending order could not be identified safely.");
+  }
+  const record = await readMobileRoutingAction(session);
+  if (!record) return;
+  if (record.attemptId !== expectedAttemptId) {
+    throw new Error("A different order attempt is now protected. Review it before cancelling.");
+  }
+  try {
+    await AsyncStorage.removeItem(key);
+  } catch {
+    throw new Error("The app could not cancel the pending send on this device. Free device storage and try again.");
+  }
+  clearedRoutingAttempts.add(`${key}:${expectedAttemptId}`);
+}
+
 export function mobileBrokerRoutingAttemptId(orderId: string, cycle = "INITIAL"): string {
   return `ROUTE-SEND-${routingTokenPart(orderId)}-${routingTokenPart(cycle)}`;
 }

@@ -61,7 +61,7 @@ import { colors, radius, shadow, spacing } from "./src/theme";
 import { actingSessionFor, activeActors, calculableLedgerLines, isMasterView, orderRecordIsVoided, orderSortForSession, transferTargetsFor } from "./src/domain/workspace";
 import { ledgerLineBelongsToActor } from "./src/domain/ledgerNumbering";
 import { buildArchiveReportPdfHtml } from "./src/domain/reportPdf";
-import { readMobileRoutingAction, type MobileRoutingActionRecord } from "./src/domain/routingDurability";
+import { discardMobileRoutingAction, readMobileRoutingAction, type MobileRoutingActionRecord } from "./src/domain/routingDurability";
 import { recoverMobileRoutingAction } from "./src/domain/routingRecovery";
 import { useProgressiveLimit } from "./src/hooks/useProgressiveLimit";
 import { notifyNewRequiredActions, subscribeToActionNotificationResponses } from "./src/notifications/actionNotifications";
@@ -1828,15 +1828,17 @@ function ConfirmationScreen({
   onHome: () => void;
 }) {
   const [loading, setLoading] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState("");
   const pendingBrokerSend = routingAction?.kind === "broker-send" ? routingAction : null;
-  const actionLocked = loading || routingActionBusy || Boolean(pendingBrokerSend);
+  const actionLocked = loading || cancelling || routingActionBusy || Boolean(pendingBrokerSend);
+
+  const routingSessionIsCurrent = () => {
+    const current = currentWorkspaceSession();
+    return current?.workspaceId === session.workspaceId && current.userId === session.userId;
+  };
 
   const submit = async () => {
-    const routingSessionIsCurrent = () => {
-      const current = currentWorkspaceSession();
-      return current?.workspaceId === session.workspaceId && current.userId === session.userId;
-    };
     setLoading(true);
     onRoutingBusyChange(true);
     setError("");
@@ -1854,6 +1856,40 @@ function ConfirmationScreen({
       setLoading(false);
       if (routingSessionIsCurrent()) onRoutingBusyChange(false);
     }
+  };
+
+  const discardPendingSend = async () => {
+    if (!pendingBrokerSend) return;
+    setCancelling(true);
+    onRoutingBusyChange(true);
+    setError("");
+    let discarded = false;
+    try {
+      await discardMobileRoutingAction(session, pendingBrokerSend.attemptId);
+      discarded = routingSessionIsCurrent();
+    } catch (caught) {
+      if (routingSessionIsCurrent()) {
+        setError(caught instanceof Error ? caught.message : "Could not cancel the pending send.");
+      }
+    } finally {
+      setCancelling(false);
+      if (routingSessionIsCurrent()) onRoutingBusyChange(false);
+    }
+    if (!discarded) return;
+    onRoutingActionChange(null);
+    onHome();
+  };
+
+  const confirmDiscardPendingSend = () => {
+    if (!pendingBrokerSend || loading || cancelling || routingActionBusy) return;
+    Alert.alert(
+      "Cancel this order send?",
+      "This discards the protected retry on this device and returns Home. It does not void or delete an order already received by Master.",
+      [
+        { text: "Keep order", style: "cancel" },
+        { text: "Cancel order", style: "destructive", onPress: () => void discardPendingSend() }
+      ]
+    );
   };
 
   if (submittedOrder) {
@@ -1893,12 +1929,21 @@ function ConfirmationScreen({
         <Button
           label={pendingBrokerSend ? "Retry exact send" : editingOrderId ? "Resubmit order" : "Send order"}
           onPress={submit}
-          loading={loading || routingActionBusy}
-          disabled={loading || routingActionBusy}
+          loading={loading}
+          disabled={loading || cancelling || routingActionBusy}
           icon={<Send size={17} color="#ffffff" />}
           style={styles.actionButton}
         />
       </View>
+      {pendingBrokerSend ? (
+        <Button
+          label="Cancel order"
+          onPress={confirmDiscardPendingSend}
+          loading={cancelling}
+          disabled={loading || cancelling || routingActionBusy}
+          variant="danger"
+        />
+      ) : null}
     </View>
   );
 }
