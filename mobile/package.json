@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "2.1.2",
-    "expo": "^53.0.0",
+    "expo": "^57.0.17",
     "expo-asset": "~11.1.7",
     "expo-audio": "~0.4.9",
     "expo-clipboard": "~7.1.5",
