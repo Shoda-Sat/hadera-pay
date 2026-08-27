@@ -170,6 +170,7 @@ test("mobile routing attempts are typed and stored per workspace user", async ()
 
 test("mobile Broker Send persists and reuses one exact attempt until acknowledgement", async () => {
   const clientSource = await readFile(path.join(repositoryRoot, "mobile/src/api/client.ts"), "utf8");
+  const appSource = await readFile(path.join(repositoryRoot, "mobile/App.tsx"), "utf8");
   const submit = sectionFrom(clientSource, "export async function submitTransferOrder");
 
   assert.match(submit, /readMobileRoutingAction\(session\)/,
@@ -177,6 +178,12 @@ test("mobile Broker Send persists and reuses one exact attempt until acknowledge
   assert.match(submit, /mobileBrokerRoutingAttemptId\(/,
     "Broker Send must assign a stable submission token.");
   assert.match(submit, /routingSubmissionId/);
+  assert.match(appSource, /const\s+creditSubmitInFlightRef\s*=\s*useRef\(false\)/,
+    "The Android Credit confirmation must reserve a synchronous send lock before React can re-render.");
+  assert.match(appSource, /if\s*\(protectsCreditSubmission\s*&&\s*creditSubmitInFlightRef\.current\)\s*return/,
+    "A rapid second Credit tap must not start another submit call.");
+  assert.match(appSource, /finally\s*\{\s*if\s*\(protectsCreditSubmission\)\s*creditSubmitInFlightRef\.current\s*=\s*false/,
+    "The Android Credit send lock must be released after success or failure.");
   assert.match(clientSource, /actingActorId:\s*session\.managedByMaster\s*\?\s*session\.actorId\s*:\s*undefined/,
     "Mobile must identify the selected Master-managed Broker to the atomic endpoint.");
   assert.match(submit, /persistMobileRoutingAction\(session,[\s\S]*?order/,

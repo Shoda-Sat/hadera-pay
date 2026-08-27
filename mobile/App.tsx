@@ -1830,6 +1830,7 @@ function ConfirmationScreen({
   const [loading, setLoading] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState("");
+  const creditSubmitInFlightRef = useRef(false);
   const pendingBrokerSend = routingAction?.kind === "broker-send" ? routingAction : null;
   const actionLocked = loading || cancelling || routingActionBusy || Boolean(pendingBrokerSend);
 
@@ -1839,6 +1840,9 @@ function ConfirmationScreen({
   };
 
   const submit = async () => {
+    const protectsCreditSubmission = draft.fundingType === "credit";
+    if (protectsCreditSubmission && creditSubmitInFlightRef.current) return;
+    if (protectsCreditSubmission) creditSubmitInFlightRef.current = true;
     setLoading(true);
     onRoutingBusyChange(true);
     setError("");
@@ -1853,6 +1857,7 @@ function ConfirmationScreen({
       onRoutingActionChange(protectedAction);
       setError(caught instanceof Error ? caught.message : "Could not submit order.");
     } finally {
+      if (protectsCreditSubmission) creditSubmitInFlightRef.current = false;
       setLoading(false);
       if (routingSessionIsCurrent()) onRoutingBusyChange(false);
     }
