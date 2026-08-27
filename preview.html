@@ -3964,6 +3964,7 @@
     const unconfirmedOrderActions = new Set();
     const brokerRoutingRetryAttempts = new Map();
     const masterRoutingRetryAttempts = new Map();
+    let brokerCreditConfirmationPending = false;
     let orderActionDeferredRemoteSave = false;
     let orderActionSessionGeneration = 0;
     const pendingProofFiles = new Map();
@@ -5829,6 +5830,7 @@
       unconfirmedOrderActions.clear();
       brokerRoutingRetryAttempts.clear();
       masterRoutingRetryAttempts.clear();
+      brokerCreditConfirmationPending = false;
       orderActionDeferredRemoteSave = false;
       if (saveTimer !== null) clearTimeout(saveTimer);
       saveTimer = null;
@@ -17461,8 +17463,20 @@
         return;
       }
 
+      const actionKey = "broker-send";
+      if (input.fundingType === "credit" && brokerCreditConfirmationPending) {
+        if (!els.confirmShade.classList.contains("open")) {
+          brokerCreditConfirmationPending = false;
+        } else {
+          notifyEvent("Order confirmation open", "Confirm or cancel the current Credit order before sending it again.");
+          return;
+        }
+      }
+      if (routingActionIsBlocked(actionKey)) return;
+      if (input.fundingType === "credit") brokerCreditConfirmationPending = true;
+
       confirmAction("Send this order to Master for routing?", async () => {
-        const actionKey = "broker-send";
+        brokerCreditConfirmationPending = false;
         if (routingActionIsBlocked(actionKey)) return;
         unconfirmedOrderActions.delete(actionKey);
         const actionSession = currentOrderActionSession();
@@ -17679,6 +17693,8 @@
           }
           flushDeferredOrderActionSave();
         }
+      }, () => {
+        brokerCreditConfirmationPending = false;
       });
     });
 

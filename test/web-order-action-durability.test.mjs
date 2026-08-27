@@ -130,7 +130,7 @@ test("web Broker Send waits for acknowledged persistence before clearing or repo
 
   const brokerSend = sectionBetween(
     index,
-    'confirmAction("Send this order to Master for routing?"',
+    'document.getElementById("orderForm").addEventListener("submit"',
     "els.cancelTransferEditButton.addEventListener"
   );
   assert.match(brokerSend, /async\s*\(\s*\)\s*=>\s*\{/,
@@ -155,6 +155,46 @@ test("web Broker Send waits for acknowledged persistence before clearing or repo
     assert.ok(receivableSuccessIndex > failureIndex,
       "Broker Send must not report a persisted receivable before the order save is acknowledged.");
   }
+});
+
+test("web Credit orders cannot queue a second confirmation or save", async () => {
+  const index = await readFile(path.join(repositoryRoot, "index.html"), "utf8");
+  const brokerSubmit = sectionBetween(
+    index,
+    'document.getElementById("orderForm").addEventListener("submit"',
+    "els.cancelTransferEditButton.addEventListener"
+  );
+  const creditGuardIndex = matchIndex(
+    brokerSubmit,
+    /input\.fundingType\s*===\s*"credit"\s*&&\s*brokerCreditConfirmationPending/,
+    "Credit Broker Send must reject a second confirmation for the same form action."
+  );
+  const routingGuardIndex = matchIndex(
+    brokerSubmit,
+    /if\s*\(routingActionIsBlocked\(actionKey\)\)\s*return\s*;/,
+    "Broker Send must reject an already-running save before opening another confirmation."
+  );
+  const reserveIndex = matchIndex(
+    brokerSubmit,
+    /if\s*\(input\.fundingType\s*===\s*"credit"\)\s*brokerCreditConfirmationPending\s*=\s*true/,
+    "Credit Broker Send must reserve its confirmation synchronously."
+  );
+  const confirmationIndex = matchIndex(
+    brokerSubmit,
+    /confirmAction\("Send this order to Master for routing\?"/,
+    "Broker Send confirmation was not found."
+  );
+  assert.ok(creditGuardIndex < confirmationIndex && routingGuardIndex < confirmationIndex && reserveIndex < confirmationIndex,
+    "Credit duplicate protection must run before the confirmation can queue another order ID.");
+  const confirmedSend = brokerSubmit.slice(confirmationIndex);
+  assert.match(confirmedSend, /async\s*\(\)\s*=>\s*\{\s*brokerCreditConfirmationPending\s*=\s*false/,
+    "Starting the one protected save must release only its confirmation reservation.");
+  assert.match(confirmedSend, /\},\s*\(\)\s*=>\s*\{\s*brokerCreditConfirmationPending\s*=\s*false/,
+    "Rejecting the confirmation must release the Credit reservation without creating an order.");
+
+  const resetSession = sectionBetween(index, "function resetOrderActionSession", "function routingActionIsBlocked");
+  assert.match(resetSession, /brokerCreditConfirmationPending\s*=\s*false/,
+    "Changing login or workspace must release the Credit confirmation reservation.");
 });
 
 test("web Master Forward checks the save result before reporting success", async () => {
