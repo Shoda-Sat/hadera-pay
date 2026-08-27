@@ -234,6 +234,34 @@ test("real server retains a paid order until both participant balances close and
     assert.equal(settlement(brokerClose.data.state, broker.name, "EUR"), 50_000);
     assert.equal(settlement(brokerClose.data.state, agent.name, "ETB"), -98_500);
 
+    const brokerAfterOwnClose = await requestOk(baseUrl, "/api/app-state", { cookie: brokerSignup.cookie });
+    assert.equal(
+      brokerAfterOwnClose.data.state.orders.some((order) => order.id === orderId),
+      false,
+      "An Actor must not receive a retained shared order after their own report has archived it."
+    );
+    assert.equal(
+      brokerAfterOwnClose.data.state.archives.flatMap((archive) => archive.orders || []).some((order) => order.id === orderId),
+      true,
+      "The closed Actor must still receive the immutable report containing the order."
+    );
+    const brokerSummaryAfterOwnClose = await requestOk(
+      baseUrl,
+      "/api/app-state?reports=summary&chats=summary",
+      { cookie: brokerSignup.cookie }
+    );
+    assert.equal(
+      brokerSummaryAfterOwnClose.data.state.orders.some((order) => order.id === orderId),
+      false,
+      "Lazy report summaries must also keep the Actor's closed order out of the active response."
+    );
+    const agentBeforeOwnClose = await requestOk(baseUrl, "/api/app-state", { cookie: agentSignup.cookie });
+    assert.equal(
+      agentBeforeOwnClose.data.state.orders.some((order) => order.id === orderId),
+      true,
+      "The same retained order must remain active for the participant who still needs to close it."
+    );
+
     const afterBrokerGet = await requestOk(baseUrl, "/api/app-state", { cookie: master.cookie });
     assert.equal(afterBrokerGet.data.revision, brokerClose.data.revision);
     assert.deepEqual(afterBrokerGet.data.state.orders.map((order) => order.id), [orderId], "Server GET normalization must preserve the retained shared order.");

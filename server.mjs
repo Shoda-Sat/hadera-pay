@@ -2458,6 +2458,36 @@ function responseArchiveMatchesActor(archive, actorId, actorName) {
   return Boolean(actorName && String(archive?.actor || "") === actorName);
 }
 
+function responseOrderIdentityValues(order) {
+  return new Set([
+    order?.id,
+    order?.internalOrderId,
+    order?.collisionSourceOrderId,
+  ].map((value) => String(value || "").trim()).filter(Boolean));
+}
+
+function responseOrdersReferToSameRecord(left, right) {
+  const leftIds = responseOrderIdentityValues(left);
+  const rightIds = responseOrderIdentityValues(right);
+  if (leftIds.size && rightIds.size) return Array.from(leftIds).some((id) => rightIds.has(id));
+  const leftJournal = String(left?.journal || "").trim();
+  const rightJournal = String(right?.journal || "").trim();
+  return Boolean(leftJournal && rightJournal && leftJournal === rightJournal);
+}
+
+function responseArchiveOrderReferences(archive) {
+  if (Array.isArray(archive?.orders)) return archive.orders;
+  return Array.isArray(archive?._orderRefs) ? archive._orderRefs : [];
+}
+
+function responseOrderArchivedForActor(order, archives, actorId, actorName) {
+  return (Array.isArray(archives) ? archives : []).some((archive) =>
+    responseArchiveMatchesActor(archive, actorId, actorName)
+    && responseArchiveOrderReferences(archive)
+      .some((snapshot) => responseOrdersReferToSameRecord(order, snapshot))
+  );
+}
+
 function responseReceivableMatchesActor(receivable, actorId, actorName) {
   const borrowerActorId = String(receivable?.borrowerActorId || "");
   if (borrowerActorId) return Boolean(actorId && borrowerActorId === actorId);
@@ -2561,13 +2591,16 @@ function stateForSessionResponse(state, session, { chatSummaries = false } = {})
   }
   const actorId = String(session.membership.actorId || "");
   const actorName = String(session.membership.actorName || "");
-  const orders = (Array.isArray(state.orders) ? state.orders : [])
-    .filter((order) => responseOrderMatchesActor(order, actorId, actorName));
   const archives = (Array.isArray(state.archives) ? state.archives : [])
     .filter((archive) => responseArchiveMatchesActor(archive, actorId, actorName));
+  const orders = (Array.isArray(state.orders) ? state.orders : [])
+    .filter((order) =>
+      responseOrderMatchesActor(order, actorId, actorName)
+      && !responseOrderArchivedForActor(order, archives, actorId, actorName)
+    );
   const visibleOrderIds = new Set([
     ...orders,
-    ...archives.flatMap((archive) => Array.isArray(archive?.orders) ? archive.orders : []),
+    ...archives.flatMap(responseArchiveOrderReferences),
   ].flatMap((order) => [order?.id, order?.internalOrderId, order?.collisionSourceOrderId])
     .map((value) => String(value || "").trim())
     .filter(Boolean));
