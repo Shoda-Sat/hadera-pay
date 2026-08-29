@@ -409,7 +409,7 @@ export default function App() {
         })
         .catch(() => undefined)
         .finally(() => { requestPending = false; });
-    }, 3000);
+    }, 12000);
     return () => {
       mounted = false;
       clearInterval(timer);

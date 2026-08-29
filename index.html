@@ -5495,7 +5495,7 @@
 
     function startRemoteRefresh() {
       if (remoteRefreshTimer) clearInterval(remoteRefreshTimer);
-      remoteRefreshTimer = setInterval(refreshSharedState, 3000);
+      remoteRefreshTimer = setInterval(refreshSharedState, 12000);
     }
 
     function showAccountDeviceWarning(warning) {
