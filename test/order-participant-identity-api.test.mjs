@@ -213,17 +213,18 @@ function accountingStateProjection(state) {
   };
 }
 
-test("web and Android stamp future payment rows with the Broker or Agent identity", async () => {
-  const [web, preview, mobile] = await Promise.all([
+test("the atomic server stamps future payment rows and Android delegates payment to it", async () => {
+  const [web, preview, mobile, server] = await Promise.all([
     readFile(path.join(repositoryRoot, "index.html"), "utf8"),
     readFile(path.join(repositoryRoot, "preview.html"), "utf8"),
     readFile(path.join(repositoryRoot, "mobile/src/domain/workspace.ts"), "utf8"),
+    readFile(path.join(repositoryRoot, "server.mjs"), "utf8"),
   ]);
   assert.equal(web, preview);
-  for (const source of [web, mobile]) {
-    assert.match(source, /actorId: order\.brokerActorId \|\| "", participantRole: "broker"/);
-    assert.match(source, /actorId: order\.agentActorId \|\| "", participantRole: "agent"/);
-  }
+  assert.match(server, /actorId: broker\.id, participantRole: "broker"/);
+  assert.match(server, /actorId: payer\.actor\.id, participantRole: "agent"/);
+  assert.match(mobile, /postOrderPaymentAtomic/);
+  assert.match(web, /saveOrderPaymentNow\(/);
 });
 
 test("a payment row with a nonempty unmatched orderId never falls back to a shared journal", async () => {

@@ -3553,6 +3553,7 @@ const actorCreatedOrderServerOwnedFields = [
   "payerCurrency",
   "payerAmountMinor",
   "paymentProof",
+  "paymentPostingAttemptId",
   "voidableUntil",
   "returnedAt",
   "returnedBy",
@@ -5170,6 +5171,371 @@ function applyAtomicMasterForward(latestDb, state, session, body = {}) {
   );
 }
 
+function orderPaymentExpectedIdentity(body) {
+  const expected = body?.expectedOrder;
+  return expected && typeof expected === "object" && !Array.isArray(expected) ? expected : null;
+}
+
+function orderPaymentAttemptBelongsToAnotherOrder(state, selectedOrder, attemptId) {
+  return masterForwardOrderRecords(state).some(({ order }) =>
+    String(order?.paymentPostingAttemptId || "") === attemptId
+    && !masterForwardOrdersShareLogicalIdentity(order, selectedOrder)
+  );
+}
+
+function orderPaymentHasMatchingClosedSnapshot(state, selectedOrder) {
+  return (Array.isArray(state?.archives) ? state.archives : []).some((archive) =>
+    (Array.isArray(archive?.orders) ? archive.orders : []).some((snapshot) =>
+      masterForwardOrdersShareLogicalIdentity(snapshot, selectedOrder)
+    )
+  );
+}
+
+function orderPaymentLinesForOrder(state, order) {
+  const orderId = String(order?.id || order?.internalOrderId || "").trim();
+  const journal = String(order?.journal || "").trim();
+  if (!orderId || !journal) return [];
+  return (Array.isArray(state?.ledger) ? state.ledger : []).filter((line) =>
+    String(line?.source || "") === "ORDER_PAYMENT"
+    && String(line?.orderId || "").trim() === orderId
+    && String(line?.journal || "").trim() === journal
+  );
+}
+
+function nextAtomicOrderPaymentJournal(state) {
+  const usedJournals = workspaceJournalValues(state);
+  state.journalCounter = Math.max(
+    Number(state.journalCounter || 0),
+    nextJournalNumberFromLedger(Array.isArray(state.ledger) ? state.ledger : []) - 1
+  ) + 1;
+  const base = `JRN-${1000 + state.journalCounter}`;
+  return usedJournals.has(base) ? nextAvailableDuplicateJournal(base, usedJournals) : base;
+}
+
+function orderPaymentDetails(order) {
+  return [
+    `Order: ${order?.brokerOrderNumber || order?.id || ""}`,
+    order?.senderName ? `Sender: ${order.senderName}` : "",
+    order?.receiverName ? `Receiver: ${order.receiverName}` : "",
+    order?.receiverCity ? `Receiver City: ${order.receiverCity}` : "",
+    order?.accountNumber ? `Account: ${order.accountNumber}` : "",
+    order?.phoneNumber ? `Phone: ${order.phoneNumber}` : "",
+    order?.remarks ? `Remarks: ${order.remarks}` : "",
+  ].filter(Boolean).join(" - ");
+}
+
+function canonicalOrderPaymentProof(latestDb, session, order, rawProof, paidAt) {
+  if (!rawProof) return null;
+  if (typeof rawProof !== "object" || Array.isArray(rawProof)) {
+    throw httpError(400, "The payment proof is invalid. Attach it again.");
+  }
+  const attachmentId = String(rawProof.attachmentId || "").trim();
+  const file = (latestDb.files || []).find((candidate) =>
+    candidate?.id === attachmentId
+    && candidate?.workspaceId === session.workspace.id
+    && candidate?.status === "active"
+  );
+  if (!file || file.purpose !== "payment-proof" || String(file.contextId || "") !== String(order.id || "")) {
+    throw httpError(400, "The payment proof is unavailable. Attach it again before posting payment.");
+  }
+  return {
+    attachmentId: file.id,
+    size: Number(file.size || 0),
+    fileName: String(file.fileName || rawProof.fileName || `${order.brokerOrderNumber || order.id}-payment-proof`),
+    attachedAt: paidAt,
+    mediaType: String(file.mimeType || "").startsWith("image/") ? "image" : "document",
+    mimeType: String(file.mimeType || "application/octet-stream"),
+    orderNumber: String(order.brokerOrderNumber || order.id || ""),
+    compressed: rawProof.compressed === true,
+  };
+}
+
+function orderPaymentProofMessage(latestDb, state, order, proof, actors, attemptId, paidAt) {
+  if (!proof) return { chat: null, message: null };
+  state.chatConversations = Array.isArray(state.chatConversations) ? state.chatConversations : [];
+  const broker = activeOrderBroker(order, new Map(actors.map((actor) => [actor.id, actor])));
+  const master = actors.find((actor) => actor?.role === "Master");
+  if (!broker || !master) {
+    throw httpError(409, "The payment photo could not be delivered because the original Broker chat is unavailable.");
+  }
+  let chat = state.chatConversations.find((candidate) =>
+    candidate?.type === "direct"
+    && Array.isArray(candidate.members)
+    && candidate.members.includes(master.name)
+    && candidate.members.includes(broker.name)
+  );
+  if (!chat) {
+    chat = {
+      id: masterForwardChatId(state),
+      type: "direct",
+      name: broker.name,
+      members: [master.name, broker.name],
+      messages: [],
+      createdAt: paidAt,
+    };
+    state.chatConversations.push(chat);
+  }
+  chat.messages = Array.isArray(chat.messages) ? chat.messages : [];
+  const messageId = `MSG-${attemptId}`;
+  const existingElsewhere = state.chatConversations.some((candidate) =>
+    candidate !== chat && (candidate?.messages || []).some((message) => message?.id === messageId)
+  );
+  if (existingElsewhere) throw httpError(409, "This payment attempt is already attached to another conversation.");
+  let message = chat.messages.find((candidate) => candidate?.id === messageId) || null;
+  if (message && (
+    String(message.orderId || "") !== String(order.id || "")
+    || String(message.attachmentId || "") !== String(proof.attachmentId || "")
+  )) {
+    throw httpError(409, "This payment attempt is already attached to another proof message.");
+  }
+  if (!message) {
+    message = {
+      id: messageId,
+      from: master.name,
+      text: `Payment photo for order ${order.brokerOrderNumber || order.id}.`,
+      kind: proof.mediaType === "image" ? "photo" : "file",
+      media: "",
+      attachmentId: proof.attachmentId,
+      fileName: proof.fileName,
+      mimeType: proof.mimeType,
+      fileSize: proof.size,
+      orderId: order.id,
+      orderNumber: order.brokerOrderNumber || order.id,
+      replyTo: "",
+      reactions: {},
+      readBy: [master.name],
+      createdAt: paidAt,
+    };
+    chat.messages.push(message);
+  }
+  const file = (latestDb.files || []).find((candidate) => candidate?.id === proof.attachmentId);
+  if (file) file.contextIds = Array.from(new Set([...(file.contextIds || [file.contextId]), chat.id]));
+  return { chat, message };
+}
+
+function orderPaymentResponse(state, session, revision, order, ledgerLines, receivable, proofDelivery, {
+  alreadyApplied = false,
+  includeState = false,
+} = {}) {
+  const chatVisible = proofDelivery?.chat && sessionCanReadChatConversation(proofDelivery.chat, session);
+  return {
+    ok: true,
+    revision,
+    alreadyApplied,
+    order: structuredClone(order),
+    ledgerLines: structuredClone(ledgerLines || []),
+    receivable: receivable ? structuredClone(receivable) : null,
+    settlements: structuredClone(state.settlements || []),
+    chat: chatVisible ? {
+      id: proofDelivery.chat.id,
+      type: proofDelivery.chat.type,
+      name: proofDelivery.chat.name,
+      members: structuredClone(proofDelivery.chat.members || []),
+      createdAt: proofDelivery.chat.createdAt || "",
+    } : null,
+    message: chatVisible && proofDelivery.message ? structuredClone(proofDelivery.message) : null,
+    proofDelivered: Boolean(proofDelivery?.message),
+    journalCounter: Number(state.journalCounter || 0),
+    chatCounter: Number(state.chatCounter || 0),
+    orderState: "Paid",
+    ...(includeState ? { state: stateForSessionResponse(state, session, { chatSummaries: true }) } : {}),
+  };
+}
+
+function applyAtomicOrderPayment(latestDb, state, actingSession, responseSession, body = {}) {
+  const orderId = String(body.orderId || "").trim();
+  const actingActorId = String(body.actingActorId || body.actorId || "").trim();
+  const attemptId = String(body.attemptId || "").trim();
+  const expectedOrder = orderPaymentExpectedIdentity(body);
+  const hasExpectedUpdatedAt = Object.prototype.hasOwnProperty.call(body, "expectedOrderUpdatedAt");
+  const hasExpectedForwardAttempt = Object.prototype.hasOwnProperty.call(body, "expectedRoutingForwardAttemptId");
+  if (!orderId || !actingActorId || !attemptId || attemptId.length > 512
+    || !expectedOrder || String(expectedOrder.id || "").trim() !== orderId
+    || !hasExpectedUpdatedAt || !hasExpectedForwardAttempt) {
+    throw httpError(400, "The payment request is incomplete. Refresh and try again.");
+  }
+
+  state.orders = Array.isArray(state.orders) ? state.orders : [];
+  state.receivables = Array.isArray(state.receivables) ? state.receivables : [];
+  state.ledger = Array.isArray(state.ledger) ? state.ledger : [];
+  state.archives = Array.isArray(state.archives) ? state.archives : [];
+  const preMutationRevision = workspaceStateRevision(latestDb, actingSession.workspace.id);
+  const expectedRevision = String(body.expectedRevision || "");
+  const includeState = Boolean(expectedRevision && expectedRevision !== preMutationRevision);
+  const orderIndex = findMasterForwardOrderIndex(state, orderId, expectedOrder);
+  if (orderIndex < 0) throw httpError(409, "The selected order changed before payment. Refresh and review it.");
+  const currentOrder = state.orders[orderIndex];
+  if (!recoveredOrderMatches(currentOrder, expectedOrder)) {
+    throw httpError(409, "The selected order no longer matches the payment request.");
+  }
+  const actors = masterForwardWorkspaceActors(latestDb, state, actingSession.workspace.id);
+  const actorsById = new Map(actors.map((actor) => [String(actor?.id || ""), actor]));
+  if (!actorSessionMatchesOrderAgent(actingSession, currentOrder, actorsById)
+    || String(actingSession.membership.actorId || "") !== actingActorId) {
+    throw httpError(403, "Only the assigned payer can mark this order as paid.");
+  }
+  if (orderPaymentAttemptBelongsToAnotherOrder(state, currentOrder, attemptId)) {
+    throw httpError(409, "This payment attempt belongs to another order.");
+  }
+
+  if (currentOrder.state === "Paid") {
+    if (String(currentOrder.paymentPostingAttemptId || "") !== attemptId) {
+      throw httpError(409, "This order was already paid by another confirmed action. Refresh to load it.");
+    }
+    const proofWasRequested = body.paymentProof !== null && body.paymentProof !== undefined;
+    const requestedProofId = proofWasRequested ? String(body.paymentProof?.attachmentId || "").trim() : "";
+    const storedProofId = String(currentOrder.paymentProof?.attachmentId || "").trim();
+    if (proofWasRequested && !requestedProofId) {
+      throw httpError(400, "The payment proof is invalid. Attach it again.");
+    }
+    if (proofWasRequested && requestedProofId !== storedProofId) {
+      throw httpError(409, "This payment was already confirmed with a different proof. Refresh to load it.");
+    }
+    const existingLines = orderPaymentLinesForOrder(state, currentOrder);
+    const expectedLines = expectedOrderPaymentLines(currentOrder, actorsById);
+    const unmatchedLines = [...existingLines];
+    const exactLines = expectedLines.every((expected) => {
+      const index = unmatchedLines.findIndex((line) => paymentLineShapeKey(line) === paymentLineShapeKey(expected));
+      if (index < 0) return false;
+      unmatchedLines.splice(index, 1);
+      return true;
+    });
+    if (!exactLines || unmatchedLines.length > 0 || existingLines.length !== expectedLines.length) {
+      throw httpError(409, "The saved payment journal is incomplete. Refresh and review the order.");
+    }
+    const receivable = masterForwardReceivableForOrder(state, currentOrder);
+    const messageId = `MSG-${attemptId}`;
+    const chat = (state.chatConversations || []).find((candidate) =>
+      (candidate?.messages || []).some((message) => message?.id === messageId)
+    ) || null;
+    const message = chat?.messages?.find((candidate) => candidate?.id === messageId) || null;
+    if (proofWasRequested && (
+      !message
+      || String(message.orderId || "") !== String(currentOrder.id || "")
+      || String(message.attachmentId || "") !== requestedProofId
+    )) {
+      throw httpError(409, "The confirmed payment proof message is unavailable. Refresh before trying again.");
+    }
+    return orderPaymentResponse(
+      state,
+      responseSession,
+      preMutationRevision,
+      currentOrder,
+      existingLines,
+      receivable,
+      { chat, message },
+      { alreadyApplied: true, includeState }
+    );
+  }
+  if (currentOrder.state !== "Assigned") {
+    throw httpError(409, `The order is already ${currentOrder.state || "changed"} and cannot be marked as paid.`);
+  }
+  if (orderPaymentHasMatchingClosedSnapshot(state, currentOrder)) {
+    throw httpError(409, "This order already belongs to a closed report and cannot be paid again.");
+  }
+  if (String(currentOrder.updatedAt || "") !== String(body.expectedOrderUpdatedAt || "")
+    || String(currentOrder.routingForwardAttemptId || "") !== String(body.expectedRoutingForwardAttemptId || "")) {
+    throw httpError(409, "The order assignment changed before payment. Refresh and review it.");
+  }
+
+  const journal = nextAtomicOrderPaymentJournal(state);
+  const paidAt = transitionTimestampAfter(currentOrder.updatedAt, currentOrder.assignedAt);
+  const proof = canonicalOrderPaymentProof(latestDb, actingSession, currentOrder, body.paymentProof, paidAt);
+  const nextOrder = canonicalizeActorPaymentTransition(
+    { ...currentOrder, state: "Paid", journal, paymentProof: proof || undefined },
+    currentOrder,
+    actorsById
+  );
+  nextOrder.paymentPostingAttemptId = attemptId;
+  if (/\s+\(\d+\)$/.test(journal)) nextOrder.journalCollisionBase = journal.replace(/\s+\(\d+\)$/, "");
+  else delete nextOrder.journalCollisionBase;
+  if (proof) nextOrder.paymentProof = { ...proof, attachedAt: nextOrder.paidAt };
+  else delete nextOrder.paymentProof;
+  const details = orderPaymentDetails(nextOrder);
+  const ledgerLines = expectedOrderPaymentLines(nextOrder, actorsById).map((line) => ({
+    ...line,
+    journal,
+    orderId: nextOrder.id,
+    source: "ORDER_PAYMENT",
+    details,
+    postedAt: nextOrder.paidAt,
+  }));
+  const projectedState = {
+    ...state,
+    actors,
+    orders: state.orders.map((order, index) => index === orderIndex ? nextOrder : order),
+    ledger: [...ledgerLines, ...state.ledger],
+  };
+  Object.assign(nextOrder, deriveOrderIncomeSnapshot(projectedState, nextOrder, ledgerLines));
+  state.orders[orderIndex] = nextOrder;
+  state.ledger.unshift(...ledgerLines);
+  const receivable = masterForwardReceivableForOrder(state, nextOrder);
+  if (receivable) {
+    receivable.journal = journal;
+    receivable.updatedAt = nextOrder.paidAt;
+  }
+  const settlementState = { ...state, actors };
+  recalculateSettlementsFromLedger(settlementState);
+  state.settlements = settlementState.settlements;
+  const proofDelivery = orderPaymentProofMessage(latestDb, state, nextOrder, proof, actors, attemptId, nextOrder.paidAt);
+  state.orderState = "Paid";
+  const revision = markWorkspaceStateChanged(latestDb, actingSession.workspace.id, state);
+  return orderPaymentResponse(
+    state,
+    responseSession,
+    revision,
+    nextOrder,
+    ledgerLines,
+    receivable,
+    proofDelivery,
+    { includeState }
+  );
+}
+
+function latestWritablePaymentSession(latestDb, latestState, request, workspaceId, actingActorId = "") {
+  const sessionId = parseCookies(request).hp_session;
+  const sessionRecord = activeSessionRecord(latestDb, sessionId);
+  const session = publicSessionForRecord(latestDb, sessionRecord);
+  if (!session) throw httpError(401, "Please log in.");
+  if (session.workspace.id !== workspaceId) throw httpError(403, "The signed-in workspace changed before payment.");
+  if (session.subscription.accessDenied) throw httpError(402, "This workspace's 30-day viewing period has ended. Renew the subscription to regain access.");
+  if (session.subscription.inactive) throw httpError(403, "This workspace is inactive.");
+  if (session.subscription.readOnly) throw httpError(403, "This workspace is read-only after subscription expiry. Renew the subscription to make changes.");
+  const requestedActorId = String(actingActorId || "").trim();
+  let actingSession = session;
+  if (session.membership.role === "Master") {
+    const actor = masterForwardWorkspaceActors(latestDb, latestState, workspaceId).find((candidate) =>
+      String(candidate?.id || "") === requestedActorId
+    );
+    const actorWorkspaceId = String(actor?.workspaceId || "").trim();
+    if (!actor || actor.active === false || actor.managedByMaster !== true
+      || (actorWorkspaceId && actorWorkspaceId !== workspaceId)
+      || !["Agent", "Special Agent", "Special Broker"].includes(String(actor.role || ""))) {
+      throw httpError(403, "Master can post payment only for an active, Master-managed payout Actor.");
+    }
+    actingSession = {
+      ...session,
+      membership: {
+        ...session.membership,
+        role: "Actor",
+        actorId: String(actor.id),
+        actorName: String(actor.name || ""),
+        actorRole: String(actor.role),
+        currency: String(actor.currency || session.membership.currency || "USD"),
+        workingCurrencies: Array.isArray(actor.workingCurrencies) ? [...actor.workingCurrencies] : [],
+      },
+    };
+  } else if (session.membership.role !== "Actor"
+    || !["Agent", "Special Agent", "Special Broker"].includes(String(session.membership.actorRole || ""))
+    || requestedActorId !== String(session.membership.actorId || "")) {
+    throw httpError(403, "Only the assigned payer can mark an order as paid.");
+  }
+  const deviceId = requestDeviceId(request);
+  if (!sessionRecord.deviceId && deviceId) sessionRecord.deviceId = deviceId;
+  touchSession(sessionRecord);
+  return { actingSession, responseSession: session, sessionRecord };
+}
+
 function latestWritableMasterSession(latestDb, request, workspaceId) {
   const sessionId = parseCookies(request).hp_session;
   const sessionRecord = activeSessionRecord(latestDb, sessionId);
@@ -5429,6 +5795,7 @@ async function handleApi(request, response, url) {
     const workspaceLoadsInsideMutation = method === "POST" && [
       "/api/app-state/submit-order",
       "/api/app-state/forward-order",
+      "/api/app-state/pay-order",
       "/api/app-state/close-balance",
     ].includes(url.pathname) || (method === "PUT" && url.pathname === "/api/app-state");
     if (metadataOnlyRequest) {
@@ -6312,6 +6679,33 @@ async function handleApi(request, response, url) {
       committedSessionRecord = latestAuth.sessionRecord;
       return applyAtomicMasterForward(latestDb, latestState, latestAuth.session, body);
     }, { collections: ["orders", "receivables", "chatConversations"] });
+    setSessionCookie(response, committedSessionRecord);
+    sendJson(response, 200, result);
+    return;
+  }
+
+  if (url.pathname === "/api/app-state/pay-order" && method === "POST") {
+    const body = await readJson(request);
+    const actingActorId = String(body?.actingActorId || body?.actorId || "").trim();
+    if (session.membership.role !== "Master"
+      && !(session.membership.role === "Actor"
+        && ["Agent", "Special Agent", "Special Broker"].includes(session.membership.actorRole))) {
+      return sendJson(response, 403, { error: "Only the assigned payer can mark an order as paid." });
+    }
+    let committedSessionRecord = null;
+    const collections = ["orders", "receivables", "ledger", "settlements"];
+    if (body?.paymentProof) collections.push("chatConversations");
+    const result = await mutateLatestWorkspaceStateAtLatest(session.workspace.id, async (latestDb, latestState) => {
+      const latestAuth = latestWritablePaymentSession(latestDb, latestState, request, session.workspace.id, actingActorId);
+      committedSessionRecord = latestAuth.sessionRecord;
+      return applyAtomicOrderPayment(
+        latestDb,
+        latestState,
+        latestAuth.actingSession,
+        latestAuth.responseSession,
+        body
+      );
+    }, { collections });
     setSessionCookie(response, committedSessionRecord);
     sendJson(response, 200, result);
     return;

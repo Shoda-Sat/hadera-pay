@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { recoveredOrderMatches } from "../src/orderIntegrity.mjs";
 
 const repositoryRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -72,22 +73,7 @@ async function createActor(baseUrl, masterCookie, { role, currency, name, email,
   return { invite: invite.data.invite, signup };
 }
 
-function paymentLines(order, broker, payer) {
-  const shared = {
-    journal: order.journal,
-    orderId: order.id,
-    source: "ORDER_PAYMENT",
-    postedAt: order.paidAt,
-  };
-  return [
-    { ...shared, actorId: broker.id, participantRole: "broker", account: `${broker.name} ACTOR_CLEARING`, direction: "Debit", currency: "EUR", amountMinor: 50_000 },
-    { ...shared, account: "MASTER_FX_CLEARING", direction: "Credit", currency: "EUR", amountMinor: 50_000 },
-    { ...shared, account: "MASTER_FX_CLEARING", direction: "Debit", currency: "ETB", amountMinor: 98_500 },
-    { ...shared, actorId: payer.id, participantRole: "agent", account: `${payer.name} ACTOR_CLEARING`, direction: "Credit", currency: "ETB", amountMinor: 98_500 },
-  ];
-}
-
-test("Assigned orders with an orphan journal can save one complete payment that survives reload", async () => {
+test("atomic Asmara payment survives a stale revision, reload, and exact retry", async () => {
   const dataDirectory = await mkdtemp(path.join(os.tmpdir(), "haderapay-stale-payment-"));
   const port = await unusedPort();
   const baseUrl = `http://127.0.0.1:${port}`;
@@ -154,9 +140,10 @@ test("Assigned orders with an orphan journal can save one complete payment that 
     assert.ok(payer);
 
     const orderId = "ORD-ASMARA-ORPHAN-JOURNAL";
+    const concurrentOrderId = "ORD-ASMARA-CONCURRENT-PAYMENT";
     const createdAt = "2026-08-29T08:00:00.000Z";
     const seededState = structuredClone(initial.data.state);
-    seededState.orders = [{
+    const assignedOrder = {
       id: orderId,
       internalOrderId: orderId,
       brokerActorId: broker.id,
@@ -177,7 +164,18 @@ test("Assigned orders with an orphan journal can save one complete payment that 
       createdAt,
       assignedAt: createdAt,
       updatedAt: createdAt,
-    }, ...(seededState.orders || [])];
+    };
+    const concurrentAssignedOrder = {
+      ...assignedOrder,
+      id: concurrentOrderId,
+      internalOrderId: concurrentOrderId,
+      brokerOrderNumber: "PPP901",
+      journal: "",
+      createdAt: "2026-08-29T08:01:00.000Z",
+      assignedAt: "2026-08-29T08:01:00.000Z",
+      updatedAt: "2026-08-29T08:01:00.000Z",
+    };
+    seededState.orders = [assignedOrder, concurrentAssignedOrder, ...(seededState.orders || [])];
     const seeded = await requestOk(baseUrl, "/api/app-state", {
       cookie: master.cookie,
       method: "PUT",
@@ -186,31 +184,75 @@ test("Assigned orders with an orphan journal can save one complete payment that 
     const storedAssigned = seeded.data.state.orders.find((order) => order.id === orderId);
     assert.equal(storedAssigned?.state, "Assigned");
     assert.equal(storedAssigned?.journal, "JRN-ORPHAN-ASMARA");
+    assert.equal(String(storedAssigned?.paidAt || ""), "");
     assert.equal(seeded.data.state.ledger.some((line) => line.orderId === orderId), false);
 
     const actorView = await requestOk(baseUrl, "/api/app-state", { cookie: payerAccount.signup.cookie });
-    const paymentState = structuredClone(actorView.data.state);
-    const paidOrder = paymentState.orders.find((order) => order.id === orderId);
-    const paidAt = "2099-01-01T00:00:00.000Z";
-    Object.assign(paidOrder, {
-      state: "Paid",
-      journal: "JRN-ASMARA-PAYMENT",
-      paidAt,
-      updatedAt: paidAt,
-    });
-    paymentState.ledger = [...paymentLines(paidOrder, broker, payer), ...(paymentState.ledger || [])];
-
-    const saved = await requestOk(baseUrl, "/api/app-state", {
+    const concurrent = await requestOk(baseUrl, "/api/app-state/pay-order", {
       cookie: payerAccount.signup.cookie,
-      method: "PUT",
-      body: { state: paymentState, expectedRevision: actorView.data.revision },
+      method: "POST",
+      body: {
+        orderId: concurrentOrderId,
+        actingActorId: payer.id,
+        attemptId: "PAY-ASMARA-CONCURRENT",
+        expectedRevision: actorView.data.revision,
+        expectedOrder: concurrentAssignedOrder,
+        expectedOrderUpdatedAt: concurrentAssignedOrder.updatedAt,
+        expectedRoutingForwardAttemptId: "",
+        paymentProof: null,
+      },
     });
-    const savedOrder = saved.data.state.orders.find((order) => order.id === orderId);
-    const savedLines = saved.data.state.ledger.filter((line) => line.orderId === orderId && line.source === "ORDER_PAYMENT");
+    assert.notEqual(concurrent.data.revision, actorView.data.revision);
+    assert.equal(concurrent.data.order.state, "Paid");
+
+    const attemptId = "PAY-ASMARA-ORPHAN-ATOMIC";
+    const paymentBody = {
+      orderId,
+      actingActorId: payer.id,
+      attemptId,
+      expectedRevision: actorView.data.revision,
+      expectedOrder: storedAssigned,
+      expectedOrderUpdatedAt: storedAssigned.updatedAt,
+      expectedRoutingForwardAttemptId: storedAssigned.routingForwardAttemptId || "",
+      paymentProof: null,
+    };
+    const forbidden = await request(baseUrl, "/api/app-state/pay-order", {
+      cookie: brokerAccount.signup.cookie,
+      method: "POST",
+      body: { ...paymentBody, actingActorId: broker.id },
+    });
+    assert.equal(forbidden.response.status, 403);
+    const beforePayment = await requestOk(baseUrl, "/api/app-state", { cookie: payerAccount.signup.cookie });
+    const beforePaymentOrder = beforePayment.data.state.orders.find((order) => order.id === orderId);
+    assert.equal(beforePaymentOrder?.state, "Assigned");
+    assert.equal(beforePaymentOrder?.paymentPostingAttemptId, undefined);
+
+    const saved = await requestOk(baseUrl, "/api/app-state/pay-order", {
+      cookie: payerAccount.signup.cookie,
+      method: "POST",
+      body: paymentBody,
+    });
+    const savedOrder = saved.data.order;
+    const savedLines = saved.data.ledgerLines;
     assert.equal(savedOrder?.state, "Paid");
-    assert.equal(savedOrder?.journal, "JRN-ASMARA-PAYMENT");
+    assert.notEqual(savedOrder?.journal, "JRN-ORPHAN-ASMARA");
+    assert.equal(savedOrder?.paymentPostingAttemptId, attemptId);
     assert.equal(savedLines.length, 4);
     assert.equal(savedLines.every((line) => line.journal === savedOrder.journal), true);
+    assert.equal(
+      saved.data.state?.orders.find((order) => order.id === concurrentOrderId)?.state,
+      "Paid",
+      "stale caller receives the unrelated concurrent payment"
+    );
+
+    const replay = await requestOk(baseUrl, "/api/app-state/pay-order", {
+      cookie: payerAccount.signup.cookie,
+      method: "POST",
+      body: paymentBody,
+    });
+    assert.equal(replay.data.alreadyApplied, true);
+    assert.equal(replay.data.order.journal, savedOrder.journal);
+    assert.equal(replay.data.ledgerLines.length, savedLines.length);
 
     const reloaded = await requestOk(baseUrl, "/api/app-state", { cookie: payerAccount.signup.cookie });
     const reloadedOrder = reloaded.data.state.orders.find((order) => order.id === orderId);
@@ -218,6 +260,9 @@ test("Assigned orders with an orphan journal can save one complete payment that 
     assert.equal(reloadedOrder?.state, "Paid");
     assert.equal(reloadedOrder?.journal, savedOrder.journal);
     assert.deepEqual(reloadedLines, savedLines);
+    assert.deepEqual(reloaded.data.state.archives, actorView.data.state.archives, "closed reports remain unchanged");
+    assert.equal(reloadedLines.filter((line) => line.account === `${broker.name} ACTOR_CLEARING`).length, 1);
+    assert.equal(reloadedLines.filter((line) => line.account === `${payer.name} ACTOR_CLEARING`).length, 1);
   } finally {
     serverProcess.kill();
     await new Promise((resolve) => serverProcess.once("exit", resolve));
@@ -225,17 +270,68 @@ test("Assigned orders with an orphan journal can save one complete payment that 
   }
 });
 
-test("web and mobile replace an orphan Assigned journal and wait for acknowledgement", async () => {
-  const [web, preview, mobile] = await Promise.all([
+test("payment distinguishes a current order from a different closed order with the same legacy ID", async () => {
+  const server = await readFile(path.join(repositoryRoot, "server.mjs"), "utf8");
+  const helperSource = server.match(/function orderPaymentHasMatchingClosedSnapshot\([\s\S]*?(?=\nfunction orderPaymentLinesForOrder\()/)?.[0] || "";
+  const orderPaymentHasMatchingClosedSnapshot = Function(
+    "masterForwardOrdersShareLogicalIdentity",
+    `${helperSource}; return orderPaymentHasMatchingClosedSnapshot;`
+  )((left, right) => {
+    const identities = (order) => new Set([
+      order?.id,
+      order?.internalOrderId,
+      order?.collisionSourceOrderId,
+    ].map((value) => String(value || "").trim()).filter(Boolean));
+    const leftIds = identities(left);
+    const rightIds = identities(right);
+    return recoveredOrderMatches(left, right) && [...leftIds].some((value) => rightIds.has(value));
+  });
+  const current = {
+    id: "ORD-SHARED-LEGACY-ID",
+    internalOrderId: "ORD-CURRENT-INTERNAL",
+    brokerActorId: "ACT-PPP",
+    agentActorId: "ACT-ASMARA",
+    sourceCurrency: "EUR",
+    sourceAmountMinor: 50_000,
+    payoutCurrency: "ETB",
+    payoutAmountMinor: 98_500,
+    receiverName: "Current Receiver",
+    accountNumber: "CURRENT-ACCOUNT",
+    phoneNumber: "111",
+    createdAt: "2026-08-29T08:00:00.000Z",
+  };
+  const historicalCollision = {
+    ...current,
+    internalOrderId: "ORD-CLOSED-INTERNAL",
+    sourceAmountMinor: 75_000,
+    receiverName: "Historical Receiver",
+    accountNumber: "CLOSED-ACCOUNT",
+    createdAt: "2026-08-01T08:00:00.000Z",
+  };
+  const archive = { id: "ARC-CLOSED", orders: [historicalCollision] };
+  assert.equal(orderPaymentHasMatchingClosedSnapshot({ archives: [archive] }, current), false);
+  assert.equal(orderPaymentHasMatchingClosedSnapshot({ archives: [{ ...archive, orders: [{ ...current }] }] }, current), true);
+  assert.match(server, /"paymentPostingAttemptId",[\s\S]*function sanitizeActorCreatedPendingOrder/);
+  assert.match(server, /nextOrder\.journalCollisionBase = journal\.replace/);
+});
+
+test("web and mobile post payment atomically before showing Paid", async () => {
+  const [web, preview, mobile, mobileApi, server] = await Promise.all([
     readFile(path.join(repositoryRoot, "index.html"), "utf8"),
     readFile(path.join(repositoryRoot, "preview.html"), "utf8"),
     readFile(path.join(repositoryRoot, "mobile/src/domain/workspace.ts"), "utf8"),
+    readFile(path.join(repositoryRoot, "mobile/src/api/client.ts"), "utf8"),
+    readFile(path.join(repositoryRoot, "server.mjs"), "utf8"),
   ]);
   assert.equal(web, preview);
-  assert.doesNotMatch(web, /if \(order\.journal \|\| order\.state === "Paid"\) return false/);
-  assert.doesNotMatch(web, /const posted = order\.journal \? true : postOrderPayment\(order\)/);
-  assert.match(web, /const saved = await saveStateNow\(\)/);
-  assert.match(web, /paymentSaveIsAcknowledged\(order\.id, order\.journal, saved\?\.state\)/);
+  const webPayment = web.match(/async function markOrderPaidFromButton\(payButton\) \{[\s\S]*?(?=\n    function viewFromLocation\()/)?.[0] || "";
+  assert.match(webPayment, /saveOrderPaymentNow\(/);
+  assert.match(webPayment, /payButton\.disabled = false;[\s\S]*Payment was not saved/);
+  assert.match(web, /api\("\/api\/app-state\/pay-order"/);
+  assert.doesNotMatch(webPayment, /postOrderPayment\(|finalizeOrderPaid\(|saveStateNow\(/);
   assert.match(web, /processingOrderIds\.size/);
-  assert.doesNotMatch(mobile, /order\.state !== "Assigned" \|\| order\.journal/);
+  assert.match(mobile, /return await postOrderPaymentAtomic\(orderId, actorId, proof\)/);
+  assert.match(mobileApi, /api<AtomicOrderPaymentResult>\("\/api\/app-state\/pay-order"/);
+  assert.match(server, /mutateLatestWorkspaceStateAtLatest[\s\S]*applyAtomicOrderPayment/);
+  assert.match(server, /collections = \["orders", "receivables", "ledger", "settlements"\]/);
 });

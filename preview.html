@@ -4881,6 +4881,33 @@
       return write;
     }
 
+    function queueRemoteOrderPayment(payload) {
+      const submittedSession = currentOrderActionSession();
+      const assertSubmittedSession = () => {
+        if (orderActionSessionIsCurrent(submittedSession)) return;
+        const error = new Error("The signed-in workspace changed before this payment finished.");
+        error.code = "ORDER_ACTION_SESSION_CHANGED";
+        throw error;
+      };
+      const write = remoteSaveChain.then(async () => {
+        assertSubmittedSession();
+        remoteSavePending += 1;
+        try {
+          const result = await api("/api/app-state/pay-order", {
+            method: "POST",
+            keepalive: true,
+            body: { ...payload, expectedRevision: remoteStateRevision }
+          });
+          assertSubmittedSession();
+          return result;
+        } finally {
+          remoteSavePending = Math.max(0, remoteSavePending - 1);
+        }
+      });
+      remoteSaveChain = write.catch(() => {});
+      return write;
+    }
+
     function clientDeviceId() {
       if (browserDeviceId) return browserDeviceId;
       const key = "haderapay.browser.device.v1";
@@ -5800,6 +5827,29 @@
       return false;
     }
 
+    async function saveOrderPaymentNow(payload) {
+      if (subscriptionIsReadOnly()) return false;
+      if (!currentAuth || !remoteStateReady || suppressRemoteSave) return false;
+      if (saveTimer !== null) orderActionDeferredRemoteSave = true;
+      clearTimeout(saveTimer);
+      saveTimer = null;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          const result = await queueRemoteOrderPayment(payload);
+          return { ...result, atomicOrderPayment: true };
+        } catch (error) {
+          if (error?.code === "ORDER_ACTION_SESSION_CHANGED" || orderPaymentErrorIsDefinitive(error) || attempt === 1) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 150));
+        }
+      }
+      return false;
+    }
+
+    function orderPaymentErrorIsDefinitive(error) {
+      const status = Number(error?.status);
+      return Number.isInteger(status) && status >= 400 && status < 500;
+    }
+
     function masterForwardErrorIsDefinitive(error) {
       const status = Number(error?.status);
       return Number.isInteger(status) && status >= 400 && status < 500;
@@ -6055,6 +6105,11 @@
       return identity;
     }
 
+    function orderPaymentAttemptId(order) {
+      const cycle = order?.routingForwardAttemptId || order?.assignedAt || order?.updatedAt || order?.createdAt || "ASSIGNED";
+      return `PAY-${orderRoutingTokenPart(order?.id)}-${orderRoutingTokenPart(cycle)}`;
+    }
+
     function removeEmptyOptimisticForwardChat(optimisticMessageReference, authoritativeChat) {
       if (!optimisticMessageReference?.chatId || !authoritativeChat?.id || optimisticMessageReference.chatId === authoritativeChat.id) return;
       const optimisticChatIndex = state.chatConversations.findIndex((chat) => chat?.id === optimisticMessageReference.chatId);
@@ -6191,6 +6246,52 @@
 
       state.chatCounter = Math.max(Number(state.chatCounter || 0), Number(result.chatCounter || 0));
       state.orderState = result.orderState || result.order.state || "Assigned";
+      remoteStateRevision = String(result.revision);
+      persistOrderActionStateLocally();
+      return true;
+    }
+
+    function adoptAtomicOrderPaymentResult(result) {
+      if (!result?.atomicOrderPayment || !result.order?.id || !result.order?.journal || !result.revision) return false;
+      if (result.state && !mergeSharedState(result.state)) return false;
+      const orderIndex = state.orders.findIndex((candidate) =>
+        String(candidate?.id || "") === String(result.order.id)
+        && recoveredOrderMatches(candidate, result.order)
+      );
+      if (orderIndex >= 0) state.orders[orderIndex] = structuredClone(result.order);
+      else state.orders.push(structuredClone(result.order));
+
+      const journal = String(result.order.journal || "");
+      state.ledger = state.ledger.filter((line) => !(
+        line?.source === "ORDER_PAYMENT"
+        && String(line?.orderId || "") === String(result.order.id)
+        && String(line?.journal || "") === journal
+      ));
+      state.ledger.unshift(...(result.ledgerLines || []).map((line) => structuredClone(line)));
+
+      if (result.receivable?.id) {
+        const receivableIndex = state.receivables.findIndex((candidate) =>
+          candidate?.id === result.receivable.id || candidate?.orderId === result.receivable.orderId
+        );
+        if (receivableIndex >= 0) state.receivables[receivableIndex] = structuredClone(result.receivable);
+        else state.receivables.push(structuredClone(result.receivable));
+      }
+      if (Array.isArray(result.settlements)) state.settlements = structuredClone(result.settlements);
+
+      if (result.chat?.id) {
+        let chat = state.chatConversations.find((candidate) => candidate?.id === result.chat.id);
+        if (!chat) {
+          chat = { ...structuredClone(result.chat), messages: [] };
+          state.chatConversations.push(chat);
+        }
+        if (result.message?.id && !(chat.messages || []).some((message) => message?.id === result.message.id)) {
+          chat.messages ||= [];
+          chat.messages.push(structuredClone(result.message));
+        }
+      }
+      state.journalCounter = Math.max(Number(state.journalCounter || 0), Number(result.journalCounter || 0));
+      state.chatCounter = Math.max(Number(state.chatCounter || 0), Number(result.chatCounter || 0));
+      state.orderState = result.orderState || "Paid";
       remoteStateRevision = String(result.revision);
       persistOrderActionStateLocally();
       return true;
@@ -9576,32 +9677,6 @@
       notifyEvent("Reminder sent", `${displayNumber} reminder sent to ${payer.name}.`);
       renderAll();
       await saveStateNow();
-    }
-
-    function sendPaymentProofToBroker(order, proof) {
-      if ((!proof?.media && !proof?.attachmentId) || !order?.broker) return;
-      const chat = directChatWithMaster(order.broker);
-      if (!chat) return;
-      const displayNumber = brokerOrderNumberForOrder(order);
-      chat.messages.push({
-        id: nextMessageId(),
-        from: masterName(),
-        text: `Payment photo for order ${displayNumber}.`,
-        kind: proof.mediaType === "image" ? "photo" : "file",
-        media: proof.media || "",
-        attachmentId: proof.attachmentId || "",
-        fileName: proof.fileName || `${displayNumber}-payment-proof`,
-        mimeType: proof.mimeType || "application/octet-stream",
-        fileSize: Number(proof.size || 0),
-        orderId: order.id,
-        orderNumber: displayNumber,
-        replyTo: "",
-        reactions: {},
-        readBy: [masterName()],
-        createdAt: new Date().toISOString()
-      });
-      const payerOrderNumber = orderDisplayNumber(order, selectedActor());
-      notifyEvent("Photo sent", `A photo was sent regarding order ${payerOrderNumber}.`);
     }
 
     function applyPrivileges() {
@@ -15067,61 +15142,6 @@
       return settlement;
     }
 
-    function postOrderPayment(order) {
-      if (order.state === "Paid") return false;
-      const journalId = nextJournalId();
-      order.journal = journalId;
-      order.paidAt ||= new Date().toISOString();
-      const sourceCurrency = order.sourceCurrency || "USD";
-      const payoutCurrency = order.payoutCurrency || sourceCurrency;
-      const sourceAmountMinor = Number(order.sourceAmountMinor || 0);
-      const commissionTerms = orderCommissionLedgerTerms(order);
-      const payoutAmountMinor = Number(order.payoutAmountMinor || sourceAmountMinor);
-      const payerStatement = payingActorStatement(order);
-      const postedAt = new Date().toISOString();
-      const receivable = receivableForOrder(order);
-      if (receivable) {
-        receivable.journal = journalId;
-        receivable.updatedAt = postedAt;
-      }
-      const lines = [
-        { journal: journalId, orderId: order.id, actorId: order.brokerActorId || "", participantRole: "broker", source: "ORDER_PAYMENT", account: `${order.broker} ACTOR_CLEARING`, direction: "Debit", currency: sourceCurrency, amountMinor: sourceAmountMinor, postedAt },
-        { journal: journalId, orderId: order.id, actorId: order.brokerActorId || "", participantRole: "broker", source: "ORDER_PAYMENT", account: `${order.broker} ACTOR_CLEARING`, direction: commissionTerms.brokerDirection, currency: sourceCurrency, amountMinor: commissionTerms.amountMinor, postedAt },
-        { journal: journalId, orderId: order.id, source: "ORDER_PAYMENT", account: "MASTER_FX_CLEARING", direction: "Credit", currency: sourceCurrency, amountMinor: sourceAmountMinor, postedAt },
-        { journal: journalId, orderId: order.id, source: "ORDER_PAYMENT", account: commissionTerms.masterAccount, direction: commissionTerms.masterDirection, currency: sourceCurrency, amountMinor: commissionTerms.amountMinor, postedAt },
-        { journal: journalId, orderId: order.id, source: "ORDER_PAYMENT", account: "MASTER_FX_CLEARING", direction: "Debit", currency: payerStatement.currency, amountMinor: payerStatement.amountMinor, postedAt },
-        { journal: journalId, orderId: order.id, actorId: order.agentActorId || "", participantRole: "agent", source: "ORDER_PAYMENT", account: `${order.agent} ACTOR_CLEARING`, direction: "Credit", currency: payerStatement.currency, amountMinor: payerStatement.amountMinor, postedAt }
-      ].filter((line) => line.amountMinor > 0);
-      freezeOrderIncomeStatement(order, lines, true);
-      state.ledger.unshift(...lines);
-      syncSettlementsFromLedger();
-      return true;
-    }
-
-    function paymentSaveIsAcknowledged(orderId, submittedJournal, savedState) {
-      const savedOrder = (savedState?.orders || []).find((order) => order?.id === orderId);
-      const journal = String(savedOrder?.journal || "").trim();
-      const submittedBase = String(submittedJournal || "").trim().replace(/\s+\(\d+\)$/, "");
-      const journalBase = journal.replace(/\s+\(\d+\)$/, "");
-      if (savedOrder?.state !== "Paid" || !journal || !submittedBase || journalBase !== submittedBase) return false;
-      const commissionAmountMinor = Number(orderCommissionLedgerTerms(savedOrder).amountMinor || 0);
-      const payerStatement = payingActorStatement(savedOrder);
-      const expectedLineCount = [
-        Number(savedOrder.sourceAmountMinor || 0),
-        commissionAmountMinor,
-        Number(savedOrder.sourceAmountMinor || 0),
-        commissionAmountMinor,
-        Number(payerStatement.amountMinor || 0),
-        Number(payerStatement.amountMinor || 0)
-      ].filter((amountMinor) => amountMinor > 0).length;
-      const paymentLines = (savedState?.ledger || []).filter((line) =>
-        line?.source === "ORDER_PAYMENT"
-        && String(line?.orderId || "") === orderId
-        && String(line?.journal || "").trim() === journal
-      );
-      return paymentLines.length === expectedLineCount;
-    }
-
     function archiveOrderSnapshot(order, actorName, closedAt = new Date().toISOString()) {
       const payerLine = order.agent === actorName
         ? state.ledger.find((line) =>
@@ -15715,20 +15735,6 @@
       });
     }
 
-    function finalizeOrderPaid(order, proof) {
-      const paidAt = order.paidAt || new Date().toISOString();
-      order.state = "Paid";
-      order.paidAt = paidAt;
-      order.updatedAt = paidAt;
-      order.returnedBy = "";
-      order.returnedReason = "";
-      order.returnedAt = "";
-      sendPaymentProofToBroker(order, proof);
-      if (proof) order.paymentProof = { ...proof, media: "", attachedAt: paidAt };
-      pendingProofFiles.delete(order.id);
-      pendingProofUploads.delete(order.id);
-    }
-
     async function markOrderPaidFromButton(payButton) {
       const orderId = payButton?.dataset?.id;
       if (!orderId || payButton.disabled || processingOrderIds.has(orderId)) return;
@@ -15739,13 +15745,19 @@
       }
       const actionBox = payButton.closest(".order-actions");
       const progress = actionBox?.querySelector(".proof-progress");
+      const actionKey = `order-payment:${order.id}`;
+      const actionSession = currentOrderActionSession();
+      const attemptId = orderPaymentAttemptId(order);
       processingOrderIds.add(order.id);
+      pendingOrderActionSaves.add(actionKey);
       payButton.disabled = true;
       let proof = null;
       try {
         proof = await paymentProofForOrder(orderId, actionBox);
       } catch (error) {
         processingOrderIds.delete(order.id);
+        pendingOrderActionSaves.delete(actionKey);
+        flushDeferredOrderActionSave();
         payButton.disabled = false;
         if (progress) progress.textContent = "";
         showOrderError(error.message || "Could not attach the payment proof. Try another JPG or PNG image.");
@@ -15757,22 +15769,54 @@
           renderAll();
           return;
         }
-        const posted = postOrderPayment(order);
-        if (!posted) {
-          renderAll();
-          return;
-        }
-        finalizeOrderPaid(order, proof);
         if (progress) progress.textContent = "Saving payment...";
-        const saved = await saveStateNow();
-        if (!saved || !paymentSaveIsAcknowledged(order.id, order.journal, saved?.state)) {
-          showOrderError("Payment was not saved. Refresh the order and try again before leaving this page.");
-          return;
+        let saved = null;
+        let saveError = null;
+        try {
+          saved = await saveOrderPaymentNow({
+            orderId: order.id,
+            actingActorId: selectedActor()?.id || currentAuth?.membership?.actorId || "",
+            attemptId,
+            expectedOrder: masterForwardExpectedOrderIdentity(order),
+            expectedOrderUpdatedAt: order.updatedAt || "",
+            expectedRoutingForwardAttemptId: order.routingForwardAttemptId || "",
+            paymentProof: proof || null
+          });
+        } catch (error) {
+          if (orderPaymentErrorIsDefinitive(error)) throw error;
+          saveError = error;
         }
-        state.orderState = "Paid";
+        if (!orderActionSessionIsCurrent(actionSession)) return;
+        let verifiedOrder = null;
+        if (!saved || !adoptAtomicOrderPaymentResult(saved)) {
+          const verification = await authoritativeOrderActionState(order.id, (candidate) =>
+            candidate?.state === "Paid" && candidate?.paymentPostingAttemptId === attemptId
+          );
+          if (!orderActionSessionIsCurrent(actionSession)) return;
+          if (!verification.confirmed || !adoptAuthoritativeOrderActionState(verification.remote)) {
+            throw saveError || new Error("Payment was not confirmed. Refresh the order and try this exact payment again.");
+          }
+          verifiedOrder = verification.order;
+        }
+        pendingProofFiles.delete(order.id);
+        pendingProofUploads.delete(order.id);
+        const proofWasDelivered = saved?.proofDelivered === true
+          || Boolean(proof?.attachmentId && verifiedOrder?.paymentProof?.attachmentId === proof.attachmentId);
+        if (proof && proofWasDelivered) {
+          const payerOrderNumber = orderDisplayNumber(saved?.order || verifiedOrder || order, selectedActor());
+          notifyEvent("Photo sent", `A photo was sent regarding order ${payerOrderNumber}.`);
+        }
         renderAll();
+      } catch (error) {
+        if (!orderActionSessionIsCurrent(actionSession)) return;
+        if (progress) progress.textContent = "";
+        payButton.disabled = false;
+        showOrderError(error?.message || "Payment was not saved. Refresh the order and try again.");
       } finally {
         processingOrderIds.delete(order.id);
+        pendingOrderActionSaves.delete(actionKey);
+        if (!orderActionSessionIsCurrent(actionSession)) return;
+        flushDeferredOrderActionSave();
       }
     }
 

@@ -32,12 +32,16 @@ test("paying-Actor photos are delivered to the original Broker as Master", async
   assert.match(index, /return `\$\{orderNumber\}-payment-photo\$\{extension\}`/);
   assert.match(index, /return `\$\{prefix\}-payment-photo\$\{extension\}`/);
   assert.match(index, /orderId: order\.id,[\s\S]*orderNumber: orderDisplayNumber/);
-  const webProofRoute = sourceBetween(index, "function sendPaymentProofToBroker", "function applyPrivileges");
-  assert.match(webProofRoute, /directChatWithMaster\(order\.broker\)/);
-  assert.match(webProofRoute, /from: masterName\(\)/);
-  assert.match(webProofRoute, /orderNumber: displayNumber/);
-  assert.match(webProofRoute, /notifyEvent\("Photo sent", `A photo was sent regarding order \$\{payerOrderNumber\}\.\`\)/);
-  assert.doesNotMatch(webProofRoute, /from: actor\.name|forwardedFrom/);
+  const serverProofRoute = sourceBetween(server, "function orderPaymentProofMessage", "function orderPaymentResponse");
+  assert.match(serverProofRoute, /activeOrderBroker\(order/);
+  assert.match(serverProofRoute, /const master = actors\.find/);
+  assert.match(serverProofRoute, /from: master\.name/);
+  assert.match(serverProofRoute, /orderNumber: order\.brokerOrderNumber \|\| order\.id/);
+  assert.doesNotMatch(serverProofRoute, /from: actor\.name|forwardedFrom/);
+  assert.match(server, /proofWasRequested[\s\S]*requestedProofId !== storedProofId/);
+  assert.match(server, /String\(message\.attachmentId \|\| ""\) !== requestedProofId/);
+  assert.match(index, /paymentProof: proof \|\| null/);
+  assert.match(index, /notifyEvent\("Photo sent", `A photo was sent regarding order \$\{payerOrderNumber\}\.\`\)/);
   assert.match(index, /notifyEvent\("Photo sent", `A photo was sent regarding replied order \$\{payerOrderNumber\}\.\`\)/);
 
   assert.match(server, /\["order-photo", \{/);
@@ -49,11 +53,8 @@ test("paying-Actor photos are delivered to the original Broker as Master", async
   assert.doesNotMatch(publicFile, /uploaderUserId|uploaderActorId/);
   assert.match(mobileApi, /"payment-proof" \| "order-photo" \| "chat-photo"/);
 
-  const mobileProofRoute = sourceBetween(mobileDomain, "function appendPaymentProofToBroker", "export async function markOrderPaid");
-  assert.match(mobileProofRoute, /item\.members\.includes\(order\.broker\)/);
-  assert.match(mobileProofRoute, /from: master\.name/);
-  assert.match(mobileProofRoute, /orderNumber: displayNumber/);
-  assert.doesNotMatch(mobileProofRoute, /from: actor\.name|forwardedFrom/);
+  assert.match(mobileApi, /paymentProof: paymentProof \|\| null/);
+  assert.match(mobileDomain, /postOrderPaymentAtomic\(orderId, actorId, proof\)/);
   assert.match(mobileDomain, /export function payingOrderForChatReply/);
   assert.match(mobileDomain, /text: `Payment photo for order \$\{originalOrderNumber\}\.`/);
   assert.match(mobileDomain, /orderId: linkedOrder\.id,[\s\S]*orderNumber: originalOrderNumber/);

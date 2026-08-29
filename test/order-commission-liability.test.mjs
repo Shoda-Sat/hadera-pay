@@ -110,28 +110,35 @@ test("positive and negative order commissions select the correct liable party", 
   }
 });
 
-test("web and Android post the liability lines without changing forwarding terms", async () => {
-  const [index, mobileApp, mobileClient, mobileWorkspace, mobileScreens] = await Promise.all([
+test("web preview and the atomic server post liability lines without changing forwarding terms", async () => {
+  const [index, mobileApp, mobileClient, mobileWorkspace, mobileScreens, server] = await Promise.all([
     readFile(path.join(repositoryRoot, "index.html"), "utf8"),
     readFile(path.join(repositoryRoot, "mobile/App.tsx"), "utf8"),
     readFile(path.join(repositoryRoot, "mobile/src/api/client.ts"), "utf8"),
     readFile(path.join(repositoryRoot, "mobile/src/domain/workspace.ts"), "utf8"),
-    readFile(path.join(repositoryRoot, "mobile/src/screens/WorkspaceScreens.tsx"), "utf8")
+    readFile(path.join(repositoryRoot, "mobile/src/screens/WorkspaceScreens.tsx"), "utf8"),
+    readFile(path.join(repositoryRoot, "server.mjs"), "utf8")
   ]);
 
   const webPreview = index.match(/function buildJournalPreview\(\) \{[\s\S]*?(?=\n    function activeActors\()/)?.[0] || "";
-  const webPayment = index.match(/function postOrderPayment\(order\) \{[\s\S]*?(?=\n    function archiveOrderSnapshot\()/)?.[0] || "";
   const webPayer = index.match(/function payingActorStatement\(order\) \{[\s\S]*?(?=\n    function settlementFor\()/)?.[0] || "";
   const mobilePayment = mobileWorkspace.match(/export async function markOrderPaid\([\s\S]*?(?=\nexport async function requestOrderVoid\()/)?.[0] || "";
-  const mobilePayer = mobileWorkspace.match(/function payingActorStatement\([\s\S]*?(?=\ntype BuyingRates)/)?.[0] || "";
+  const serverPayment = server.match(/function expectedOrderPaymentLines\(order, persistedActors\) \{[\s\S]*?(?=\nfunction paymentLineShapeKey\()/)?.[0] || "";
+  const serverPayer = server.match(/function paymentPayerStatement\([\s\S]*?(?=\nfunction orderPaymentCommissionTerms\()/)?.[0] || "";
   const mobileAssign = mobileWorkspace.match(/export async function assignOrder\([\s\S]*?(?=\nexport async function returnOrder\()/)?.[0] || "";
 
-  for (const block of [webPreview, webPayment, mobilePayment]) {
+  for (const block of [webPreview]) {
     assert.match(block, /orderCommissionLedgerTerms/);
     assert.match(block, /brokerDirection/);
     assert.match(block, /masterDirection/);
     assert.match(block, /masterAccount/);
   }
+  assert.match(serverPayment, /orderPaymentCommissionTerms/);
+  assert.match(serverPayment, /brokerDirection/);
+  assert.match(serverPayment, /masterDirection/);
+  assert.match(serverPayment, /masterAccount/);
+  assert.match(mobilePayment, /postOrderPaymentAtomic/);
+  assert.doesNotMatch(mobilePayment, /state\.ledger|orderCommissionLedgerTerms/);
   assert.match(index, /const commissionMinor = signedOrderCommissionMinor\(order\);[\s\S]*const collectedMinor = sourceAmountMinor \+ commissionMinor;/);
   assert.match(mobileWorkspace, /const collectedMinor = Number\(order\.sourceAmountMinor \|\| 0\) \+ signedOrderCommissionMinor\(order\);/);
   assert.match(mobileScreens, /order\.incomeCollectedOriginalMinor \?\?[\s\S]*signedOrderCommissionMinor\(order\)/);
@@ -139,7 +146,7 @@ test("web and Android post the liability lines without changing forwarding terms
   assert.match(mobileClient, /orderCommissionLiability: commissionPercent < 0 \? "Master" : "Broker"/);
   assert.match(mobileApp, /label=\{fixedCommission !== null \? "Commission % \(fixed by Master\)" : "Commission %"\}[\s\S]*?keyboardType="numeric"/);
 
-  for (const payerBlock of [webPayer, mobilePayer]) {
+  for (const payerBlock of [webPayer, serverPayer]) {
     assert.match(payerBlock, /forwardedPayoutDivider/);
     assert.match(payerBlock, /forwardedPayoutPercent/);
     assert.doesNotMatch(payerBlock, /commissionMinor|commissionPercent|orderCommissionLiability/);

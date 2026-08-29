@@ -10,9 +10,11 @@ import type {
   Currency,
   FundingType,
   InviteRecord,
+  LedgerLine,
   OwnerMasterRecord,
   OwnerPlan,
   OrderRecord,
+  PreparedPaymentProof,
   ReceivableRecord,
   SavedCustomerRecord,
   SubmittedOrder,
@@ -987,6 +989,149 @@ async function saveBrokerSubmissionAtomic(
   }
   if (fallbackToFullSave) return saveWorkspaceState(state, session);
   throw new Error("The server did not confirm the exact order that was sent.");
+}
+
+interface AtomicOrderPaymentResult {
+  ok: boolean;
+  revision?: string;
+  alreadyApplied?: boolean;
+  order: OrderRecord;
+  ledgerLines: LedgerLine[];
+  receivable: ReceivableRecord | null;
+  settlements: WorkspaceState["settlements"];
+  chat: Omit<ChatConversationRecord, "messages"> | null;
+  message: ChatMessageRecord | null;
+  proofDelivered?: boolean;
+  journalCounter?: number;
+  chatCounter?: number;
+  orderState?: WorkspaceState["orderState"];
+  state?: WorkspaceState;
+}
+
+function atomicPaymentExpectedOrder(order: OrderRecord): Partial<OrderRecord> {
+  const identity: Partial<OrderRecord> = {};
+  const fields: Array<keyof OrderRecord> = [
+    "id",
+    "brokerActorId",
+    "broker",
+    "createdAt",
+    "sentAt",
+    "sourceCurrency",
+    "sourceAmountMinor",
+    "payoutCurrency",
+    "payoutAmountMinor",
+    "receiverName",
+    "accountNumber",
+    "phoneNumber"
+  ];
+  fields.forEach((field) => {
+    if (Object.prototype.hasOwnProperty.call(order, field)) {
+      (identity as Record<string, unknown>)[field] = order[field];
+    }
+  });
+  return identity;
+}
+
+function atomicPaymentAttemptId(order: OrderRecord): string {
+  const token = (value: unknown, fallback = "ASSIGNED") =>
+    String(value || fallback).replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "").slice(0, 80) || fallback;
+  const cycle = order.routingForwardAttemptId || order.assignedAt || order.updatedAt || order.createdAt || "ASSIGNED";
+  return `PAY-${token(order.id)}-${token(cycle)}`;
+}
+
+function adoptAtomicOrderPayment(
+  localState: WorkspaceState,
+  result: AtomicOrderPaymentResult
+): WorkspaceState {
+  const next = normalizeState(JSON.parse(JSON.stringify(localState)) as WorkspaceState);
+  const orderIndex = next.orders.findIndex((candidate) => candidate.id === result.order.id);
+  if (orderIndex >= 0) next.orders[orderIndex] = { ...result.order };
+  else next.orders.push({ ...result.order });
+
+  next.ledger = next.ledger.filter((line) => !(
+    line.source === "ORDER_PAYMENT"
+    && line.orderId === result.order.id
+    && line.journal === result.order.journal
+  ));
+  next.ledger.unshift(...(result.ledgerLines || []).map((line) => ({ ...line })));
+
+  if (result.receivable) {
+    const receivableIndex = next.receivables.findIndex((candidate) =>
+      candidate.id === result.receivable?.id || candidate.orderId === result.receivable?.orderId
+    );
+    if (receivableIndex >= 0) next.receivables[receivableIndex] = { ...result.receivable };
+    else next.receivables.push({ ...result.receivable });
+  }
+  if (Array.isArray(result.settlements)) next.settlements = result.settlements.map((row) => ({ ...row }));
+
+  if (result.chat) {
+    let chat = next.chatConversations.find((candidate) => candidate.id === result.chat?.id);
+    if (!chat) {
+      chat = { ...result.chat, messages: [] } as ChatConversationRecord;
+      next.chatConversations.push(chat);
+    }
+    if (result.message && !chat.messages.some((message) => message.id === result.message?.id)) {
+      chat.messages.push({ ...result.message });
+    }
+  }
+  next.journalCounter = Math.max(Number(next.journalCounter || 0), Number(result.journalCounter || 0));
+  next.chatCounter = Math.max(Number(next.chatCounter || 0), Number(result.chatCounter || 0));
+  next.orderState = result.orderState || "Paid";
+  return next;
+}
+
+export async function postOrderPaymentAtomic(
+  orderId: string,
+  actorId: string,
+  paymentProof?: PreparedPaymentProof
+): Promise<WorkspaceState> {
+  const state = await loadWorkspaceStateForUpdate();
+  if (state.offlineSnapshot) throw new Error("Reconnect to the internet before posting payment.");
+  const order = state.orders.find((candidate) => candidate.id === orderId);
+  if (!order || order.state !== "Assigned") throw new Error("This order has already changed. Refresh and try again.");
+  const submittedSession = currentWorkspaceSession();
+  const scope = workspaceSnapshotSessionKey(submittedSession);
+  if (!submittedSession || !scope) throw new Error("Sign in before posting payment.");
+  if (activeWorkspaceSaveScopes.has(scope)) throw new Error("Another workspace change is still being saved. Try again in a moment.");
+  const expectedRevision = activeWorkspaceRevision;
+  const generation = ++activeWorkspaceMutationGeneration;
+  const attemptId = atomicPaymentAttemptId(order);
+  activeWorkspaceSaveScopes.add(scope);
+  try {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        assertWorkspaceRequestSession(submittedSession, generation);
+        const result = await api<AtomicOrderPaymentResult>("/api/app-state/pay-order", {
+          method: "POST",
+          body: {
+            orderId,
+            actingActorId: actorId,
+            attemptId,
+            expectedRevision,
+            expectedOrder: atomicPaymentExpectedOrder(order),
+            expectedOrderUpdatedAt: order.updatedAt || "",
+            expectedRoutingForwardAttemptId: order.routingForwardAttemptId || "",
+            paymentProof: paymentProof || null
+          }
+        });
+        assertWorkspaceRequestSession(submittedSession, generation);
+        const savedState = result.state
+          ? preserveLoadedChatPages(normalizeState(result.state), state)
+          : adoptAtomicOrderPayment(state, result);
+        const synchronized = { ...savedState, offlineSnapshot: false, lastSyncedAt: new Date().toISOString() };
+        await rememberWorkspaceSnapshot(synchronized, result.revision, submittedSession, generation);
+        return synchronized;
+      } catch (error) {
+        assertWorkspaceRequestSession(submittedSession, generation);
+        const status = Number((error as Error & { status?: number })?.status);
+        if ((Number.isInteger(status) && status >= 400 && status < 500) || attempt === 1) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      }
+    }
+  } finally {
+    activeWorkspaceSaveScopes.delete(scope);
+  }
+  throw new Error("The server did not confirm the exact payment.");
 }
 
 export async function updateWorkspaceState(mutator: (state: WorkspaceState) => void): Promise<WorkspaceState> {

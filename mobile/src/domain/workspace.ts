@@ -1,6 +1,7 @@
 import {
   currentWorkspaceSession,
   loadWorkspaceStateForUpdate,
+  postOrderPaymentAtomic,
   saveWorkspaceState,
   updateWorkspaceState,
   verifyWorkspaceRoutingCommit
@@ -347,60 +348,12 @@ function assignAgentNumber(state: WorkspaceState, order: OrderRecord, agentName:
   order.agentOrderActor = agentName;
 }
 
-function orderDetails(order: OrderRecord): string {
-  return [
-    `Order: ${brokerOrderNumber(order)}`,
-    order.senderName ? `Sender: ${order.senderName}` : "",
-    order.receiverName ? `Receiver: ${order.receiverName}` : "",
-    order.receiverCity ? `Receiver City: ${order.receiverCity}` : "",
-    order.accountNumber ? `Account: ${order.accountNumber}` : "",
-    order.phoneNumber ? `Phone: ${order.phoneNumber}` : "",
-    order.remarks ? `Remarks: ${order.remarks}` : ""
-  ].filter(Boolean).join(" - ");
-}
-
 function rateSetting(value: RateSetting | undefined): Required<RateSetting> {
   return {
     enabled: value?.enabled === true,
     divider: Number(value?.divider) > 0 ? Number(value?.divider) : 1,
     percent: Number(value?.percent) > 0 ? Number(value?.percent) : 0
   };
-}
-
-function payingActorStatement(state: WorkspaceState, order: OrderRecord): { currency: Currency; amountMinor: number } {
-  const actor = activeActors(state).find((candidate) => candidate.name === order.agent);
-  const payoutCurrency = order.payoutCurrency || order.sourceCurrency;
-  const payoutAmountMinor = Number(order.payoutAmountMinor || order.sourceAmountMinor || 0);
-  const forwardedDivider = Number(order.forwardedPayoutDivider || 0);
-  const forwardedPercent = Number(order.forwardedPayoutPercent || 0);
-  const hasForwardedDivider = forwardedDivider > 0;
-  const hasForwardedPercent = forwardedPercent >= 0 && Object.prototype.hasOwnProperty.call(order, "forwardedPayoutPercent");
-  const applyTerms = (amountMinor: number, currency: Currency) => {
-    let major = majorFromMinor(amountMinor, currency);
-    if (hasForwardedDivider) major /= forwardedDivider;
-    if (hasForwardedPercent) major *= 1 + forwardedPercent / 100;
-    return minorFromMajor(major, currency);
-  };
-  if (!actor || !actorHasSpecialPayout(actor.role)) {
-    return { currency: payoutCurrency, amountMinor: hasForwardedDivider || hasForwardedPercent ? applyTerms(payoutAmountMinor, payoutCurrency) : payoutAmountMinor };
-  }
-  const baseCurrency = actor.currency;
-  const special = rateSetting(actor.specialPayoutSettings?.[payoutCurrency]);
-  const finish = (baseMajor: number, fallbackPercent: number) => ({
-    currency: baseCurrency,
-    amountMinor: minorFromMajor(baseMajor * (1 + (hasForwardedPercent ? forwardedPercent : fallbackPercent) / 100), baseCurrency)
-  });
-  if (hasForwardedDivider) return finish(majorFromMinor(payoutAmountMinor, payoutCurrency) / forwardedDivider, 0);
-  if (special.enabled) return finish(majorFromMinor(payoutAmountMinor, payoutCurrency) / special.divider, special.percent);
-  const manualDivider = Number(order.manualSpecialPayoutDivider || 0);
-  const manualPercent = Number(order.manualSpecialPayoutPercent || 0);
-  if (manualDivider > 0 || manualPercent > 0) {
-    return finish(majorFromMinor(payoutAmountMinor, payoutCurrency) / (manualDivider > 0 ? manualDivider : 1), manualPercent);
-  }
-  if (baseCurrency === payoutCurrency) return { currency: baseCurrency, amountMinor: applyTerms(payoutAmountMinor, baseCurrency) };
-  if (baseCurrency === order.sourceCurrency) return { currency: baseCurrency, amountMinor: applyTerms(Number(order.sourceAmountMinor || 0), baseCurrency) };
-  const rate = Number(order.rate || 1) || 1;
-  return { currency: baseCurrency, amountMinor: applyTerms(minorFromMajor(majorFromMinor(payoutAmountMinor, payoutCurrency) / rate, baseCurrency), baseCurrency) };
 }
 
 type BuyingRates = {
@@ -705,70 +658,11 @@ export async function cancelOrder(orderId: string, actorName = "Master"): Promis
   });
 }
 
-function appendPaymentProofToBroker(state: WorkspaceState, order: OrderRecord, proof: PreparedPaymentProof, postedAt: string): void {
-  ensureDirectChats(state);
-  const master = activeActors(state).find((item) => item.role === "Master");
-  const broker = activeActors(state).find((item) => item.id === order.brokerActorId)
-    || activeActors(state).find((item) => item.name === order.broker);
-  const chat = master && state.chatConversations.find((item) =>
-    item.type === "direct" && item.members.includes(master.name) && item.members.includes(order.broker)
-  );
-  if (!master || !broker || !chat) throw new Error("The payment photo could not be delivered because the original Broker chat is unavailable.");
-  const displayNumber = brokerOrderNumber(order);
-  chat.messages.push({
-    id: nextMessageId(state),
-    from: master.name,
-    text: `Payment photo for order ${displayNumber}.`,
-    kind: proof.mediaType === "image" ? "photo" : "file",
-    media: proof.dataUri || "",
-    attachmentId: proof.attachmentId,
-    fileName: proof.fileName || `${displayNumber}-payment-photo`,
-    mimeType: proof.mimeType,
-    fileSize: proof.size,
-    orderId: order.id,
-    orderNumber: displayNumber,
-    replyTo: "",
-    reactions: {},
-    readBy: [master.name],
-    createdAt: postedAt
-  });
-}
-
 export async function markOrderPaid(orderId: string, actorId: string, proof?: PreparedPaymentProof): Promise<WorkspaceState> {
   if (processingOrderIds.has(orderId)) throw new Error("This payment is already being posted.");
   processingOrderIds.add(orderId);
   try {
-    return await updateWorkspaceState((state) => {
-    const order = state.orders.find((item) => item.id === orderId);
-    const actor = activeActors(state).find((item) => item.id === actorId);
-    if (!order || order.state !== "Assigned") throw new Error("This order has already changed. Refresh and try again.");
-    if (!actor || !actorCanReceivePayouts(actor.role) || (order.agentActorId !== actor.id && order.agent !== actor.name)) throw new Error("Only the assigned payer can mark this order as paid.");
-    const journal = nextJournalId(state);
-    const postedAt = new Date().toISOString();
-    const payer = payingActorStatement(state, order);
-    const commissionTerms = orderCommissionLedgerTerms(order);
-    const details = orderDetails(order);
-    const lines: LedgerLine[] = [
-      { journal, orderId: order.id, actorId: order.brokerActorId || "", participantRole: "broker" as const, source: "ORDER_PAYMENT", account: `${order.broker} ACTOR_CLEARING`, direction: "Debit" as const, currency: order.sourceCurrency, amountMinor: Number(order.sourceAmountMinor || 0), details, postedAt },
-      { journal, orderId: order.id, actorId: order.brokerActorId || "", participantRole: "broker" as const, source: "ORDER_PAYMENT", account: `${order.broker} ACTOR_CLEARING`, direction: commissionTerms.brokerDirection, currency: order.sourceCurrency, amountMinor: commissionTerms.amountMinor, details, postedAt },
-      { journal, orderId: order.id, source: "ORDER_PAYMENT", account: "MASTER_FX_CLEARING", direction: "Credit" as const, currency: order.sourceCurrency, amountMinor: Number(order.sourceAmountMinor || 0), details, postedAt },
-      { journal, orderId: order.id, source: "ORDER_PAYMENT", account: commissionTerms.masterAccount, direction: commissionTerms.masterDirection, currency: order.sourceCurrency, amountMinor: commissionTerms.amountMinor, details, postedAt },
-      { journal, orderId: order.id, source: "ORDER_PAYMENT", account: "MASTER_FX_CLEARING", direction: "Debit" as const, currency: payer.currency, amountMinor: payer.amountMinor, details, postedAt },
-      { journal, orderId: order.id, actorId: order.agentActorId || "", participantRole: "agent" as const, source: "ORDER_PAYMENT", account: `${order.agent} ACTOR_CLEARING`, direction: "Credit" as const, currency: payer.currency, amountMinor: payer.amountMinor, details, postedAt }
-    ].filter((line) => line.amountMinor > 0);
-    order.journal = journal;
-    order.state = "Paid";
-    order.paidAt = postedAt;
-    order.updatedAt = postedAt;
-    order.returnedBy = "";
-    order.returnedReason = "";
-    if (proof) {
-      appendPaymentProofToBroker(state, order, proof, postedAt);
-      order.paymentProof = { ...proof, dataUri: "", attachedAt: postedAt };
-    }
-    freezeIncome(state, order, lines);
-    state.ledger.unshift(...lines);
-    });
+    return await postOrderPaymentAtomic(orderId, actorId, proof);
   } finally {
     processingOrderIds.delete(orderId);
   }
