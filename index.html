@@ -5726,7 +5726,7 @@
       const actionSession = currentOrderActionSession();
       try {
         const result = await queueRemoteStateSave(stateSnapshot);
-        return stateSnapshot ? result : true;
+        return result;
       } catch (caughtError) {
         let error = caughtError;
         if (error?.status === 409 && stateSnapshot && typeof conflictResolver === "function") {
@@ -6498,7 +6498,7 @@
     }
 
     window.addEventListener("beforeunload", (event) => {
-      if (pendingOrderActionSaves.size === 0 && unconfirmedOrderActions.size === 0) return;
+      if (pendingOrderActionSaves.size === 0 && unconfirmedOrderActions.size === 0 && processingOrderIds.size === 0) return;
       event.preventDefault();
       event.returnValue = "";
     });
@@ -15068,7 +15068,7 @@
     }
 
     function postOrderPayment(order) {
-      if (order.journal || order.state === "Paid") return false;
+      if (order.state === "Paid") return false;
       const journalId = nextJournalId();
       order.journal = journalId;
       order.paidAt ||= new Date().toISOString();
@@ -15096,6 +15096,30 @@
       state.ledger.unshift(...lines);
       syncSettlementsFromLedger();
       return true;
+    }
+
+    function paymentSaveIsAcknowledged(orderId, submittedJournal, savedState) {
+      const savedOrder = (savedState?.orders || []).find((order) => order?.id === orderId);
+      const journal = String(savedOrder?.journal || "").trim();
+      const submittedBase = String(submittedJournal || "").trim().replace(/\s+\(\d+\)$/, "");
+      const journalBase = journal.replace(/\s+\(\d+\)$/, "");
+      if (savedOrder?.state !== "Paid" || !journal || !submittedBase || journalBase !== submittedBase) return false;
+      const commissionAmountMinor = Number(orderCommissionLedgerTerms(savedOrder).amountMinor || 0);
+      const payerStatement = payingActorStatement(savedOrder);
+      const expectedLineCount = [
+        Number(savedOrder.sourceAmountMinor || 0),
+        commissionAmountMinor,
+        Number(savedOrder.sourceAmountMinor || 0),
+        commissionAmountMinor,
+        Number(payerStatement.amountMinor || 0),
+        Number(payerStatement.amountMinor || 0)
+      ].filter((amountMinor) => amountMinor > 0).length;
+      const paymentLines = (savedState?.ledger || []).filter((line) =>
+        line?.source === "ORDER_PAYMENT"
+        && String(line?.orderId || "") === orderId
+        && String(line?.journal || "").trim() === journal
+      );
+      return paymentLines.length === expectedLineCount;
     }
 
     function archiveOrderSnapshot(order, actorName, closedAt = new Date().toISOString()) {
@@ -15703,10 +15727,6 @@
       if (proof) order.paymentProof = { ...proof, media: "", attachedAt: paidAt };
       pendingProofFiles.delete(order.id);
       pendingProofUploads.delete(order.id);
-      state.orderState = "Paid";
-      els.orderState.textContent = "Paid";
-      els.orderState.className = "state-pill good";
-      els.voidButton.disabled = false;
     }
 
     async function markOrderPaidFromButton(payButton) {
@@ -15737,14 +15757,20 @@
           renderAll();
           return;
         }
-        const posted = order.journal ? true : postOrderPayment(order);
-        if (!posted && !order.journal) {
+        const posted = postOrderPayment(order);
+        if (!posted) {
           renderAll();
           return;
         }
         finalizeOrderPaid(order, proof);
+        if (progress) progress.textContent = "Saving payment...";
+        const saved = await saveStateNow();
+        if (!saved || !paymentSaveIsAcknowledged(order.id, order.journal, saved?.state)) {
+          showOrderError("Payment was not saved. Refresh the order and try again before leaving this page.");
+          return;
+        }
+        state.orderState = "Paid";
         renderAll();
-        await saveStateNow();
       } finally {
         processingOrderIds.delete(order.id);
       }
@@ -15880,6 +15906,10 @@
     });
 
     els.logoutButton.addEventListener("click", () => {
+      if (processingOrderIds.size > 0) {
+        notifyEvent("Payment save in progress", "Wait for the payment to finish saving before logging out.");
+        return;
+      }
       confirmAction(
         "Log out now? You will need to sign in again to continue.",
         () => endAuthSession(),

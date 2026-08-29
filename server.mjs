@@ -3803,7 +3803,11 @@ function protectAndCanonicalizeOrderPaymentLedger(state, persistedState, persist
   const submittedOrders = Array.isArray(state.orders) ? state.orders : [];
   const newlyPaidTransitions = submittedOrders.filter((order) => {
     const persisted = persistedOrdersById.get(String(order?.id || ""));
-    return order?.state === "Paid" && (!persisted || !orderParticipantIdentityIsFrozen(persisted));
+    return order?.state === "Paid" && (
+      !persisted
+      || persisted?.state === "Assigned"
+      || !orderParticipantIdentityIsFrozen(persisted)
+    );
   });
   const approvedVoidTransitions = submittedOrders.filter((order) => {
     const persisted = persistedOrdersById.get(String(order?.id || ""));
@@ -4010,7 +4014,11 @@ function protectAndCanonicalizeOrderPaymentLedger(state, persistedState, persist
     }
     if (String(next.source || "") === "ORDER_PAYMENT") {
       const persistedOrder = orderForPaymentLedgerLine(next, persistedOrderRecords);
-      if (persistedOrder && orderParticipantIdentityIsFrozen(persistedOrder)) return [];
+      if (
+        persistedOrder
+        && persistedOrder?.state !== "Assigned"
+        && orderParticipantIdentityIsFrozen(persistedOrder)
+      ) return [];
       const order = orderForPaymentLedgerLine(next, orders);
       if (!order) {
         if (exactPersisted) return [{ ...exactPersisted }];
@@ -4198,12 +4206,8 @@ function sanitizeIncomingWorkspaceState(state, session, db) {
       );
       const isReturnedResubmission = persistedBelongsToSessionActor && persistedOrder.state === "Returned" && allowedOrder?.state === "Pending Forward";
       if (persistedOrder) {
-        const submittedJournal = String(allowedOrder?.journal || "").trim();
-        const actorSubmitsAssignedPayment = actorSession && persistedOrder?.state === "Assigned" && (
-          allowedOrder?.state === "Paid"
-          || Boolean(submittedJournal)
-          || Boolean(String(allowedOrder?.paidAt || "").trim())
-        );
+        const submitsAssignedPayment = persistedOrder?.state === "Assigned" && allowedOrder?.state === "Paid";
+        const actorSubmitsAssignedPayment = actorSession && submitsAssignedPayment;
         const protectedOrder = { ...allowedOrder };
         for (const field of [
           "brokerActorId",
@@ -4226,7 +4230,7 @@ function sanitizeIncomingWorkspaceState(state, session, db) {
             else delete protectedOrder.journal;
           }
         }
-        if (orderParticipantIdentityIsFrozen(persistedOrder)) {
+        if (orderParticipantIdentityIsFrozen(persistedOrder) && !submitsAssignedPayment) {
           return canonicalizeFrozenOrderTransition(
             protectedOrder,
             persistedOrder,

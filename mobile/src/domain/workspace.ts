@@ -741,7 +741,7 @@ export async function markOrderPaid(orderId: string, actorId: string, proof?: Pr
     return await updateWorkspaceState((state) => {
     const order = state.orders.find((item) => item.id === orderId);
     const actor = activeActors(state).find((item) => item.id === actorId);
-    if (!order || order.state !== "Assigned" || order.journal) throw new Error("This order has already changed. Refresh and try again.");
+    if (!order || order.state !== "Assigned") throw new Error("This order has already changed. Refresh and try again.");
     if (!actor || !actorCanReceivePayouts(actor.role) || (order.agentActorId !== actor.id && order.agent !== actor.name)) throw new Error("Only the assigned payer can mark this order as paid.");
     const journal = nextJournalId(state);
     const postedAt = new Date().toISOString();
