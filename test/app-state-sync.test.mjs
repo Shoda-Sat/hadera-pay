@@ -396,12 +396,12 @@ test("workspace revision checks stay read-only and detect saved changes", async 
         sourceCurrency: "USD",
         payoutCurrency: "ETB",
         sourceAmountMinor: 10_000,
-        payoutAmountMinor: 2_000_000,
+        payoutAmountMinor: 9_990_000,
         commissionPercent: 5,
         commissionMinor: 500,
         grossMinor: 10_500,
         orderCommissionLiability: "Broker",
-        rate: 200,
+        rate: 999,
         state: "Pending Forward",
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
@@ -420,6 +420,8 @@ test("workspace revision checks stay read-only and detect saved changes", async 
     assert.equal(protectedOrder.brokerActorId, fixedCommissionActorId);
     assert.equal(protectedOrder.broker, "Fixed Commission Broker");
     assert.equal(protectedOrder.brokerOrderNumber, "FIX001");
+    assert.equal(protectedOrder.rate, 200);
+    assert.equal(protectedOrder.payoutAmountMinor, 20_000);
     assert.equal(protectedOrder.commissionPercent, -2);
     assert.equal(protectedOrder.commissionMinor, -200);
     assert.equal(protectedOrder.grossMinor, 9_800);

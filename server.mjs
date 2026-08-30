@@ -3593,6 +3593,23 @@ const actorCreatedOrderServerOwnedFields = [
   "incomeUsdAgentRateSnapshot",
 ];
 
+function canonicalizeActorFixedOrderRate(order = {}, actor = null) {
+  const payoutCurrency = String(order?.payoutCurrency || "");
+  const setting = actor?.orderFixedRates?.[payoutCurrency];
+  const fixedRate = Number(setting?.rate || 0);
+  if (setting?.enabled !== true || !Number.isFinite(fixedRate) || fixedRate <= 0) return order;
+  const sourceCurrency = String(order?.sourceCurrency || "");
+  const sourceFactor = 10 ** (currencyDecimalPlaces[sourceCurrency] ?? 0);
+  const payoutFactor = 10 ** (currencyDecimalPlaces[payoutCurrency] ?? 0);
+  const sourceAmountMinor = Math.round(Number(order?.sourceAmountMinor || 0));
+  const payoutAmountMinor = Math.round((sourceAmountMinor / sourceFactor) * fixedRate * payoutFactor);
+  return {
+    ...order,
+    rate: fixedRate,
+    payoutAmountMinor,
+  };
+}
+
 function sanitizeActorCreatedPendingOrder(order = {}) {
   const pending = { ...order };
   actorCreatedOrderServerOwnedFields.forEach((field) => delete pending[field]);
@@ -4093,12 +4110,6 @@ function sanitizeIncomingWorkspaceState(state, session, db) {
   const persistedState = db.appStates[session.workspace.id] || {};
   const actorSession = session?.membership?.role === "Actor";
   const actorCanInitiateOrders = actorSession && ["Broker", "Special Broker"].includes(session?.membership?.actorRole);
-  state = resolveIncomingWorkspaceRecordCollisions(persistedState, state, actorCanInitiateOrders ? {
-    brokerActorId: session.membership.actorId,
-    brokerName: session.membership.actorName,
-  } : {});
-  const sanitized = { ...state };
-  sanitized._workspaceId = session.workspace.id;
   const persistedActors = new Map(
     mergeById(
       mergeById(persistedState.actors || [], workspaceActors(db, session.workspace.id)),
@@ -4106,11 +4117,34 @@ function sanitizeIncomingWorkspaceState(state, session, db) {
     )
       .map((actor) => [actor?.id, actor])
   );
+  const sessionActor = actorSession ? persistedActors.get(session.membership.actorId) : null;
+  if (actorCanInitiateOrders && sessionActor && Array.isArray(state.orders)) {
+    const persistedOrderCandidates = recordsById([
+      ...(Array.isArray(persistedState.orders) ? persistedState.orders : []),
+      ...archivedWorkspaceRecords(persistedState, "orders"),
+    ]);
+    state = {
+      ...state,
+      orders: state.orders.map((order) => {
+        const matching = persistedOrderCandidates.get(String(order?.id || "")) || [];
+        const isBrokerSubmission = actorSessionOwnsOrderBroker(session, order)
+          || matching.length === 0
+          || matching.some((existing) => actorSessionOwnsOrderBroker(session, existing))
+          || matching.some((existing) => orderIdentityConflicts(existing, order));
+        return isBrokerSubmission ? canonicalizeActorFixedOrderRate(order, sessionActor) : order;
+      }),
+    };
+  }
+  state = resolveIncomingWorkspaceRecordCollisions(persistedState, state, actorCanInitiateOrders ? {
+    brokerActorId: session.membership.actorId,
+    brokerName: session.membership.actorName,
+  } : {});
+  const sanitized = { ...state };
+  sanitized._workspaceId = session.workspace.id;
   const persistedOrders = new Map((persistedState.orders || []).map((order) => [order?.id, order]));
   sanitized.orderParticipantIdentityLinks = structuredClone(persistedState.orderParticipantIdentityLinks || []);
   sanitized.reservedActorNames = structuredClone(persistedState.reservedActorNames || []);
   sanitized.reservedActorIds = structuredClone(persistedState.reservedActorIds || []);
-  const sessionActor = actorSession ? persistedActors.get(session.membership.actorId) : null;
   const fixedSetting = sessionActor?.orderFixedCommission;
   const rawFixedPercent = fixedSetting?.percent;
   const fixedPercent = fixedSetting?.enabled === true && rawFixedPercent !== null && rawFixedPercent !== undefined && String(rawFixedPercent).trim() !== ""
@@ -4328,6 +4362,7 @@ function sanitizeIncomingWorkspaceState(state, session, db) {
         delete allowedOrder.collisionSourceOrderId;
       }
       allowedOrder = canonicalizeChangedOrderAgentIdentity(allowedOrder, persistedOrder, persistedActors);
+      if (actorSession) allowedOrder = canonicalizeActorFixedOrderRate(allowedOrder, brokerActor);
       if (!actorSession || !Number.isFinite(fixedPercent)) return allowedOrder;
       const sourceAmountMinor = Math.round(Number(allowedOrder.sourceAmountMinor || 0));
       const commissionMinor = Math.round(sourceAmountMinor * fixedPercent / 100);
@@ -4580,7 +4615,7 @@ function brokerSubmitResponse(state, session, revision, order, receivable, custo
 }
 
 function applyAtomicBrokerSubmit(latestDb, state, session, body = {}) {
-  const submittedOrder = body?.order && typeof body.order === "object" && !Array.isArray(body.order)
+  let submittedOrder = body?.order && typeof body.order === "object" && !Array.isArray(body.order)
     ? structuredClone(body.order)
     : null;
   const attemptId = String(body.attemptId || "").trim();
@@ -4594,6 +4629,11 @@ function applyAtomicBrokerSubmit(latestDb, state, session, body = {}) {
     submittedCustomers.length > 4) {
     throw httpError(400, "The Broker order request is incomplete.");
   }
+  const submittingActor = mergeById(
+    Array.isArray(state.actors) ? state.actors : [],
+    workspaceActors(latestDb, session.workspace.id)
+  ).find((actor) => String(actor?.id || "") === String(session.membership.actorId || ""));
+  submittedOrder = canonicalizeActorFixedOrderRate(submittedOrder, submittingActor);
   const preMutationRevision = workspaceStateRevision(latestDb, session.workspace.id);
   const expectedRevision = String(body.expectedRevision || "");
   const includeState = Boolean(expectedRevision && expectedRevision !== preMutationRevision);

@@ -245,6 +245,10 @@ test("atomic Broker Send accepts simultaneous colliding local IDs without losing
     };
     const stateWithManagedBroker = structuredClone(initialState.data.state);
     stateWithManagedBroker.actors.push(managedBroker);
+    const fixedRateBroker = stateWithManagedBroker.actors.find((actor) =>
+      actor.id === firstBroker.data.session.membership.actorId
+    );
+    fixedRateBroker.orderFixedRates = { ETB: { enabled: true, rate: 205 } };
     const baseline = await requestOk(baseUrl, "/api/app-state", {
       cookie: master.cookie,
       method: "PUT",
@@ -257,6 +261,8 @@ test("atomic Broker Send accepts simultaneous colliding local IDs without losing
       broker: "First Atomic Broker",
       suffix: 1,
     });
+    firstOrder.rate = 999;
+    firstOrder.payoutAmountMinor = 9_990_000;
     const secondOrder = pendingOrder({
       brokerActorId: secondBroker.data.session.membership.actorId,
       broker: "Second Atomic Broker",
@@ -303,6 +309,8 @@ test("atomic Broker Send accepts simultaneous colliding local IDs without losing
       "Simultaneous Brokers must not overwrite each other's locally numbered customers.");
     const storedReceivable = stored.data.state.receivables.find((receivable) => receivable.borrowerActorId === firstOrder.brokerActorId);
     const storedFirstOrder = submittedOrders.find((order) => order.brokerActorId === firstOrder.brokerActorId);
+    assert.equal(storedFirstOrder.rate, 205);
+    assert.equal(storedFirstOrder.payoutAmountMinor, 20_502);
     assert.equal(storedReceivable.orderId, storedFirstOrder.id);
     assert.equal(storedReceivable.creditReminder, "Atomic reminder");
 
