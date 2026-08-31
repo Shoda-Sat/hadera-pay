@@ -149,6 +149,46 @@ test("does not recover a missing paid order by journal when stable IDs disagree"
   assert.deepEqual(state, before, "Orders, ledger, settlements, and all accounting state must remain immutable.");
 });
 
+test("an exact journal disambiguates legacy duplicate orders that share one hidden ID", () => {
+  const state = baseState();
+  const sharedId = "ORD-SHARED-LEGACY-ID";
+  const original = paidOrder({
+    id: sharedId,
+    internalOrderId: sharedId,
+    brokerOrderNumber: "PPP500",
+    journal: "JRN-2158",
+  });
+  const duplicate = paidOrder({
+    id: sharedId,
+    internalOrderId: sharedId,
+    brokerOrderNumber: "PPP501",
+    journal: "JRN-2158 (1)",
+    journalCollisionBase: "JRN-2158",
+  });
+  state.archives = [
+    archive("PPP", "ACT-PPP", "ARC-PPP-ORIGINAL", brokerClose, [original]),
+    archive("PPP", "ACT-PPP", "ARC-PPP-DUPLICATE", agentClose, [duplicate]),
+  ];
+  const originalLine = {
+    ...paymentLine("Dekemhare", "Credit", false),
+    orderId: sharedId,
+    journal: "JRN-2158",
+  };
+  const duplicateLine = { ...originalLine, journal: "JRN-2158 (1)" };
+  const before = structuredClone(state);
+
+  const resolvedOriginal = resolveParticipantOrderForLedgerLine(originalLine, [], state.archives, state);
+  const resolvedDuplicate = resolveParticipantOrderForLedgerLine(duplicateLine, [], state.archives, state);
+
+  assert.equal(resolvedOriginal.conflict, false);
+  assert.equal(resolvedOriginal.order?.brokerOrderNumber, "PPP500");
+  assert.equal(resolvedOriginal.order?.journal, "JRN-2158");
+  assert.equal(resolvedDuplicate.conflict, false);
+  assert.equal(resolvedDuplicate.order?.brokerOrderNumber, "PPP501");
+  assert.equal(resolvedDuplicate.order?.journal, "JRN-2158 (1)");
+  assert.deepEqual(state, before, "Disambiguation must not edit orders, reports, ledger, or balances.");
+});
+
 test("does not recover a historically missing row after every matching Actor line is closed", () => {
   const state = baseState();
   state.archives = [archive("PPP", "ACT-PPP", "ARC-PPP", brokerClose, [paidOrder({ actor: "PPP", archivedAt: brokerClose })])];

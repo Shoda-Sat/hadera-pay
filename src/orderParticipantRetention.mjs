@@ -228,9 +228,16 @@ export function resolveParticipantOrderForLedgerLine(line, liveOrders = [], arch
   const approvedLinkedCandidates = candidates.filter((candidate) =>
     orderParticipantIdentityLinkForLedgerLine(workspaceState, candidate.order, line)
   );
-  const resolvedCandidates = approvedLinkedCandidates.length
+  let resolvedCandidates = approvedLinkedCandidates.length
     ? approvedLinkedCandidates
     : (exactIdCandidates.length ? exactIdCandidates : candidates);
+  if (exactIdCandidates.length > 1) {
+    const lineJournal = clean(line?.journal);
+    const journalMatches = lineJournal
+      ? resolvedCandidates.filter((candidate) => orderJournal(candidate.order) === lineJournal)
+      : [];
+    if (journalMatches.length) resolvedCandidates = journalMatches;
+  }
   const archived = resolvedCandidates.filter((candidate) => candidate.source === "archive").map((candidate) => candidate.order);
   if (
     archivedSnapshotsConflict(archived, workspaceState)

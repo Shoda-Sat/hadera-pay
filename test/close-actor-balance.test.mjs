@@ -381,6 +381,76 @@ test("a distinct archived journal collision cannot be used to recover a mismatch
   assert.deepEqual(state, before);
 });
 
+test("Walta can close the unsuffixed order while an exact duplicate keeps its corrected journal suffix", () => {
+  const state = baseState();
+  const sharedId = "ORD-WALTA-SHARED-LEGACY-ID";
+  const original = paidOrder({
+    id: sharedId,
+    internalOrderId: sharedId,
+    brokerOrderNumber: "PPP500",
+    journal: "JRN-2158",
+  });
+  const duplicate = paidOrder({
+    id: sharedId,
+    internalOrderId: sharedId,
+    brokerOrderNumber: "PPP501",
+    journal: "JRN-2158 (1)",
+    journalCollisionBase: "JRN-2158",
+  });
+  state.archives = [
+    {
+      id: "ARC-PPP-ORIGINAL",
+      actor: "PPP",
+      actorId: "ACT-PPP",
+      actorRole: "Broker",
+      closedAt,
+      balances: { EUR: 10_000 },
+      incomeProfitMinor: 321,
+      orders: [original],
+    },
+    {
+      id: "ARC-PPP-DUPLICATE",
+      actor: "PPP",
+      actorId: "ACT-PPP",
+      actorRole: "Broker",
+      closedAt: "2026-08-13T18:30:00.000Z",
+      balances: { EUR: 10_000 },
+      incomeProfitMinor: 321,
+      orders: [duplicate],
+    },
+  ];
+  state.ledger = paidLedger().map((line) => ({
+    ...line,
+    journal: "JRN-2158",
+    orderId: sharedId,
+  }));
+  const before = structuredClone(state);
+  const closedReportsBefore = structuredClone(state.archives);
+  const financialRowsBefore = state.ledger.map(({ direction, currency, amountMinor }) => ({ direction, currency, amountMinor }));
+
+  const result = closeActorBalance(state, {
+    actorId: "ACT-WALTA",
+    actorName: "Walta",
+    cancelledOrderPolicy: "include",
+    closedAt: "2026-08-13T19:00:00.000Z",
+    archiveId: "ARC-WALTA-JRN-2158",
+  });
+
+  assert.equal(result.closed, true, result.error);
+  assert.equal(result.state.archives[0].actor, "Walta");
+  assert.equal(result.state.archives[0].orders[0].journal, "JRN-2158");
+  assert.deepEqual(result.state.archives.slice(1), closedReportsBefore, "Existing closed reports must remain unchanged.");
+  assert.equal(result.state.archives[2].orders[0].journal, "JRN-2158 (1)");
+  assert.deepEqual(
+    result.state.ledger
+      .filter((line) => line.source === "ORDER_PAYMENT")
+      .map(({ direction, currency, amountMinor }) => ({ direction, currency, amountMinor })),
+    financialRowsBefore,
+    "Journal disambiguation must not change any balance-affecting field.",
+  );
+  assert.deepEqual(state, before, "The caller's workspace state must remain untouched.");
+});
+
 test("a recreated same-name Actor cannot inherit an old participant's payment balance", () => {
   const state = baseState();
   state.actors = state.actors.map((actor) =>
