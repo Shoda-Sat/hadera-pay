@@ -35,13 +35,14 @@ async function waitForServer(baseUrl, serverProcess, readStderr) {
   throw new Error(`Test server did not start.\n${readStderr()}`);
 }
 
-async function request(baseUrl, pathname, { cookie = "", method = "GET", body } = {}) {
+async function request(baseUrl, pathname, { cookie = "", method = "GET", body, headers = {} } = {}) {
   const response = await fetch(`${baseUrl}${pathname}`, {
     method,
     headers: {
       Accept: "application/json",
       ...(cookie ? { Cookie: cookie } : {}),
       ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+      ...headers,
     },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
@@ -249,13 +250,46 @@ test("atomic Broker Send accepts simultaneous colliding local IDs without losing
       actor.id === firstBroker.data.session.membership.actorId
     );
     fixedRateBroker.orderFixedRates = { ETB: { enabled: true, rate: 205 } };
-    const baseline = await requestOk(baseUrl, "/api/app-state", {
+    let baseline = await requestOk(baseUrl, "/api/app-state", {
       cookie: master.cookie,
       method: "PUT",
       body: { state: stateWithManagedBroker, expectedRevision: initialState.data.revision },
     });
     const untouchedLedger = structuredClone(baseline.data.state.ledger || []);
     const untouchedArchives = structuredClone(baseline.data.state.archives || []);
+
+    const legacyOrder = {
+      ...pendingOrder({
+        brokerActorId: firstBroker.data.session.membership.actorId,
+        broker: "First Atomic Broker",
+        suffix: 90,
+      }),
+      id: "ORD-LEGACY-MOBILE",
+      routingSubmissionId: "ROUTE-LEGACY-MOBILE",
+    };
+    const legacyState = structuredClone(baseline.data.state);
+    legacyState.orders.unshift(legacyOrder);
+    const legacySend = await request(baseUrl, "/api/app-state", {
+      cookie: firstBroker.cookie,
+      method: "PUT",
+      headers: { "X-HaderaPay-Device-Id": "android-legacy-client" },
+      body: { state: legacyState, expectedRevision: baseline.data.revision },
+    });
+    assert.equal(legacySend.response.status, 426);
+    assert.match(legacySend.data.error, /older HaderaPay app cannot send orders safely/i);
+    const afterLegacySend = await requestOk(baseUrl, "/api/app-state", { cookie: master.cookie });
+    assert.equal(afterLegacySend.data.revision, baseline.data.revision);
+    assert.equal(afterLegacySend.data.state.orders.some((order) => order.id === legacyOrder.id), false,
+      "The rejected legacy mobile send must not persist an order or change the workspace revision.");
+
+    await requestOk(baseUrl, "/api/app-state", {
+      cookie: firstBroker.cookie,
+      method: "PUT",
+      headers: { "X-HaderaPay-Device-Id": "android-legacy-client" },
+      body: { state: structuredClone(afterLegacySend.data.state), expectedRevision: afterLegacySend.data.revision },
+    });
+    baseline = await requestOk(baseUrl, "/api/app-state", { cookie: master.cookie });
+
     const firstOrder = pendingOrder({
       brokerActorId: firstBroker.data.session.membership.actorId,
       broker: "First Atomic Broker",

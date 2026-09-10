@@ -4485,6 +4485,47 @@ function brokerSubmitOrdersShareIdentity(left, right) {
   return recoveredOrderMatches(left, right) && Array.from(leftIds).some((value) => rightIds.has(value));
 }
 
+function isAndroidAppRequest(request) {
+  const deviceId = requestDeviceId(request).toLowerCase();
+  const userAgent = String(request?.headers?.["user-agent"] || "");
+  return deviceId.startsWith("android-") || /\b(?:okhttp|dalvik)\b/i.test(userAgent);
+}
+
+function orderBrokerIdentityKeys(order) {
+  const actorId = String(order?.brokerActorId || "").trim();
+  const actorName = normalizedActorName(order?.broker);
+  return [actorId ? `id:${actorId}` : "", actorName ? `name:${actorName}` : ""].filter(Boolean);
+}
+
+function legacyAndroidStateAttemptsOrderSubmission(request, persistedState, incomingState) {
+  if (!isAndroidAppRequest(request) || !Array.isArray(incomingState?.orders)) return false;
+  const activeStatesByIdentity = new Map();
+  brokerSubmitOrderRecords(persistedState).forEach(({ order, archived }) => {
+    if (archived) return;
+    for (const brokerKey of orderBrokerIdentityKeys(order)) {
+      for (const orderId of brokerSubmitOrderIdentityValues(order)) {
+        const identity = `${brokerKey}|${orderId}`;
+        const states = activeStatesByIdentity.get(identity) || new Set();
+        states.add(String(order?.state || ""));
+        activeStatesByIdentity.set(identity, states);
+      }
+    }
+  });
+  return incomingState.orders.some((incomingOrder) => {
+    const incomingIds = brokerSubmitOrderIdentityValues(incomingOrder);
+    const brokerKeys = orderBrokerIdentityKeys(incomingOrder);
+    if (!incomingIds.size || !brokerKeys.length) return true;
+    const matchingStates = new Set();
+    for (const brokerKey of brokerKeys) {
+      for (const orderId of incomingIds) {
+        for (const state of activeStatesByIdentity.get(`${brokerKey}|${orderId}`) || []) matchingStates.add(state);
+      }
+    }
+    if (!matchingStates.size) return true;
+    return incomingOrder?.state === "Pending Forward" && Array.from(matchingStates).every((state) => state === "Returned");
+  });
+}
+
 function brokerSubmitReceivableForOrder(state, order, includeArchives = false) {
   const orderIds = brokerSubmitOrderIdentityValues(order);
   return [
@@ -6993,7 +7034,10 @@ async function handleApi(request, response, url) {
     const result = await mutateLatestWorkspaceState(
       session.workspace.id,
       body.expectedRevision ?? body.state?._syncRevision,
-      async (latestDb) => {
+      async (latestDb, currentState) => {
+        if (legacyAndroidStateAttemptsOrderSubmission(request, currentState, body.state)) {
+          throw httpError(426, "This older HaderaPay app cannot send orders safely. Update the app, then send the order again.");
+        }
         const incomingState = sanitizeIncomingWorkspaceState(body.state || {}, session, latestDb);
         const nextState = mergeWorkspaceState(latestDb, session.workspace.id, incomingState);
         const revision = markWorkspaceStateChanged(latestDb, session.workspace.id, nextState);
