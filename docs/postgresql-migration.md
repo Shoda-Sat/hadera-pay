@@ -30,6 +30,8 @@ POSTGRES_CUTOVER_CONFIRMED=reconciled-production-import
 
 PostgreSQL runtime writes are transactional and validate workspace revision and journal balance before commit. Existing closed-report rows are never updated or deleted; a transaction may only append a new report.
 
+Some historical HaderaPay manual journals contain one Actor-facing principal line and no stored Master counterpart. The importer preserves every such line and its exact balance as immutable reference evidence in `hp_legacy_journal_imbalance_baselines`. It does not invent, delete, archive, or recalculate ledger data. Runtime writes must leave every imported baseline exactly unchanged and may not introduce a new imbalance. New manual journals include a separate Master clearing counterpart and balance normally.
+
 ## Recommended target model
 
 Every financial row includes `workspace_id`, and legacy JSON identifiers are preserved in a searchable `legacy_id` column. Legacy IDs are intentionally non-unique because historical counters produced genuine collisions; PostgreSQL uses collision-safe internal record keys instead.
@@ -60,7 +62,7 @@ Required database rules:
 - Store all money as `bigint` minor units.
 - Store exchange rates as numerator and denominator integers, not floating-point values.
 - Keep journal entries and ledger lines append-only. Corrections must create reversal entries.
-- Require every journal to balance independently by currency in a deferred constraint.
+- Require every new or modified journal to balance independently by currency; preserve only the exact imported legacy exceptions.
 - Use unique idempotency keys for Broker submission, Master forwarding, payments, transfers and reversals.
 - Scope order numbers, journal numbers and legacy identifiers by workspace and the correct numbering cycle.
 - Keep closed reports immutable. Preserve their exact historical snapshot in `jsonb`, with separately indexed actor, cycle and closing timestamps.
@@ -89,8 +91,9 @@ For each workspace, in one database transaction:
 7. Insert counters and numbering cycles.
 8. Insert customers, chats and stored-file metadata if they are included in this phase.
 9. Record counts and SHA-256 evidence for the imported workspace in `migration_imports`.
+10. Store the exact source journal differences in the immutable legacy-reference baseline table.
 
-Do not “repair” data inside the importer. If an invariant fails, roll back that workspace and produce a report for review.
+Do not “repair” data inside the importer. Existing source imbalances are recorded as immutable legacy reference baselines. Any mismatch between PostgreSQL and that exact baseline, or any new imbalance, blocks verification and runtime writes.
 
 ## Mandatory reconciliation
 
@@ -107,17 +110,18 @@ Compare at minimum:
 - Highest counter and numbering cycle per workspace.
 - Duplicate legacy IDs or idempotency keys.
 
-The PostgreSQL journal validation query should return no rows:
+The PostgreSQL journal-violation query should return no rows. Historical source imbalances are allowed only when they still match their immutable import baseline exactly:
 
 ```sql
 SELECT
   workspace_id,
-  journal_entry_id,
+  journal_entry_key,
+  journal,
   currency,
-  SUM(CASE direction WHEN 'DEBIT' THEN amount_minor ELSE -amount_minor END) AS difference_minor
-FROM ledger_lines
-GROUP BY workspace_id, journal_entry_id, currency
-HAVING SUM(CASE direction WHEN 'DEBIT' THEN amount_minor ELSE -amount_minor END) <> 0;
+  expected_difference_minor,
+  actual_difference_minor,
+  violation_reason
+FROM hp_journal_balance_violations;
 ```
 
 ## Render setup
@@ -144,6 +148,8 @@ npm run pg:import -- \
   --migration-id rehearsal-YYYYMMDD-HHMM \
   --dry-run
 ```
+
+The dry run reports `legacyUnbalancedJournalGroups` when the source contains historical one-sided journals. This is informational, not data loss: the actual import preserves those ledger lines byte-for-byte and records their exact differences as immutable baselines.
 
 An actual import requires an explicit empty-target confirmation and still refuses a database containing any previous HaderaPay import:
 

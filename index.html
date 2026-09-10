@@ -8614,25 +8614,39 @@
         commissionMinor > 0 ? `Commission: ${money(sourceCurrency, commissionMinor)} - Liability: ${commissionLiability}` : "",
         remarks ? `Remarks: ${remarks}` : ""
       ].filter(Boolean);
-      state.ledger.unshift({
-        journal: journalId,
-        entryId,
-        actorLedgerNumber,
-        source: "JOURNAL",
-        account: `${actorName} ACTOR_CLEARING`,
-        direction: "Debit",
-        currency,
-        amountMinor,
-        sourceCurrency,
-        sourceAmountMinor,
-        rate,
-        commissionPercent,
-        commissionMinor,
-        commissionLiability: commissionLiability || "",
-        masterTransactionCycle,
-        details: detailBits.join(" - "),
-        postedAt
-      });
+      state.ledger.unshift(
+        {
+          journal: journalId,
+          entryId,
+          actorLedgerNumber,
+          source: "JOURNAL",
+          account: `${actorName} ACTOR_CLEARING`,
+          direction: "Debit",
+          currency,
+          amountMinor,
+          sourceCurrency,
+          sourceAmountMinor,
+          rate,
+          commissionPercent,
+          commissionMinor,
+          commissionLiability: commissionLiability || "",
+          masterTransactionCycle,
+          details: detailBits.join(" - "),
+          postedAt
+        },
+        {
+          journal: journalId,
+          entryId,
+          source: "JOURNAL_BALANCING",
+          account: "MASTER_JOURNAL_CLEARING",
+          direction: "Credit",
+          currency,
+          amountMinor,
+          masterTransactionCycle,
+          details: detailBits.join(" - "),
+          postedAt
+        }
+      );
       if (commissionMinor > 0) {
         const commissionRouting = commissionLedgerRouting(commissionLiability, masterName(), actorName, true);
         state.ledger.unshift(

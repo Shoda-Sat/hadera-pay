@@ -1392,24 +1392,37 @@ export async function postActorJournal(input: { actorId: string; sourceCurrency:
       commissionMinor > 0 ? `Commission: ${compactAmount(input.sourceCurrency, majorFromMinor(commissionMinor, input.sourceCurrency))} - Liability: ${commissionLiability}` : "",
       input.remarks ? `Remarks: ${input.remarks}` : ""
     ].filter(Boolean).join(" - ");
-    state.ledger.unshift({
-      journal,
-      entryId,
-      actorLedgerNumber,
-      source: "JOURNAL",
-      account: `${actor.name} ACTOR_CLEARING`,
-      direction: "Debit",
-      currency: destinationCurrency,
-      amountMinor,
-      sourceCurrency: input.sourceCurrency,
-      sourceAmountMinor,
-      rate,
-      commissionPercent,
-      commissionMinor,
-      commissionLiability: commissionLiability || undefined,
-      details,
-      postedAt
-    });
+    state.ledger.unshift(
+      {
+        journal,
+        entryId,
+        actorLedgerNumber,
+        source: "JOURNAL",
+        account: `${actor.name} ACTOR_CLEARING`,
+        direction: "Debit",
+        currency: destinationCurrency,
+        amountMinor,
+        sourceCurrency: input.sourceCurrency,
+        sourceAmountMinor,
+        rate,
+        commissionPercent,
+        commissionMinor,
+        commissionLiability: commissionLiability || undefined,
+        details,
+        postedAt
+      },
+      {
+        journal,
+        entryId,
+        source: "JOURNAL_BALANCING",
+        account: "MASTER_JOURNAL_CLEARING",
+        direction: "Credit",
+        currency: destinationCurrency,
+        amountMinor,
+        details,
+        postedAt
+      }
+    );
     if (commissionMinor > 0) {
       const commissionRouting = commissionLedgerRouting(state, commissionLiability || "Sender", "Master", actor.name, true);
       state.ledger.unshift(

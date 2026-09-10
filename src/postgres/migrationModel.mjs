@@ -448,6 +448,22 @@ export function unbalancedJournals(manifest) {
     .map((row) => ({ workspaceId: workspace.workspaceId, ...row })));
 }
 
+export function legacyJournalImbalanceBaselines(manifest) {
+  return unbalancedJournals(manifest)
+    .map((row) => ({
+      workspaceId: String(row.workspaceId || ""),
+      journalEntryKey: String(row.journalEntryKey || "").startsWith("journal:")
+        ? String(row.journalEntryKey)
+        : `journal:${String(row.journalEntryKey || "")}`,
+      journal: stringValue(row.journal),
+      currency: stringValue(row.currency),
+      differenceMinor: String(row.differenceMinor || 0),
+    }))
+    .sort((left, right) => [left.workspaceId, left.journalEntryKey, left.currency]
+      .join("\u0000")
+      .localeCompare([right.workspaceId, right.journalEntryKey, right.currency].join("\u0000")));
+}
+
 export function assertMatchingMigrationManifests(expected, actual) {
   if (sha256Json(expected) === sha256Json(actual)) return;
   throw new Error("PostgreSQL reconciliation does not match the source JSON manifest.");

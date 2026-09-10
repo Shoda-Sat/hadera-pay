@@ -36,9 +36,6 @@ const prepared = prepareDatabaseImport(database);
 const reconstructed = reconstructPreparedDatabase(prepared, { clone: false });
 assertMatchingMigrationManifests(prepared.manifest, buildMigrationManifest(reconstructed));
 const badJournals = unbalancedJournals(prepared.manifest);
-if (badJournals.length) {
-  throw new Error(`Source backup contains ${badJournals.length} unbalanced journal/currency group(s); import was blocked.`);
-}
 
 const counts = prepared.workspaces.reduce((summary, workspace) => {
   summary.actors += workspace.actors.length;
@@ -57,8 +54,16 @@ console.log(JSON.stringify({
   sourceFileSha256,
   databaseSha256: prepared.sourceSha256,
   workspaceCount: prepared.workspaces.length,
+  legacyUnbalancedJournalGroups: badJournals.length,
   counts,
 }, null, 2));
+
+if (badJournals.length) {
+  console.warn(
+    `Preserving ${badJournals.length} existing unbalanced journal/currency group(s) as immutable legacy reference baselines. `
+    + "No ledger line or balance will be changed; new or changed imbalances remain blocked."
+  );
+}
 
 if (!dryRun) {
   try {
@@ -68,6 +73,7 @@ if (!dryRun) {
       return verifyImportedDatabase(client, prepared.manifest, { sourceFileSha256 });
     });
     console.log(`Import and reconciliation passed: ${result.manifestSha256}`);
+    console.log(`Immutable legacy journal imbalance baselines: ${result.legacyUnbalancedJournalGroups}`);
   } finally {
     await closePostgresPool();
   }

@@ -455,14 +455,14 @@ async function persistWorkspace(client, workspace, expectedRevision, collections
 
   const validateLedger = !Array.isArray(collections) || !collections.length || collections.includes("ledger");
   const unbalanced = validateLedger ? await client.query(
-    `SELECT journal, currency, difference_minor
-       FROM hp_journal_balances
-      WHERE workspace_id = $1 AND difference_minor <> 0
+    `SELECT journal, currency, expected_difference_minor, actual_difference_minor, violation_reason
+       FROM hp_journal_balance_violations
+      WHERE workspace_id = $1
       ORDER BY journal, currency`,
     [workspace.workspaceId]
   ) : { rowCount: 0 };
   if (unbalanced.rowCount) {
-    throw new Error(`Workspace ${workspace.workspaceId} contains ${unbalanced.rowCount} unbalanced journal/currency group(s).`);
+    throw new Error(`Workspace ${workspace.workspaceId} contains ${unbalanced.rowCount} new or changed journal imbalance(s).`);
   }
 }
 

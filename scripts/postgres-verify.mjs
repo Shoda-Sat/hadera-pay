@@ -34,6 +34,7 @@ try {
       manifestSha256: result.manifestSha256,
       sourceCompared: Boolean(sourcePath),
       workspaceCount: result.manifest.workspaceCount,
+      legacyUnbalancedJournalGroups: result.legacyUnbalancedJournalGroups,
     }, null, 2));
   } finally {
     client.release();

@@ -1,6 +1,8 @@
 import {
   assertMatchingMigrationManifests,
   buildMigrationManifest,
+  canonicalJson,
+  legacyJournalImbalanceBaselines,
   reconstructPreparedDatabase,
   sha256Json,
 } from "./migrationModel.mjs";
@@ -196,6 +198,24 @@ export async function importPreparedDatabase(client, prepared, migrationId, opti
      VALUES ($1, $2, $3, $4::jsonb, $5)`,
     [cleanMigrationId, sourceFileSha256, prepared.sourceSha256, jsonParameter(prepared.manifest), prepared.manifestSha256]
   );
+
+  const legacyImbalances = legacyJournalImbalanceBaselines(prepared.manifest);
+  await insertRows(
+    client,
+    "hp_legacy_journal_imbalance_baselines",
+    ["workspace_id", "journal_entry_key", "journal", "currency", "difference_minor", "migration_id", "source_file_sha256"],
+    legacyImbalances,
+    (row) => [
+      row.workspaceId,
+      row.journalEntryKey,
+      row.journal || null,
+      row.currency,
+      row.differenceMinor,
+      cleanMigrationId,
+      sourceFileSha256,
+    ]
+  );
+  return { legacyUnbalancedJournalGroups: legacyImbalances.length };
 }
 
 async function payloadRows(client, table, workspaceIds = []) {
@@ -323,11 +343,29 @@ export async function verifyImportedDatabase(client, expectedManifest = null, op
   if (expectedSourceFileSha256 && expectedSourceFileSha256 !== String(storedResult.rows[0].source_file_sha256 || "").trim()) {
     throw new Error("The supplied source backup file SHA-256 does not match the imported backup evidence.");
   }
-  const badJournals = await client.query(
-    "SELECT workspace_id, journal, currency, difference_minor FROM hp_journal_balances WHERE difference_minor <> 0 ORDER BY workspace_id, journal, currency"
+  const legacyBaselineResult = await client.query(
+    `SELECT workspace_id, journal_entry_key, journal, currency, difference_minor
+       FROM hp_legacy_journal_imbalance_baselines
+      ORDER BY workspace_id, journal_entry_key, currency`
   );
-  if (badJournals.rowCount) {
-    throw new Error(`PostgreSQL contains ${badJournals.rowCount} unbalanced journal/currency group(s).`);
+  const expectedLegacyBaselines = legacyJournalImbalanceBaselines(storedManifest);
+  const actualLegacyBaselines = legacyBaselineResult.rows.map((row) => ({
+    workspaceId: String(row.workspace_id || ""),
+    journalEntryKey: String(row.journal_entry_key || ""),
+    journal: String(row.journal || ""),
+    currency: String(row.currency || "").trim(),
+    differenceMinor: String(row.difference_minor || 0),
+  }));
+  if (canonicalJson(actualLegacyBaselines) !== canonicalJson(expectedLegacyBaselines)) {
+    throw new Error("PostgreSQL legacy journal imbalance baselines do not match the imported source manifest.");
+  }
+  const journalViolations = await client.query(
+    `SELECT workspace_id, journal, currency, expected_difference_minor, actual_difference_minor, violation_reason
+       FROM hp_journal_balance_violations
+      ORDER BY workspace_id, journal, currency`
+  );
+  if (journalViolations.rowCount) {
+    throw new Error(`PostgreSQL contains ${journalViolations.rowCount} new or changed journal imbalance(s).`);
   }
   return {
     migrationId: storedResult.rows[0].migration_id,
@@ -335,5 +373,6 @@ export async function verifyImportedDatabase(client, expectedManifest = null, op
     databaseSha256: storedDatabaseSha256,
     manifest: actualManifest,
     manifestSha256: sha256Json(actualManifest),
+    legacyUnbalancedJournalGroups: actualLegacyBaselines.length,
   };
 }

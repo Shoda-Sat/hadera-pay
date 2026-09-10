@@ -6,12 +6,14 @@ import {
   assertMatchingMigrationManifests,
   buildMigrationManifest,
   canonicalJson,
+  legacyJournalImbalanceBaselines,
   prepareDatabaseImport,
   prepareRuntimeWorkspace,
   reconstructPreparedDatabase,
   sha256Json,
   unbalancedJournals,
 } from "../src/postgres/migrationModel.mjs";
+import { importPreparedDatabase } from "../src/postgres/importer.mjs";
 import {
   assertPostgresCutoverAuthorized,
   selectedPersistenceBackend,
@@ -106,6 +108,53 @@ test("PostgreSQL manifest identifies an unbalanced journal without changing its 
   assert.equal(reconstructPreparedDatabase(prepared).appStates["WS-1"].ledger[1].amountMinor, 9999);
 });
 
+test("legacy journal imbalance baselines preserve source evidence without changing balances", () => {
+  const source = balancedDatabase();
+  source.appStates["WS-1"].ledger.splice(1, 1);
+  const prepared = prepareDatabaseImport(source);
+  const baselines = legacyJournalImbalanceBaselines(prepared.manifest);
+
+  assert.deepEqual(baselines, [{
+    workspaceId: "WS-1",
+    journalEntryKey: baselines[0].journalEntryKey,
+    journal: "JRN-12",
+    currency: "USD",
+    differenceMinor: "10000",
+  }]);
+  assert.match(baselines[0].journalEntryKey, /^journal:[a-f0-9]{64}$/);
+  assert.deepEqual(reconstructPreparedDatabase(prepared), source);
+});
+
+test("PostgreSQL import records legacy imbalance evidence after the source manifest", async () => {
+  const source = balancedDatabase();
+  source.appStates["WS-1"].ledger.splice(1, 1);
+  const prepared = prepareDatabaseImport(source);
+  const calls = [];
+  const client = {
+    async query(sql) {
+      const statement = String(sql);
+      calls.push(statement);
+      if (statement.includes("SELECT migration_id FROM hp_migration_imports")) {
+        return { rowCount: 0, rows: [] };
+      }
+      if (statement.includes("AS imports") && statement.includes("AS workspaces")) {
+        return { rowCount: 1, rows: [{ imports: "0", workspaces: "0", metadata: "0" }] };
+      }
+      return { rowCount: 1, rows: [] };
+    },
+  };
+
+  const result = await importPreparedDatabase(client, prepared, "production-test-1", {
+    sourceFileSha256: "a".repeat(64),
+  });
+  const manifestInsert = calls.findIndex((sql) => sql.includes("INSERT INTO hp_migration_imports"));
+  const baselineInsert = calls.findIndex((sql) => sql.includes("INSERT INTO hp_legacy_journal_imbalance_baselines"));
+
+  assert.equal(result.legacyUnbalancedJournalGroups, 1);
+  assert.ok(manifestInsert >= 0);
+  assert.ok(baselineInsert > manifestInsert, "The referenced migration evidence must exist before immutable baselines are inserted.");
+});
+
 test("PostgreSQL cutover requires both the backend choice and reconciliation confirmation", () => {
   const previousBackend = process.env.PERSISTENCE_BACKEND;
   const previousConfirmation = process.env.POSTGRES_CUTOVER_CONFIRMED;
@@ -132,6 +181,7 @@ test("PostgreSQL schema makes closed reports immutable and keeps transactional i
   const runtimeMigration = await readFile(new URL("../sql/migrations/003_postgres_runtime.sql", import.meta.url), "utf8");
   const searchMigration = await readFile(new URL("../sql/migrations/004_workspace_search_indexes.sql", import.meta.url), "utf8");
   const rowPersistenceMigration = await readFile(new URL("../sql/migrations/005_stable_runtime_ordinals.sql", import.meta.url), "utf8");
+  const legacyJournalMigration = await readFile(new URL("../sql/migrations/006_legacy_journal_imbalance_baselines.sql", import.meta.url), "utf8");
   assert.match(sql, /CREATE TABLE hp_closed_reports/);
   assert.match(sql, /BEFORE UPDATE OR DELETE ON hp_closed_reports/);
   assert.match(sql, /CREATE TABLE hp_ledger_lines/);
@@ -149,13 +199,18 @@ test("PostgreSQL schema makes closed reports immutable and keeps transactional i
   assert.match(rowPersistenceMigration, /CREATE TABLE hp_chat_messages/);
   assert.match(rowPersistenceMigration, /settings = settings - 'chatConversations'/);
   assert.match(rowPersistenceMigration, /DROP CONSTRAINT IF EXISTS hp_orders_ordinal_check/);
+  assert.match(legacyJournalMigration, /CREATE TABLE hp_legacy_journal_imbalance_baselines/);
+  assert.match(legacyJournalMigration, /legacy journal imbalance baselines are immutable audit evidence/);
+  assert.match(legacyJournalMigration, /CREATE VIEW hp_journal_balance_violations/);
+  assert.match(legacyJournalMigration, /new-unbalanced-journal/);
 });
 
 test("the live server wires PostgreSQL through the guarded runtime repository", async () => {
-  const [server, runtimeStore, importer] = await Promise.all([
+  const [server, runtimeStore, importer, importScript] = await Promise.all([
     readFile(new URL("../server.mjs", import.meta.url), "utf8"),
     readFile(new URL("../src/postgres/runtimeStore.mjs", import.meta.url), "utf8"),
     readFile(new URL("../src/postgres/importer.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/postgres-import.mjs", import.meta.url), "utf8"),
   ]);
   assert.match(server, /assertPostgresCutoverAuthorized\(\)/);
   assert.match(server, /await applyPostgresMigrations\(\)/);
@@ -172,6 +227,7 @@ test("the live server wires PostgreSQL through the guarded runtime repository", 
   assert.match(runtimeStore, /'searchReportKey', c\.record_key/);
   assert.match(runtimeStore, /reconcilePreparedPayloadRows/);
   assert.match(runtimeStore, /workspaceCollections\[workspaceId\]/);
+  assert.match(runtimeStore, /FROM hp_journal_balance_violations/);
   assert.doesNotMatch(runtimeStore, /DELETE FROM \$\{table\} WHERE workspace_id = \$1/);
   assert.match(server, /collections: \["orders", "receivables", "savedCustomers"\]/);
   assert.match(server, /collections: \["orders", "receivables", "chatConversations"\]/);
@@ -183,6 +239,8 @@ test("the live server wires PostgreSQL through the guarded runtime repository", 
   assert.match(runtimeStore, /ORDER BY message\.ordinal DESC/);
   assert.match(importer, /const includeChatMessages = options\.includeChatMessages !== false/);
   assert.match(importer, /includeChatMessages \? chatMessageRows/);
+  assert.match(importScript, /immutable legacy reference baselines/);
+  assert.doesNotMatch(importScript, /import was blocked/);
 });
 
 test("closed report summaries omit transaction payloads and immutable rows can only be appended", () => {
